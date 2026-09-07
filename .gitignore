@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+pytest-cache-files-*/
+.deps/
+.tmp/
+.wheels/
+vendor/
+
+# Local data / env
+*.db
+*.sqlite3
+.env
+snapshots/
+
+# Node / Next.js
+node_modules/
+.pnpm-store/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+.npm-cache/
+
+# Misc
+.DS_Store
+*.log
+
+# Harness / 工具链产物（非项目代码）
+.tools/
+.arkcli-install/
+.dsh-test/
+ark-plan-api-*.tgz
+dsh-ark-plugin-install.*
+.ark-examples/
+
+# 个人信息与本地便捷脚本（不属于项目代码，不入库）
+resume/
+backend/run_dev.ps1
+web/run_web.ps1
+free_port.ps1
