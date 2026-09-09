@@ -22,7 +22,8 @@ cd ..\backend; python tools/e2e_smoke.py
 # 4. 并发压测（本机容量验证）
 python tools/load_test.py --concurrency 20 --requests 500
 
-# 5. 密钥扫描（维护者本地脚本，不入库；任何命中即 BLOCKED）
+# 5. 密钥扫描（退出码必须为 0）
+# 5. (maintainer-local secret scan; blocked on any hit)
 
 # 6. 独立 Reviewer 审查（APPROVED / APPROVED_WITH_COMMENTS / BLOCKED）
 ```

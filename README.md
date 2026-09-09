@@ -119,8 +119,6 @@ web/
   lib/            # API 客户端与触发词
 skills/           # 开发工作流沉淀（数据校验 / 参数归一化 / 端到端验证）
 RAG.md            # RAG 子系统设计与运维文档
-RAG_TECH_SELECTION.md  # RAG 技术选型方案（每环节选型依据与实测数据）
-CHANGES.md        # 版本更新说明
 ```
 
 ## 设计原则
