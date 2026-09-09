@@ -31,6 +31,7 @@ from app.retrieval.config import (
     CHUNK_SIZE,
     EMBEDDING_BASE_URL,
     EMBEDDING_MODEL,
+    HYDE_ENABLED,
     MAX_CHUNKS,
     MILVUS_COLLECTION,
     MILVUS_DIM,
@@ -42,6 +43,9 @@ from app.retrieval.config import (
     RERANK_PROVIDER,
     RETRIEVAL_BACKEND,
     RRF_K,
+    RRF_WEIGHT_DENSE,
+    RRF_WEIGHT_SPARSE,
+    TOKENIZER,
 )
 
 _lock = threading.Lock()
@@ -155,6 +159,7 @@ def _invoke(db: Session, query: str, filters: dict | None, top_k: int) -> dict:
         "duration_ms": duration_ms,
         "result_count": len(state.get("results") or []),
         "resolved_series": state.get("resolved_series") or [],
+        "query_type": state.get("query_type") or "",
         "stages": state.get("stages") or [],
         "warnings": state.get("warnings") or [],
         "dense": get_dense_backend() is not None,
@@ -266,8 +271,11 @@ def get_status(db: Session | None = None) -> dict:
         "strategy": {
             "chunk_size": CHUNK_SIZE,
             "chunk_overlap": CHUNK_OVERLAP,
+            "tokenizer": TOKENIZER,
             "recall_multiplier": RECALL_MULTIPLIER,
             "rrf_k": RRF_K,
+            "rrf_weights": [RRF_WEIGHT_SPARSE, RRF_WEIGHT_DENSE],
+            "hyde": HYDE_ENABLED,
             "max_chunks": MAX_CHUNKS,
         },
         "runs_logged": len(_run_log),

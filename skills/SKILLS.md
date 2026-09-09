@@ -3,7 +3,7 @@
 采用「搜寻 + 沉淀」双机制：社区 skill 经验收后安装进本目录；每个阶段结束时由开发
 Agent 沉淀可复用工作流。每条 skill 记录用途、来源、适用阶段和最后验证时间。
 
-约束：用于用户侧 Agent 的 skill 必须通过 citation_verifier 与 safety_guard
+约束（§14.1）：用于用户侧 Agent 的 skill 必须通过 citation_verifier 与 safety_guard
 校验；skill 内不得内嵌车辆事实（事实一律来自数据库与工具返回值）。
 
 | 名称 | 用途 | 来源 | 适用阶段 | 最后验证 |

@@ -16,6 +16,7 @@ vendor/
 *.sqlite3
 .env
 snapshots/
+.zcode/
 
 # Node / Next.js
 node_modules/
@@ -43,3 +44,6 @@ resume/
 backend/run_dev.ps1
 web/run_web.ps1
 free_port.ps1
+
+# embedding 本地向量缓存（断点续跑，体积大不入库）
+backend/.embed_cache.json*

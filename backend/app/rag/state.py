@@ -32,6 +32,9 @@ class RagState(TypedDict, total=False):
     # analyze 输出：实体增强查询 + 归一化过滤条件
     entity_query: str
     resolved_series: list[str]
+    # 优化④⑤：查询意图（parameter|recommend|semantic|compare）与同义扩展后的检索串
+    query_type: str
+    search_query: str
     # 多路召回与融合（sparse/dense 两分支并行，各写各键）
     sparse_hits: list[SearchResult]
     dense_hits: list[SearchResult]

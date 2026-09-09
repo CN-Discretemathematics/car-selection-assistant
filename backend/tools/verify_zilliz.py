@@ -34,6 +34,8 @@ from app.retrieval.zilliz import ZillizRestRetriever  # noqa: E402
 class FakeEmbedder:
     """确定性伪向量（维度与集合一致），仅用于验证 Zilliz 集群连通性。"""
 
+    model = "fake-embedder"
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         return [[(hash(t) % 1000) / 1000.0 for _ in range(MILVUS_DIM)] for t in texts]
 

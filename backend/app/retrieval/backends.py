@@ -8,7 +8,54 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from importlib import resources
 from typing import Any, Protocol, runtime_checkable
+
+# ── 分词（优化③：jieba 中文整词 + 车圈领域词表；不可用时 CJK 二元组兜底）────────
+_STATIC_WORDS: tuple[str, ...] = tuple(
+    line.strip()
+    for line in resources.files("app.retrieval").joinpath("domain_words.txt").read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+)
+# 运行期注册词（车系/品牌展示名，ingest 时注入）：专名整词命中显著提升 IDF 精度
+_DYNAMIC_WORDS: set[str] = set()
+_JIEBA: Any = False  # False=未尝试；None=已尝试但不可用；模块对象=可用
+
+
+def register_tokens(words: list[str] | set[str]) -> None:
+    """注册领域动态词（车系/品牌名等专名），索引构建前调用（优化③）。
+
+    jieba 已加载时同步 add_word；未加载时仅记录（fallback 二元组分词无需词典）。
+    """
+    for w in words:
+        w = (w or "").strip()
+        if not w:
+            continue
+        _DYNAMIC_WORDS.add(w)
+        jieba_mod = _get_jieba()
+        if jieba_mod is not None:
+            jieba_mod.add_word(w, freq=10_000_000)
+
+
+def _get_jieba():
+    """懒加载 jieba；不可用时返回 None（tokenize 自动回退二元组，稀疏路不中断）。"""
+    global _JIEBA
+    if _JIEBA is False:
+        try:
+            import jieba
+
+            jieba.setLogLevel(60)
+            for w in _STATIC_WORDS:
+                jieba.add_word(w, freq=1_000_000)
+            for w in _DYNAMIC_WORDS:
+                jieba.add_word(w, freq=10_000_000)
+            _JIEBA = jieba
+        except ImportError:
+            _JIEBA = None
+    return _JIEBA
+
+
+from app.retrieval.config import TOKENIZER
 
 _WORD_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -49,18 +96,33 @@ class SearchResult:
 
 
 def tokenize(text: str) -> list[str]:
-    """中英文混合分词：英文/数字词元 + 汉字二元组（BM25 与稀疏检索共用）。"""
+    """中英文混合分词：英文/数字词元 + 中文词（口径由 RETRIEVAL_TOKENIZER 决定，优化③）。
+
+    - bigram（默认，A/B 实测最优）：汉字二元组——对词表不匹配天然鲁棒；
+    - jieba：整词（领域词表 + 动态专名），精度高但召回受词表匹配限制；
+    - hybrid：整词 + 二元组。
+    索引与查询共用同一函数——分词口径一致是 BM25 召回的前提。
+    """
     tokens: list[str] = []
     for m in _WORD_RE.finditer(text):
         tokens.append(m.group(0).lower())
-    cjk_run: list[str] = []
-    for ch in text:
-        if _CJK_RE.match(ch):
-            cjk_run.append(ch)
-        else:
-            cjk_run = []
-        if len(cjk_run) >= 2:
-            tokens.append("".join(cjk_run[-2:]))
+    mode = TOKENIZER if TOKENIZER in ("bigram", "jieba", "hybrid") else "bigram"
+    jieba_mod = _get_jieba() if mode in ("jieba", "hybrid") else None
+    if jieba_mod is not None:
+        # 只把 CJK 连续段交给 jieba（英文/数字已由 _WORD_RE 覆盖，避免重复计数）
+        for run in re.findall(r"[\u4e00-\u9fff]+", text):
+            for w in jieba_mod.lcut(run):
+                if len(w) >= 2 and _CJK_RE.match(w):
+                    tokens.append(w)
+    if jieba_mod is None or mode == "hybrid":
+        cjk_run: list[str] = []
+        for ch in text:
+            if _CJK_RE.match(ch):
+                cjk_run.append(ch)
+            else:
+                cjk_run = []
+            if len(cjk_run) >= 2:
+                tokens.append("".join(cjk_run[-2:]))
     return tokens
 
 
@@ -135,6 +197,11 @@ def _match_filters(chunk: SearchChunk, filters: dict[str, Any]) -> bool:
             if isinstance(energy_types, str):
                 energy_types = [energy_types]
             if value not in energy_types:
+                return False
+        elif key in chunk.extra:
+            # extra 携带的元数据（status/price_cny/body_type 等）：切片未携带该键时
+            # 不因过滤被误杀（系列切片无 status，但描述的就是当前在售车系）
+            if chunk.extra.get(key) != value:
                 return False
         elif getattr(chunk, key, None) != value:
             return False

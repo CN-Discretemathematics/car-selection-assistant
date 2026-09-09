@@ -1,7 +1,7 @@
 # RAG 设计与运维（LangGraph 版）
 
-> 本文是 RAG 子系统的实现级文档：架构、策略选型依据、评估方法、可视化与运维入口。
-> 全局原则：事实只来自数据库、密钥不落仓库、本地无云依赖可运行。
+> 本文是 `` §16 的实现级展开：架构、策略选型依据、评估方法、可视化与运维入口。
+> 权威约束（事实只来自数据库、密钥不落仓库、本地无云依赖可运行）
 
 ## 1. 总览
 
@@ -14,7 +14,7 @@ RAG 编排基于 **LangGraph**（`StateGraph`），拆成两条流水线，代�
 
 召回后端与向量库客户端保留在 `backend/app/retrieval/`（`backends.py` BM25、`zilliz.py` Milvus/Zilliz REST + OpenAI 兼容 embedding）。`app/rag/service.py` 是唯一门面：`search()` / `try_query()` / `run_reindex()` / `get_status()` / `recent_runs()` / `graph_spec()`。
 
-依赖：`langgraph>=1.2`（`requirements.txt`；沙箱环境经 `tools/fetch_wheels.py` vendor 化，含 langchain-core / langsmith / langgraph-checkpoint 等完整依赖树）。
+依赖：`langgraph>=1.2` 与 `jieba>=0.42`（`requirements.txt`；开发环境经 `pip install --target vendor` vendor 化，含 langchain-core / langsmith / langgraph-checkpoint 等完整依赖树）。
 
 ## 2. 查询流水线
 
@@ -48,14 +48,23 @@ graph TD;
 各节点职责与主流策略对照：
 
 1. **analyze（查询理解）**：用 `app/catalog/series_index.py` 的名称索引（车系名/品牌+车系名/别名，归一化子串匹配、最长优先去重）解析消息中的真实车系；生成实体增强查询（别名 → 规范名）与元数据过滤（单车系自动加 `series_id`）。这是「query understanding + metadata extraction」的确定性实现，不依赖 LLM，可复现。空查询在此直接短路到 END。
+   - **查询意图分流（优化④）**：确定性启发式输出 `query_type`（`parameter`：参数词+车系实体；`compare`：对比词；其余 `semantic`）——参数查询走稀疏快路（稠密路空转跳过，省 embedding 调用与云端延迟）；
+   - **领域同义扩展（优化⑥）**：`synonyms.py` 词典把口语/诉求词追加为证据词（「省油」→ 馈电油耗/综合油耗），只追加不改写。
 2. **recall_sparse ∥ recall_dense（并行多路召回）**：LangGraph 条件边扇出两个分支并行召回，每路取 `top_k × RETRIEVAL_RECALL_MULTIPLIER`（默认 6，下限 20、上限 100）。
-   - sparse：进程内 Okapi BM25（k1=1.5, b=0.75），中英文混合分词（英文/数字词元 + 汉字二元组），始终可用；
-   - dense：Zilliz Cloud REST v2 向量检索（cosine，autoindex），`RETRIEVAL_BACKEND=milvus` 且 URI/Token 齐备时启用；未配置空转、调用失败降级为纯稀疏并记 warning（原则 7）。
-3. **fuse（RRF 融合）**：Reciprocal Rank Fusion（k=60，业界默认）。两路分数量纲不可比（BM25 分 vs 余弦距离），RRF 只用名次、免调参，是多路融合的标准做法（Milvus WeightedRanker/RRF、Elasticsearch RRF 同思路）。按 `chunk_id` 去重（Zilliz meta 存原始 chunk_id；旧集合回退文本哈希），再按文本兜底去重。
-4. **rerank（精排）**：可插拔重排器（`rerank.py`）：
-   - `CrossEncoderReranker`（`RERANK_PROVIDER=api`）：Cross-Encoder 重排服务，兼容硅基流动（BAAI/bge-reranker-v2-m3）/ Jina / Cohere 的 `POST {base}/rerank` 协议；返回绝对相关分；
-   - `LexicalReranker`（默认）：查询-切片词元重叠加权（复用 BM25 的 tokenize，加分 `min(重叠×0.05, 0.25)`），零外部依赖，缓解「语义近但实体错」噪声；
-   - API 重排失败自动回退 lexical 并记 warning，检索不中断。
+   - sparse：进程内 Okapi BM25（k1=1.5, b=0.75），中文分词口径可配（`RETRIEVAL_TOKENIZER`：**bigram**（默认，A/B 实测本语料最优）/ jieba 整词 / hybrid；jieba 附车圈领域词表 + 运行期注册车系专名）；
+   - dense：Zilliz Cloud REST v2 向量检索（cosine，autoindex），`RETRIEVAL_BACKEND=milvus` 且 URI/Token 齐备时启用；未配置空转、调用失败降级为纯稀疏并记 warning（原则 7）；
+   - **HyDE（优化⑥，可选）**：`RETRIEVAL_HYDE` 开启时，semantic 查询由 LLM 生成假设性证据文本替代原查询做向量召回（仅稠密路，+1 次 LLM 调用，失败静默回退）。
+3. **fuse（加权 RRF 融合）**：Reciprocal Rank Fusion（k=60，业界默认），路权重按 `query_type` 取权重组（优化⑤：parameter=0.7/0.3、recommend=0.5/0.5、semantic=0.4/0.6、compare=0.6/0.4，基准可用 `RETRIEVAL_RRF_WEIGHT_*` 调整）——参数查询键值模板强区分偏稀疏，语义查询词面不匹配多偏稠密。两路分数量纲不可比，RRF 只用名次。按 `chunk_id` 去重（Zilliz meta 存原始 chunk_id；旧集合回退文本哈希），再按文本兜底去重。
+4. **rerank（精排，条件启用）**：可插拔重排器（`rerank.py`），**按查询类型路由**——
+   parameter/compare（实体锚定，BM25 融合序已近最优）保持融合序不重排；semantic/recommend
+   才调用重排器（v13 实测收敛，520 题三配置对照见 §4.2）：
+   - `CrossEncoderReranker`（`RERANK_PROVIDER=api`）：Cross-Encoder 重排服务，协议自适应——
+     阿里百炼 qwen3.7-text-rerank（OpenAI 兼容与原生 text-rerank 两种路径自动探测）、
+     硅基流动 bge 系列 / Jina / Cohere 的通用 /rerank 协议；返回绝对相关分；
+     重排密钥未单独配置时自动回退 embedding 密钥（同账号免重复配置）；
+   - `LexicalReranker`（`RERANK_PROVIDER=lexical`）：查询-切片词元重叠加权（复用 BM25 的 tokenize，
+     加分 `min(重叠×0.05, 0.25)`），零外部依赖；
+   - `PassThroughReranker`（空/`none`）：保持融合序；重排 API 失败也自动回退并记 warning，检索不中断。
 5. **grade（证据把关）**：corrective-RAG 思路的轻量实现——丢弃空文本证据；重排分为绝对相关分（Cross-Encoder）时应用 `RETRIEVAL_RELEVANCE_THRESHOLD` 阈值过滤低相关证据。 lexical 分是相对名次分，不做阈值化。
 
 每次运行记录阶段轨迹（节点、耗时、输入/输出数量、detail、warnings）到进程内环形缓冲（`RAG_RUN_LOG_SIZE`，默认 50），供管理后台「运行轨迹」可视化。
@@ -79,23 +88,23 @@ graph TD;
 	classDef last fill:#bfb6fc
 ```
 
-- **load**：SQL 装载原料——活跃车系、按车系分层取样的在售 SKU 事实（`row_number() over (partition by series)`，核心参数优先级分组，**过采样 ×5 + (车系,键,值,单位) 去重后再截配额**——同键同值跨款重复行不再吃光配额，每车系入索引 `RETRIEVAL_FACTS_PER_SERIES` 条**去重后**事实）、车系画像聚合（价格区间/在售数/最新月销量）。
+- **load**：SQL 装载原料——活跃车系、**按款型分层取样的在售 SKU 事实**（`row_number() over (partition by variant)`，核心参数优先级分组，**过采样 ×5 + (款型,键,值,单位) 去重后再截配额**，每款型入索引 `RETRIEVAL_FACTS_PER_VARIANT` 条**去重后**事实）、车系画像聚合（价格区间/在售数/最新月销量）、款型当前指导价。
 - **chunk**：构造四类切片（元数据符合 §16.3）：
   | kind | chunk_id | 内容 |
   | --- | --- | --- |
   | `series_intro` | `series-{id}` | 品牌+车系+定位+能源类型 |
   | `series_summary` | `summary-{id}` | 车系级一句话画像：定位/指导价/核心参数/在售数/月销量（车系级问题的最优命中目标） |
-  | `spec_fact` | `fact-{id}` | 结构化事实：全系统一值 → 车系级表述（不带款型名），同键多值 → 保留款型名逐款切片；噪声值「暂无/优惠信息」跳过；单位去重 |
+  | `variant_spec` | `variant-{id}#{i}` | **款型级合并切片（优化②）**：一个在售款型的核心事实按优先级合入 1~N 片（头部=品牌+车系+款型名+能源+指导价，任意切片独立可读）；metadata 全量携带 `series_id/variant_id/energy_type/price_cny/status/body_type`——检索命中即对齐 SKU，证据归属映射消失；停售款型不进索引 |
   | `source_document` | `doc-{id}#{i}` | 来源文档正文，**递归字符切分**（`chunking.py`：段落→行→中文句读→英文句读→空格→字符级硬切；`CHUNK_SIZE=500`、`CHUNK_OVERLAP=64`，重叠窗口防止句界证据割裂——LangChain RecursiveCharacterTextSplitter 同款语义） |
-- **index**：写入目标后端（`target=sparse|dense`；dense 走批量 embedding + Zilliz upsert，幂等重建集合，限流自动指数退避）。`build_chunks()` 复用同一条图的 load+chunk 两节点（`target=""` 时 index 被条件边跳过）。
+- **index**：写入目标后端（`target=sparse|dense`；dense 走批量 embedding + Zilliz upsert，幂等重建集合，限流自动指数退避；meta 额外携带 `status/price_cny/body_type` 供检索期过滤下推）。`build_chunks()` 复用同一条图的 load+chunk 两节点（`target=""` 时 index 被条件边跳过）。索引构建前把车系/品牌展示名注册为分词专名（优化③）。
 
 索引新鲜度：开发模式（inmemory）按数据量快照自动重建；生产（milvus）稀疏索引进程首用构建、稠密索引显式重建（工具或管理后台），避免请求路径上的全量 embedding。
 
 ## 4. 评估（主流指标 + 黄金集）
 
-`tools/eval_rag.py`：黄金集来自 `tools/gen_eval_questions.py`（数据库真实品牌/车系/SKU 分层抽样，`anchors.series_id/variant_id` 即相关性判定，无人工标注成本）。
+`tools/eval_rag.py`：黄金集来自 `tools/gen_eval_questions.py`（数据库真实品牌/车系/SKU 分层抽样，`anchors.series_id/variant_id` 即相关性判定，无人工标注成本；**520 条、按查询类型四桶**——parameter/recommend/semantic/compare，报告带分桶指标）。
 
-- 指标：**HitRate@K、Recall@K、Precision@K、MRR、NDCG@K**（二元相关，IDCG 按相关集大小截断）。
+- 指标：**HitRate@K、Recall@K、Precision@K、MRR、NDCG@K**（二元相关，IDCG 按相关集大小截断）+ **分桶报告**（验收查询路由、定位各桶弱点）。
 - 策略对比（量化每个环节的边际收益）：
   - `sparse-nooverlap` vs `sparse` → **切分**（重叠窗口）收益；
   - `sparse` vs `dense` → **召回**路对比；
@@ -106,7 +115,8 @@ graph TD;
 
 ```powershell
 cd backend
-python tools/eval_rag.py --limit 60              # 本地：sparse 系策略 + pipeline
+python tools/gen_eval_questions.py --count 520   # 生成/更新分桶问题库
+python tools/eval_rag.py                          # 本地：sparse 系策略 + pipeline（520 题）
 python tools/eval_rag.py --with-dense            # 加测 dense/hybrid（产生 Zilliz/embedding 云端调用）
 ```
 
@@ -140,6 +150,45 @@ Agent 端到端评测（硬约束零违规 + 引用校验 + hit@k）仍由 `tool
 - pipeline 略低于裸 sparse 但 NDCG@10 更高——查询理解/重排优化的是整体排序质量与证据纯度，而非单点命中；
 - dense 单路耗时 ~0.5s/题（embedding + 云端检索），线上由并行召回掩盖（总延迟 ≈ max 而非 sum）。
 
+### 4.2 检索优化迭代（2026-09，520 题四桶基准）
+
+评测集扩为 **520 条、四桶**（recommend 246 / parameter 115 / semantic 80 / compare 79，
+`gen_eval_questions.py --count 520`），指标含 MRR / NDCG@10，报告带分桶表。
+迭代过程（`eval/ab-*.json`，均为纯稀疏 inmemory 口径，同基准可比）：
+
+| 版本 | 改动 | Hit@5 | MRR | 说明 |
+| --- | --- | --- | --- | --- |
+| v0 基线 | 单事实切片 + 二元组分词 + lexical 重排 | 0.6519 | 0.6337 | pipeline 0.6364——lexical 重排在部分查询上**挤出**相关片 |
+| v2 | **款型级合并切片 + 全量 metadata + 仅索引在售**（优化②） | **0.6718** | **0.6488** | 命中即对齐 SKU；+2.0pt Hit@5、+1.5pt MRR |
+| v3 | jieba 纯整词 | 0.6563 | 0.6421 | 词表不匹配（「纯电续航」vs「纯电续航里程」）召回损失 > 整词精度收益 |
+| v3b | jieba 整词 + 二元组 hybrid | 0.6674 | 0.6485 | 仍不及纯二元组 |
+| v4+ | 分词默认回退 bigram、jieba 转服务查询同义扩展（优化⑥）+ 意图分流（④）+ 加权 RRF（⑤） | 0.6718 | 0.6488 | pipeline 0.643——**重排层（lexical）是当前端到端短板** |
+| v5b | 接入阿里 qwen3.7-text-rerank（优化①，协议自适应） | 0.643* | 0.6342* | *百炼免费额度中途耗尽（AllocationQuota.FreeTierOnly），部分查询回退 lexical；绝对相关分区分度实测极佳（0.981 vs 0.0098） |
+| v6 | qwen3-rerank（独立额度）全量重排 | 0.6475* | 0.6393* | *重排跑通但整链仍低于裸稀疏——**分桶定位：损失不在重排** |
+| v7 | pipeline 完全跳过重排 | 0.643 | 0.6299 | 仍低于裸稀疏 ⇒ 元凶是 **同义扩展污染稀疏查询**（扩展词把其他车系同键切片拉进候选） |
+| v8 | 同义扩展只服务稠密路，稀疏路用 entity_query | 0.6452 | 0.6294 | 仍差 ⇒ 分桶继续定位：**compare 桶 1.0→0.835** |
+| v9 | 对比类不加单车系过滤 + 多实体不追加规范名 | 0.6452 | 0.632 | 分桶无变化 ⇒ 定位到 **「AMG GLB 35」被子串解析成「奔驰GLB」后误加 series_id 过滤**，整系证据被排除 |
+| **v9b** | **对比类查询不加自动 series_id 过滤（④修正）** | **0.6718** | **0.6554** | **追平裸稀疏 Hit@5，MRR +0.66pt、NDCG@10 +5.5pt（0.6082）**——analyze 层修正后全链路首次全面 ≥ 裸稀疏 |
+| v10 | v9b + qwen3-rerank | 0.6696 | 0.6552 | Cross-Encoder 在锚点口径中性偏负（+300s 延迟与 API 成本） |
+| v11 | **稠密索引款型级切片全量重建**（qwen3.7-text-embedding-flash 1024 维；embedding 流式 JSONL 向量缓存断点续跑（2C2G 低内存安全）、insert 100 行/批 + 504/408 瞬态退避重试随本轮落地） | dense 0.643 / hybrid **0.6741** | 0.6535 | dense 单路仍低于稀疏 2.9pt（实体型语料词面精确匹配主导），但 semantic 桶 MRR +68%（0.0488→0.0811）；hybrid 全局 +0.23pt、semantic 桶 Hit +2.4pt——稠密补语义洞、不替代稀疏 |
+| v12 | compare 归入稀疏快路（优化④扩展） | 0.6741 | 0.6674 | compare 桶 MRR 0.9557→0.9696、NDCG@10 0.7860→0.8013；耗时 −45s（dense 单路 compare 桶 0.873 vs sparse 1.0，语义近邻是纯噪声） |
+| **v13（终版）** | **重排按查询类型条件启用**：parameter/compare 保持融合序，semantic/recommend 才调用 qwen3.7 Cross-Encoder | **0.6763** | 0.6656 | **全面 ≥ 不重排（0.6718/0.6587）与全量重排（0.6741/0.6674）；Hit@5 历史最高；耗时 −34%、CE 调用 −43%**（`eval/eval-pipeline-final.json`） |
+
+结论与待办：
+- **已验证收益**：款型级切片（+2.0pt Hit@5）、analyze 层两处修正（对比类不加过滤、多实体不追加规范名）、
+  稠密双路混合（semantic/recommend 桶）与 v12/v13 的「实体锚定快路 + 条件重排」是真实增益；
+- **重排默认值按实测收敛（v13）**：`RERANK_PROVIDER=api` 配合 pipeline 内条件启用是生产推荐——
+  Cross-Encoder 的收益集中在 recommend 桶（+1.85pt Hit@5），实体锚定查询（parameter/compare，占 43%）
+  上中性偏负且白付 ~1s/题；纯稀疏部署或不想付重排成本可设 `RERANK_PROVIDER` 空；
+- **稠密索引已按款型级切片全量重建**（2026-09-08，12,078 条入 Zilliz）；重建链路两处加固：
+  embedding 本地缓存按 30s 节流落盘（`RETRIEVAL_EMBED_CACHE`）、insert 瞬态错误（504/408/超时）
+  线性退避重试——serverless 冷启动实测必触发，重试后全部成功；
+- 分桶评测证明了自己的价值：整体指标掩盖了「compare 桶 1.0→0.835」的结构性损失（v9）与
+  「重排在稠密入链后由负转正」的现象（v10→v11 对比），都靠分桶定位；
+- 待办：评测口径升级（recommend/semantic 桶改约束满足度判定，消除随机锚点下界失真）、
+  semantic 桶重排对照扩样（n=41 太小）、HyDE 与 `RETRIEVAL_RELEVANCE_THRESHOLD` 待语义桶
+  扩样后复验、来源文档正文入库后复测切分重叠收益。完整选型论证见根目录 `RAG_TECH_SELECTION.md`。
+
 ## 5. 流程管理可视化
 
 - **web 页面**：`/ops/rag`（`web/app/ops/rag/page.tsx`，管理凭据入口）
@@ -167,12 +216,13 @@ Agent 端到端评测（硬约束零违规 + 引用校验 + hit@k）仍由 `tool
 | `RETRIEVAL_BACKEND` | `inmemory` | `milvus` 时启用稠密召回路 |
 | `MILVUS_URI` / `MILVUS_TOKEN` / `MILVUS_COLLECTION` / `MILVUS_DIM` | - | Zilliz Cloud（生产经 KMS 注入） |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_API_KEY` / `EMBEDDING_DIMENSIONS` | - | OpenAI 兼容 `/v1/embeddings`（推荐阿里百炼 text-embedding-v3） |
+| `RETRIEVAL_EMBED_CACHE` | 空（关） | 稠密灌库流式 JSONL 向量缓存文件路径（如 `./.embed_cache.json`）：断点续跑、低内存 |
 | `RETRIEVAL_CHUNK_SIZE` / `RETRIEVAL_CHUNK_OVERLAP` | 500 / 64 | 递归切分参数（字符） |
 | `RETRIEVAL_RECALL_MULTIPLIER` | 6 | 每路召回 = top_k × N（20~100 截断） |
 | `RETRIEVAL_FACTS_PER_SERIES` | 40 | 每车系入索引的去重后事实条数（配合 ×5 过采样） |
 | `RETRIEVAL_MAX_CHUNKS` | 60000 | 全库切片上限 |
 | `RETRIEVAL_RRF_K` | 60 | RRF 平滑常数 |
-| `RERANK_PROVIDER` | 空（lexical） | `api` 启用 Cross-Encoder 重排 |
+| `RERANK_PROVIDER` | 空（lexical） | `api` 启用 Cross-Encoder（仅 semantic/recommend 查询实际调用，v13） |
 | `RERANK_BASE_URL` / `RERANK_MODEL` / `RERANK_API_KEY` / `RERANK_TIMEOUT_SECONDS` | - | 如硅基流动 `https://api.siliconflow.cn` + `BAAI/bge-reranker-v2-m3` |
 | `RETRIEVAL_RELEVANCE_THRESHOLD` | 0（关） | >0 时仅对 Cross-Encoder 绝对分生效 |
 | `RETRIEVAL_LEXICAL_BOOST` / `RETRIEVAL_LEXICAL_CAP` | 0.05 / 0.25 | lexical 重排加分步长/封顶 |

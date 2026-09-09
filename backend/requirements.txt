@@ -16,6 +16,8 @@ crcmod>=1.7
 pycryptodome>=3.20
 # RAG 编排（app/rag：LangGraph 查询/摄取流水线，配套 langchain-core、langsmith 自动引入）
 langgraph>=1.2,<2
+# 中文整词分词（BM25 稀疏路 + 车圈领域词表；缺失时自动回退字符二元组）
+jieba>=0.42
 # 测试
 pytest>=8.0
 fakeredis>=2.20

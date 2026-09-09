@@ -1,8 +1,9 @@
 """摄取流水线（LangGraph）：load → chunk → index。
 
 把数据库中的结构化事实与来源文档构建为检索切片并灌入召回后端：
-- load：SQL 装载原料（车系、分层取样的 SKU 事实、画像聚合数据）；
-- chunk：构造 SearchChunk（事实/摘要为原子切片；文档正文走递归切分 + 重叠）；
+- load：SQL 装载原料（车系、按款型分层的在售事实、画像聚合数据）；
+- chunk：款型级合并切片（一个款型的核心事实合入 1~N 片，metadata 全量携带）+
+  车系介绍/摘要切片 + 来源文档正文（递归切分 + 重叠）；
 - index：写入目标后端（sparse=进程内 BM25；dense=Zilliz 向量集合）。
 
 事实文本只来自数据库（SourceDocument.content_text / SpecFact / VehicleSeries），
@@ -30,8 +31,8 @@ from app.common.models import (
 )
 from app.rag.chunking import split_text
 from app.rag.state import IngestState, make_stage
-from app.retrieval.backends import SearchChunk
-from app.retrieval.config import FACTS_PER_SERIES, MAX_CHUNKS
+from app.retrieval.backends import SearchChunk, register_tokens
+from app.retrieval.config import CHUNK_SIZE, FACTS_PER_VARIANT, MAX_CHUNKS
 
 # 切片文本噪音：跳过值本身无信息量或纯导购噪声的事实行（评审 RAG-c）
 _SKIP_FACT_KEYS = {"优惠信息"}
@@ -74,10 +75,9 @@ def _load(state: IngestState) -> IngestState:
         .where(VehicleSeries.active_status == "active")
     ).all()
 
-    # SKU 事实按车系分层取样（评审 M9——此前无排序整体截断，后段车系完全不进索引）；
-    # 取样顺序按优先级（核心参数优先，评审 M-M9-1），同优先级按 id 稳定。
-    # 评审 M-R10：过采样 ×5 + (车系,键,值,单位) 去重后再截断配额——同键同值跨款
-    # 重复行（如 7 个款型的「轴距 3125」）不再吃光配额，高优先级分组才能真正入索引。
+    # SKU 事实按款型分层取样（优化②——切分改为款型级合并切片，取样粒度同步到款型）；
+    # 取样顺序按优先级（核心参数优先，M-M9-1），同优先级按 id 稳定，
+    # 每款型截断 FACTS_PER_VARIANT 条（过采样 ×5 供去重余量）。
     priority_case = case(
         *[
             (SpecFact.fact_key.in_(keys), idx)
@@ -90,7 +90,7 @@ def _load(state: IngestState) -> IngestState:
             SpecFact.id.label("fid"),
             func.row_number()
             .over(
-                partition_by=VehicleVariant.series_id,
+                partition_by=SpecFact.variant_id,
                 order_by=(priority_case, SpecFact.id),
             )
             .label("rn"),
@@ -105,22 +105,22 @@ def _load(state: IngestState) -> IngestState:
         .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
         .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
         .join(Brand, VehicleSeries.brand_id == Brand.id)
-        .where(fact_subq.c.rn <= FACTS_PER_SERIES * _OVERSAMPLE_FACTOR)
-        .order_by(VehicleVariant.series_id, fact_subq.c.rn)
+        .where(fact_subq.c.rn <= FACTS_PER_VARIANT * _OVERSAMPLE_FACTOR)
+        .order_by(VehicleVariant.series_id, VehicleVariant.id, fact_subq.c.rn)
     ).all()
 
-    # 去重 + 每车系配额截断（顺序已由 rn 保证：高优先级在前）
+    # 去重 + 每款型配额截断（顺序已由 rn 保证：高优先级在前）
     deduped_rows: list = []
     _seen: dict[int, set] = {}
     _count: dict[int, int] = {}
     for row in fact_rows:
-        fact, _variant, series, _brand = row
+        fact, variant, _series, _brand = row
         dedupe_key = (fact.fact_key, (fact.fact_value or "").strip(), fact.unit)
-        seen = _seen.setdefault(series.id, set())
-        if dedupe_key in seen or _count.get(series.id, 0) >= FACTS_PER_SERIES:
+        seen = _seen.setdefault(variant.id, set())
+        if dedupe_key in seen or _count.get(variant.id, 0) >= FACTS_PER_VARIANT:
             continue
         seen.add(dedupe_key)
-        _count[series.id] = _count.get(series.id, 0) + 1
+        _count[variant.id] = _count.get(variant.id, 0) + 1
         deduped_rows.append(row)
     fact_rows = deduped_rows
 
@@ -154,6 +154,17 @@ def _load(state: IngestState) -> IngestState:
         .group_by(VehicleVariant.series_id)
     ).all()
 
+    # 款型当前指导价（款型切片头用；优化②）
+    variant_price_rows = db.execute(
+        select(OfficialPrice.variant_id, OfficialPrice.price_cny)
+        .join(VehicleVariant, OfficialPrice.variant_id == VehicleVariant.id)
+        .where(
+            VehicleVariant.status == "on_sale",
+            OfficialPrice.effective_to.is_(None),
+            OfficialPrice.price_type == "official_msrp",
+        )
+    ).all()
+
     count_rows = db.execute(
         select(VehicleVariant.series_id, func.count())
         .where(VehicleVariant.status == "on_sale")
@@ -182,6 +193,7 @@ def _load(state: IngestState) -> IngestState:
         "fact_rows": fact_rows,
         "facts_by_series": facts_by_series,
         "price_by_series": {sid: (pmin, pmax) for sid, pmin, pmax in price_rows},
+        "price_by_variant": dict(variant_price_rows),
         "count_by_series": dict(count_rows),
         "sales_by_series": sales_by_series,
     }
@@ -192,26 +204,56 @@ def _load(state: IngestState) -> IngestState:
     }
 
 
-def _fact_chunk_text(
-    fact: SpecFact, variant: VehicleVariant, series: VehicleSeries, brand: Brand,
-    series_level: bool = False,
+def _variant_header(
+    variant: VehicleVariant, series: VehicleSeries, brand: Brand, price_cny: Any | None
 ) -> str:
-    # 展示名去重：车系名已含品牌前缀时不再重复（「北京 北京EU8」→「北京EU8」）
+    """款型切片头：品牌 车系 款型名（能源，指导价）——命中即对齐 SKU。"""
     head = f"{brand.name} {series.name}" if not series.name.startswith(brand.name) else series.name
-    unit = fact.unit
-    if unit and (fact.fact_value or "").strip().endswith(unit.strip()):
-        unit = None  # 值已带单位，避免「150kW kW」
-    if unit and "万" in (fact.fact_value or "") and unit in ("元", "万元"):
-        unit = None  # 「38.58万 元」→「38.58万」
-    # 全系统一值的事实（如全系轴距 3125）不带款型名，避免「仅该款型具备」的误读；
-    # 同键多值（不同款型参数不同）时保留款型名（评审 M-R10）
-    scope = head if series_level else f"{head} {variant.config_version}"
-    return (
-        f"{scope}："
-        f"{fact.category} {fact.fact_key} = {fact.fact_value or '未披露'}"
-        f"{f' {unit}' if unit else ''}"
-        f"{f'（工况 {fact.cycle}）' if fact.cycle else ''}。"
+    energy_label = {"BEV": "纯电", "PHEV": "插电混动", "EREV": "增程", "HEV": "油电混动", "ICE": "燃油"}.get(
+        variant.energy_type or "", variant.energy_type or ""
     )
+    price = ""
+    if price_cny:
+        price = f"，指导价 {price_cny / 10000:g} 万"
+    return f"{head} {variant.display_name}（{energy_label}{price}）核心参数与配置："
+
+
+def _variant_chunk_text(
+    facts: list[SpecFact], header: str, size: int
+) -> list[str]:
+    """把一个款型的（优先级有序、去重后的）事实合并为若干 ≤size 的切片。
+
+    每行「类别 键 = 值 单位」；头部逐行带上（第一片），后续片重复头部
+    保证任意切片独立可读（款型上下文不丢）。
+    """
+    lines: list[str] = []
+    for fact in facts:
+        value = (fact.fact_value or "").strip() or "未披露"
+        unit = fact.unit
+        if unit and value.endswith(unit.strip()):
+            unit = None
+        if unit and "万" in value and unit in ("元", "万元"):
+            unit = None
+        line = f"{fact.fact_key} = {value}"
+        if unit:
+            line += f" {unit}"
+        if fact.cycle:
+            line += f"（工况 {fact.cycle}）"
+        lines.append(line + "。")
+    chunks: list[str] = []
+    current: list[str] = []
+    # 头部只占第一片；后续片重复头部 → 预留长度
+    budget = size - len(header)
+    for line in lines:
+        candidate = "\n".join([*current, line])
+        if len(candidate) <= budget or not current:
+            current.append(line)
+            continue
+        chunks.append(header + "\n".join(current))
+        current = [line]
+    if current:
+        chunks.append(header + "\n".join(current))
+    return chunks or [header.rstrip("：")]
 
 
 def _summary_chunk_text(
@@ -256,6 +298,13 @@ def _chunk(state: IngestState) -> IngestState:
     limit = state.get("limit") or MAX_CHUNKS
     chunks: list[SearchChunk] = []
 
+    # 优化③：车系/品牌展示名注册为分词专名（查询侧 analyze 也会拼入规范名，
+    # 两侧整词一致 → 专名 BM25 精度显著高于碎片切分）
+    register_tokens(
+        [display_name(s, b) for s, b in materials["series_rows"]]
+        + [b.name for _s, b in materials["series_rows"]]
+    )
+
     # 1) 系列介绍（车型定位 + 能源类型，来自 series 表）
     for series, brand in materials["series_rows"]:
         text = f"{brand.name} {series.name}。"
@@ -276,32 +325,48 @@ def _chunk(state: IngestState) -> IngestState:
             )
         )
 
-    # 2) SKU 结构化事实描述（分层取样 + 去重已在 load 完成）
-    # 统计每车系每键的取值数：单值 → 车系级表述（不带款型名）；多值 → 保留款型名
-    key_value_sets: dict[tuple[int, str], set] = {}
-    for fact, _variant, series, _brand in materials["fact_rows"]:
-        key_value_sets.setdefault((series.id, fact.fact_key), set()).add((fact.fact_value or "").strip())
+    # 2) 款型级合并切片（优化②）：一个款型的核心事实合入 1~N 个切片，
+    #    metadata 带全 series/variant/energy/price/status——检索命中即对齐 SKU，
+    #    证据归属映射消失；仅索引在售款型（停售参数不污染证据）。
+    facts_by_variant: dict[int, list] = {}
+    variant_meta: dict[int, tuple[VehicleVariant, VehicleSeries, Brand]] = {}
     for fact, variant, series, brand in materials["fact_rows"]:
         if fact.fact_key in _SKIP_FACT_KEYS or (fact.fact_value or "").strip() in _SKIP_FACT_VALUES:
             continue
-        series_level = len(key_value_sets.get((series.id, fact.fact_key), ())) == 1
-        chunks.append(
-            SearchChunk(
-                chunk_id=f"fact-{fact.id}",
-                text=_fact_chunk_text(fact, variant, series, brand, series_level=series_level),
-                kind="spec_fact",
-                brand_id=series.brand_id,
-                series_id=series.id,
-                model_year_id=variant.model_year_id,
-                variant_id=variant.id,
-                source_id=fact.source_id,
-                # 注意：取系列官方页便于回链，事实级来源页见 source_documents
-                source_url=series.official_page_url,
-                page_or_section=fact.page_or_section,
-                last_verified_at=fact.last_verified_at,
-                extra={"energy_types": [variant.energy_type]},
+        facts_by_variant.setdefault(variant.id, []).append(fact)
+        variant_meta.setdefault(variant.id, (variant, series, brand))
+    for vid, facts in facts_by_variant.items():
+        variant, series, brand = variant_meta[vid]
+        raw_price = materials["price_by_variant"].get(vid)
+        # Numeric 列返回 Decimal：extra 会被 JSON 序列化进 Zilliz meta，统一转 float
+        price_cny = float(raw_price) if raw_price is not None else None
+        header = _variant_header(variant, series, brand, raw_price)
+        pieces = _variant_chunk_text(facts, header, CHUNK_SIZE)
+        for i, part in enumerate(pieces):
+            chunks.append(
+                SearchChunk(
+                    chunk_id=f"variant-{vid}#{i}",
+                    text=part,
+                    kind="variant_spec",
+                    brand_id=series.brand_id,
+                    series_id=series.id,
+                    model_year_id=variant.model_year_id,
+                    variant_id=vid,
+                    source_id=series.source_id,
+                    # 取系列官方页便于回链，事实级来源页见 source_documents
+                    source_url=series.official_page_url,
+                    last_verified_at=max(
+                        (f.last_verified_at for f in facts if f.last_verified_at),
+                        default=variant.last_verified_at,
+                    ),
+                    extra={
+                        "energy_types": [variant.energy_type],
+                        "status": variant.status,
+                        "price_cny": price_cny,
+                        "body_type": series.body_type,
+                    },
+                )
             )
-        )
 
     # 3) 车系级摘要切片
     headlines = rank_headlines(materials["facts_by_series"])

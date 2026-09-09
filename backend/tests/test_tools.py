@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 
 import pytest
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ from app.agent.tools import (
 )
 from app.catalog.services import latest_full_month
 from app.common.llm import LLMClient, LLMError
+from app.common.models import SourceDocument
 from app.rag.service import reset_index
 from tests.seed import make_brand, make_sales, make_series, make_source, make_variant, make_year
 
@@ -133,8 +135,16 @@ def test_retrieval_search_returns_evidence(db_session: Session):
     year = make_year(db_session, suv)
     make_variant(
         db_session, suv, year, config_version="标准版", energy_type="BEV", price_cny="129800",
-        facts=[("座位数", "seats", "5", "座", None), ("尺寸", "length_mm", "4820", "mm", None)],
+        facts=[("座位数", "座位数(个)", "5", "座", None), ("尺寸", "长*宽*高(mm)", "4820*1900*1700", "mm", None)],
         source=source,
+    )
+    db_session.add(
+        SourceDocument(
+            series_id=suv.id, source_id=source.id, url="https://example.com/spec.pdf",
+            source_type="official_doc",
+            content_text="大五座家用SUV，空间充裕，适合家庭出行。",
+            effective_from=date(2025, 1, 1),
+        )
     )
     db_session.commit()
 

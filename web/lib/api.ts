@@ -1,4 +1,4 @@
-/** 后端 API 类型与访问辅助（各接口的响应结构）。 */
+/** 后端 API 类型与访问辅助（的响应结构）。 */
 
 export interface PriceRange {
   currency: string;

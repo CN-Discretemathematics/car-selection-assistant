@@ -5,7 +5,7 @@ from datetime import date
 
 from sqlalchemy.orm import Session
 
-from app.common.models import SourceDocument
+from app.common.models import SourceDocument, SpecFact, VehicleVariant
 from app.rag import service as rag
 from app.rag.chunking import chunk_stats, split_text
 from app.rag.ingest import build_chunks
@@ -118,6 +118,53 @@ def test_rrf_fuse_consensus_and_dedupe():
     assert fused[0].score == round(1 / 61 + 1 / 61, 6)
 
 
+def test_weighted_rrf_fuse():
+    """优化⑤：加权 RRF——路权重改变共识相对名次（权重和≠1 也合法）。"""
+    from app.rag.rerank import rrf_fuse as fuse
+
+    s1 = SearchResult(chunk_id="only_sparse", score=1.0, text="稀疏独有", kind="variant_spec")
+    s2 = SearchResult(chunk_id="both", score=0.9, text="双路共识", kind="variant_spec")
+    d1 = SearchResult(chunk_id="both", score=0.9, text="双路共识", kind="variant_spec")
+    d2 = SearchResult(chunk_id="only_dense", score=0.8, text="稠密独有", kind="variant_spec")
+    # 稀疏加权 0.9：稀疏独有片（0.9/61）仍不及双路共识（0.9/61 + 0.1/62）？——验证单调性
+    fused = fuse([[s2, s1], [d1, d2]], k=60, weights=[0.9, 0.1])
+    scores = {h.chunk_id: h.score for h in fused}
+    assert scores["both"] > scores["only_sparse"] > scores["only_dense"]
+    # 等权（None）回退经典 RRF：only_dense 名次贡献 1/61 > only_sparse 1/62
+    classic = fuse([[s2, s1], [d1, d2]], k=60)
+    assert [h.chunk_id for h in classic] == ["both", "only_dense", "only_sparse"]
+
+
+def test_expand_query_synonyms():
+    """优化⑥：领域同义扩展——追加证据词、不改写原句、空查询幂等。"""
+    from app.rag.synonyms import expand_query
+
+    expanded, extra = expand_query("这车省油吗，续航多少")
+    assert expanded.startswith("这车省油吗，续航多少")
+    assert "馈电油耗" in extra and "纯电续航里程" in extra
+    assert expand_query("", max_extra=8) == ("", [])
+    # 扩展词有上限
+    _, extra2 = expand_query("空间大油耗低的智能家用车")
+    assert len(extra2) <= 8
+
+
+def test_tokenizer_modes(monkeypatch):
+    """优化③：分词口径可配置——bigram（默认实测最优）/ jieba 整词 / hybrid。"""
+    import app.retrieval.backends as backends
+
+    monkeypatch.setattr(backends, "TOKENIZER", "bigram")
+    bigram = backends.tokenize("纯电续航")
+    assert "纯电" in bigram and "续航" in bigram and "纯电续航" not in bigram
+
+    monkeypatch.setattr(backends, "TOKENIZER", "hybrid")
+    hybrid = backends.tokenize("纯电续航")
+    assert "纯电续航" in hybrid and "纯电" in hybrid, "hybrid = 整词 + 二元组"
+
+    monkeypatch.setattr(backends, "TOKENIZER", "jieba")
+    word = backends.tokenize("纯电续航")
+    assert "纯电续航" in word and "纯电" not in word, "纯整词模式不含二元组"
+
+
 def test_lexical_rerank_entity_boost():
     hits = [
         SearchResult(chunk_id="a", score=0.60, text="腾势 腾势Z9GT 动力 850 kW", kind="spec_fact", series_id=1),
@@ -136,7 +183,7 @@ def test_cross_encoder_rerank_parses_response(monkeypatch):
     reranker = CrossEncoderReranker(base_url="https://example.com", api_key="k", model="m")
     monkeypatch.setattr(
         reranker, "_post",
-        lambda payload: {"results": [{"index": 1, "relevance_score": 0.93}, {"index": 0, "relevance_score": 0.11}]},
+        lambda payload, path: {"results": [{"index": 1, "relevance_score": 0.93}, {"index": 0, "relevance_score": 0.11}]},
     )
     ranked = reranker.rerank("查询", hits, top_k=2)
     assert [h.chunk_id for h in ranked] == ["b", "a"]
@@ -147,7 +194,7 @@ def test_cross_encoder_rerank_parses_response(monkeypatch):
 def test_cross_encoder_rerank_rejects_bad_response(monkeypatch):
     hits = [SearchResult(chunk_id="a", score=0.1, text="文本A", kind="spec_fact")]
     reranker = CrossEncoderReranker(base_url="https://example.com", api_key="k", model="m")
-    monkeypatch.setattr(reranker, "_post", lambda payload: {"results": [{"index": 99}]})
+    monkeypatch.setattr(reranker, "_post", lambda payload, path: {"results": [{"index": 99}]})
     try:
         reranker.rerank("查询", hits, top_k=1)
         raise AssertionError("越界 index 应视为无效响应")
@@ -162,7 +209,7 @@ def test_build_chunks_kinds_and_search_flow(db_session: Session):
 
     chunks = build_chunks(db_session)
     kinds = {c.kind for c in chunks}
-    assert {"series_intro", "spec_fact", "source_document", "series_summary"} <= kinds
+    assert {"series_intro", "variant_spec", "source_document", "series_summary"} <= kinds
 
     results = rag.search(db_session, "家庭出行 空间", top_k=3)
     assert results, "应命中相关切片"
@@ -171,9 +218,9 @@ def test_build_chunks_kinds_and_search_flow(db_session: Session):
     assert rag.search(db_session, "空间", filters={"series_id": 999999}) == []
 
 
-def test_build_chunks_samples_per_series(db_session: Session):
-    """评审 M9-2：事实切片按车系分层取样——每个车系都有覆盖，且单车系不超过配额。"""
-    from app.retrieval.config import FACTS_PER_SERIES
+def test_build_chunks_samples_per_variant(db_session: Session):
+    """优化②：事实按款型取样合并——每个车系都有覆盖，且单款型不超过配额。"""
+    from app.retrieval.config import FACTS_PER_VARIANT
 
     source = make_source(db_session, name="官方测试来源2")
     brand = make_brand(db_session, name="测试品牌2", source=source)
@@ -185,43 +232,48 @@ def test_build_chunks_samples_per_series(db_session: Session):
     def many_facts(n: int) -> list[tuple[str, str, str, str | None, str | None]]:
         return [(f"参数组{i}", f"key{i}", f"值{i}", None, None) for i in range(n)]
 
-    make_variant(db_session, suv, year1, config_version="标准版", energy_type="BEV", facts=many_facts(40), source=source)
-    make_variant(db_session, sedan, year2, config_version="标准版", energy_type="ICE", facts=many_facts(40), source=source)
+    make_variant(db_session, suv, year1, config_version="标准版", energy_type="BEV", facts=many_facts(60), source=source)
+    make_variant(db_session, sedan, year2, config_version="标准版", energy_type="ICE", facts=many_facts(60), source=source)
     db_session.commit()
 
     chunks = build_chunks(db_session)
-    fact_chunks = [c for c in chunks if c.kind == "spec_fact"]
-    assert len(fact_chunks) <= 2 * FACTS_PER_SERIES
+    variant_chunks = [c for c in chunks if c.kind == "variant_spec"]
+    assert variant_chunks, "款型切片必须存在"
     per_series: dict[int, int] = {}
-    for c in fact_chunks:
-        assert c.series_id is not None
+    per_variant_lines: dict[int, int] = {}
+    for c in variant_chunks:
+        assert c.series_id is not None and c.variant_id is not None
         per_series[c.series_id] = per_series.get(c.series_id, 0) + 1
+        # 每行事实带一个「 = 」；头部无
+        per_variant_lines[c.variant_id] = per_variant_lines.get(c.variant_id, 0) + c.text.count(" = ")
     assert set(per_series) == {suv.id, sedan.id}, "后段车系必须也有切片进入索引"
-    assert max(per_series.values()) <= FACTS_PER_SERIES
+    assert max(per_variant_lines.values()) <= FACTS_PER_VARIANT, "单款型事实条数不得超配额"
+    assert all(c.extra.get("status") == "on_sale" for c in variant_chunks), "款型切片必须携带 status 元数据"
 
 
 def test_build_chunks_prioritizes_key_facts(db_session: Session):
-    """评审 M-M9-1：核心参数（座位数）优先进入每车系配额，即使其 id 排在最后。"""
-    from app.retrieval.config import FACTS_PER_SERIES
+    """M-M9-1（优化②沿用）：核心参数（座位数）优先进入每款型配额，即使其 id 排在最后。"""
+    from app.retrieval.config import FACTS_PER_VARIANT
 
     source = make_source(db_session, name="官方测试来源3")
     brand = make_brand(db_session, name="测试品牌3", source=source)
     series = make_series(db_session, brand, name="优先级SUV", body_type="suv", energy_types=("BEV",), source=source)
     year = make_year(db_session, series)
     # 先塞满配额的低优先级事实，最后才追加一条高优先级「座位数」
-    facts = [(f"参数组{i}", f"key{i}", f"value{i}", None, None) for i in range(FACTS_PER_SERIES)]
+    facts = [(f"参数组{i}", f"key{i}", f"value{i}", None, None) for i in range(FACTS_PER_VARIANT)]
     facts.append(("参数信息", "座位数(个)", "5", "个", None))
     make_variant(db_session, series, year, facts=facts, source=source)
     db_session.commit()
 
     chunks = build_chunks(db_session)
-    fact_chunks = [c for c in chunks if c.kind == "spec_fact"]
-    assert any("座位数" in c.text for c in fact_chunks), "高优先级事实（座位数）应被取样，即便 id 排在最后"
-    assert len(fact_chunks) == FACTS_PER_SERIES, "单车系事实切片仍不得超配额"
+    variant_chunks = [c for c in chunks if c.kind == "variant_spec"]
+    assert any("座位数" in c.text for c in variant_chunks), "高优先级事实（座位数）应被取样，即便 id 排在最后"
+    total_lines = sum(c.text.count(" = ") for c in variant_chunks)
+    assert total_lines == FACTS_PER_VARIANT, "单款型事实条数仍不得超配额"
 
 
-def test_fact_chunk_text_no_noise(db_session: Session):
-    """评审 RAG-c：值为「暂无」/优惠信息等噪声行不产生切片，且单位不重复。"""
+def test_variant_chunk_text_no_noise(db_session: Session):
+    """RAG-c（优化②沿用）：值为「暂无」/优惠信息等噪声行不进入切片，且单位不重复。"""
     source = make_source(db_session, name="官方测试来源4")
     brand = make_brand(db_session, name="测试品牌4", source=source)
     suv = make_series(db_session, brand, name="家用SUV", body_type="suv", energy_types=("BEV",), source=source)
@@ -235,14 +287,14 @@ def test_fact_chunk_text_no_noise(db_session: Session):
         source=source,
     )
     db_session.commit()
-    texts = [c.text for c in build_chunks(db_session) if c.kind == "spec_fact"]
+    texts = [c.text for c in build_chunks(db_session) if c.kind == "variant_spec"]
     assert not any("优惠信息" in t for t in texts)
     assert any("电动机总功率(kW) = 150kW。" in t for t in texts), "值自带单位时不得重复拼接"
+    assert any("核心参数与配置：" in t for t in texts), "款型切片应带款型头（命中即对齐 SKU）"
 
 
-def test_fact_chunks_dedupe_cross_variant(db_session: Session):
-    """评审 M-R10：同键同值跨款重复 → 去重为一条车系级切片（不带款型名）；
-    同键多值 → 每款一条且保留款型名（参数差异不被误合并）。"""
+def test_variant_chunks_dedupe_within_variant(db_session: Session):
+    """优化②去重口径：同款型内同键同值去重为一条；不同款型各自成片（头带各自款型名）。"""
     source = make_source(db_session, name="官方测试来源5")
     brand = make_brand(db_session, name="测试品牌5", source=source)
     suv = make_series(db_session, brand, name="家用SUV", body_type="suv", energy_types=("BEV",), source=source)
@@ -252,28 +304,20 @@ def test_fact_chunks_dedupe_cross_variant(db_session: Session):
             db_session, suv, year, config_version=cfg, energy_type="BEV",
             facts=[("参数信息", "轴距(mm)", "3125", "mm", None)], source=source,
         )
-    db_session.commit()
-    chunks = [c for c in build_chunks(db_session) if c.kind == "spec_fact" and c.series_id == suv.id]
-    assert len(chunks) == 1, "同键同值跨款重复应去重为一条"
-    assert "轴距(mm)" in chunks[0].text
-    assert "标准版" not in chunks[0].text and "旗舰版" not in chunks[0].text, "全系统一值不应带款型名"
-
-    source2 = make_source(db_session, name="官方测试来源6")
-    brand2 = make_brand(db_session, name="测试品牌6", source=source2)
-    sedan = make_series(db_session, brand2, name="通勤轿车", body_type="sedan", energy_types=("BEV",), source=source2)
-    year2 = make_year(db_session, sedan)
-    make_variant(
-        db_session, sedan, year2, config_version="标准版", energy_type="BEV",
-        facts=[("参数信息", "CLTC纯电续航里程(km)", "500", "km", "CLTC")], source=source2,
-    )
-    make_variant(
-        db_session, sedan, year2, config_version="旗舰版", energy_type="BEV",
-        facts=[("参数信息", "CLTC纯电续航里程(km)", "650", "km", "CLTC")], source=source2,
+    # 同款型重复行：款型内去重
+    dup = [v for v in db_session.query(VehicleVariant).all() if v.config_version == "标准版"][0]
+    db_session.add(
+        SpecFact(variant_id=dup.id, source_id=source.id, category="参数信息",
+                 fact_key="轴距(mm)", fact_value="3125", unit="mm")
     )
     db_session.commit()
-    chunks2 = [c for c in build_chunks(db_session) if c.kind == "spec_fact" and c.series_id == sedan.id]
-    assert len(chunks2) == 2, "同键多值不应误合并"
-    assert any("标准版" in c.text for c in chunks2) and any("旗舰版" in c.text for c in chunks2)
+    chunks = [c for c in build_chunks(db_session) if c.kind == "variant_spec" and c.series_id == suv.id]
+    assert len(chunks) == 2, "两个款型各一个（组）切片"
+    std = [c for c in chunks if "标准版" in c.text]
+    flag = [c for c in chunks if "旗舰版" in c.text]
+    assert std and flag, "款型头必须携带款型名（命中即对齐 SKU）"
+    for c in std:
+        assert c.text.count("轴距(mm) = 3125") == 1, "同款型内重复行应去重为一条"
 
 
 # ── 查询流水线（LangGraph）────────────────────────────────────────────────────
@@ -318,8 +362,84 @@ def test_pipeline_dense_failure_degrades(db_session: Session, monkeypatch):
     assert out["results"], "降级后仍应有稀疏结果"
 
 
+def test_pipeline_parameter_query_skips_dense(db_session: Session, monkeypatch):
+    """优化④：参数查询（参数词 + 车系实体）只走稀疏快路——稠密后端根本不被调用。"""
+    _seed(db_session)
+    rag.reset_index()
+
+    class BoomDense:
+        name = "zilliz"
+        called = False
+
+        def search(self, *args, **kwargs):
+            BoomDense.called = True
+            raise RuntimeError("should not be called")
+
+    monkeypatch.setattr(rag, "get_dense_backend", lambda: BoomDense())
+    out = rag.try_query(db_session, "家用SUV 的轴距和座位数是多少", top_k=3)
+    assert BoomDense.called is False, "参数查询不得触发稠密召回"
+    assert not any("dense 召回失败" in w for w in out["run"]["warnings"])
+    assert out["results"], "快路仍应返回稀疏结果"
+    stage = next(s for s in out["run"]["stages"] if s["node"] == "recall_dense")
+    assert stage["detail"].get("skipped") == "parameter_query"
+    # 语义查询不受影响：仍会尝试稠密路（这里被 Boom 捕获并降级）
+    out2 = rag.try_query(db_session, "空间大的车", top_k=3)
+    assert any("dense 召回失败" in w for w in out2["run"]["warnings"])
+
+
+def test_variant_chunk_extra_json_serializable(db_session: Session):
+    """回归：Numeric 列返回 Decimal——chunk.extra 必须能整体 JSON 序列化，
+    否则 Zilliz insert（json=dumps）在全部 embedding 完成后才崩溃（实测踩坑）。"""
+    import json as _json
+
+    source = make_source(db_session, name="官方测试来源7")
+    brand = make_brand(db_session, name="测试品牌7", source=source)
+    series = make_series(db_session, brand, name="序列化SUV", body_type="suv", energy_types=("BEV",), source=source)
+    year = make_year(db_session, series)
+    make_variant(
+        db_session, series, year, config_version="标准版", energy_type="BEV", price_cny="129800",
+        facts=[("参数信息", "座位数(个)", "5", "个", None)],
+        source=source,
+    )
+    db_session.commit()
+    chunks = [c for c in build_chunks(db_session) if c.kind == "variant_spec"]
+    assert chunks
+    payload = _json.dumps([c.extra for c in chunks])  # 不抛 TypeError 即通过
+    assert "129800.0" in payload or "129800" in payload
+
+
+def test_analyze_query_type_buckets(db_session: Session):
+    """优化④：意图分类落桶——parameter/compare/semantic。"""
+    _seed(db_session)
+    rag.reset_index()
+    for text, expected in (
+        ("家用SUV 的轴距是多少", "parameter"),
+        ("家用SUV 和 通勤轿车 哪个好", "compare"),
+        ("适合家用出行", "semantic"),
+    ):
+        out = rag.try_query(db_session, text, top_k=2)
+        assert out["run"]["stages"][0]["detail"].get("query_type") == expected, text
+
+
+def test_cross_encoder_dashscope_schema(monkeypatch):
+    """优化①：DashScope 端点自动适配 /reranks 与原生 text-rerank 双协议。"""
+    reranker = CrossEncoderReranker(
+        base_url="https://dashscope.aliyuncs.com/api/v1", api_key="k", model="qwen3.7-text-rerank"
+    )
+    assert reranker._candidate_paths() == ["/reranks", "/services/rerank/text-rerank/text-rerank"]
+    # 原生 schema 响应（results 包在 output 下）可解析
+    monkeypatch.setattr(
+        reranker, "_post",
+        lambda payload, path: {"output": {"results": [{"index": 0, "relevance_score": 0.88}]}},
+    )
+    hits = [SearchResult(chunk_id="a", score=0.1, text="文本A", kind="variant_spec")]
+    ranked = reranker.rerank("查询", hits, top_k=1)
+    assert ranked[0].score == 0.88
+    assert reranker._resolved_path == "/reranks", "首个探测成功的路径被记住复用"
+
+
 def test_pipeline_rerank_failure_falls_back(db_session: Session, monkeypatch):
-    """重排器故障时回退 lexical 并记录 warning。"""
+    """重排器故障时回退融合序（PassThrough）并记录 warning——实测融合序优于二次词元重排。"""
     import app.rag.pipeline as pipeline
 
     _seed(db_session)
@@ -335,7 +455,7 @@ def test_pipeline_rerank_failure_falls_back(db_session: Session, monkeypatch):
     out = rag.try_query(db_session, "家庭出行", top_k=3)
     assert any("重排失败" in w for w in out["run"]["warnings"])
     rerank_stage = next(s for s in out["run"]["stages"] if s["node"] == "rerank")
-    assert rerank_stage["detail"]["reranker"] == "lexical"
+    assert rerank_stage["detail"]["reranker"] == "none"
     assert out["results"]
 
 
@@ -350,7 +470,11 @@ def test_graph_spec_visualization():
     assert {"load", "chunk", "index"} <= ingest_nodes
 
 
-def test_status_snapshot(db_session: Session):
+def test_status_snapshot(db_session: Session, monkeypatch):
+    import app.rag.rerank as rerank_mod
+
+    monkeypatch.setattr(rerank_mod, "RERANK_PROVIDER", "lexical")
+    rerank_mod.reset_reranker()
     _seed(db_session)
     rag.reset_index()
     rag.search(db_session, "家用SUV", top_k=1)
@@ -361,6 +485,25 @@ def test_status_snapshot(db_session: Session):
     assert status["dense"]["enabled"] is False
     assert status["reranker"]["active"] == "lexical"
     assert status["db_counts"]["series"] == 2
+
+
+def test_reranker_provider_none(db_session: Session, monkeypatch):
+    """优化①补测：RERANK_PROVIDER=none → 保持融合序不重排（A/B 实测本语料最优默认）。"""
+    import app.rag.rerank as rerank_mod
+
+    monkeypatch.setattr(rerank_mod, "RERANK_PROVIDER", "none")
+    rerank_mod.reset_reranker()
+    try:
+        assert rerank_mod.get_reranker().name == "none"
+        hits = [
+            SearchResult(chunk_id="a", score=0.5, text="融合第一名", kind="variant_spec"),
+            SearchResult(chunk_id="b", score=0.4, text="融合第二名", kind="variant_spec"),
+        ]
+        ranked = rerank_mod.get_reranker().rerank("查询", hits, top_k=1)
+        assert [h.chunk_id for h in ranked] == ["a"], "none 模式保持融合序"
+        assert rerank_mod.get_reranker().absolute_scores is False
+    finally:
+        rerank_mod.reset_reranker()
 
 
 def test_config_env_float_tolerant(monkeypatch):

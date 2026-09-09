@@ -8,8 +8,10 @@ REST v2 完成建集合/写入/检索，免装 pymilvus、无需手动管理连�
 """
 from __future__ import annotations
 
+import json
 import time
 from hashlib import md5
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -17,6 +19,7 @@ import httpx
 from app.retrieval.backends import SearchChunk, SearchResult
 from app.retrieval.config import (
     COLLECT_OP_RETRY_BASE_SECONDS,
+    EMBED_CACHE,
     EMBEDDING_API_KEY,
     EMBEDDING_BASE_URL,
     EMBEDDING_DIMENSIONS,
@@ -71,6 +74,11 @@ class OpenAICompatibleEmbedder:
             break
         raise last_err  # type: ignore[misc]
 
+    @property
+    def model(self) -> str:
+        """embedding 模型名（向量缓存键组成部分）。"""
+        return self._model
+
 
 def make_embedder() -> OpenAICompatibleEmbedder:
     """按配置构造 embedding 客户端（OpenAI 兼容 /v1/embeddings，与生产检索共用同一构造路径）。"""
@@ -94,12 +102,15 @@ class ZillizRestRetriever:
         collection: str | None = None,
         embedder: OpenAICompatibleEmbedder | None = None,
         dim: int | None = None,
+        cache_path: str | None = None,
     ) -> None:
         self._endpoint = (endpoint or MILVUS_URI).rstrip("/")
         self._token = token if token is not None else MILVUS_TOKEN
         self._collection = collection or MILVUS_COLLECTION
         self._embedder = embedder or make_embedder()
         self._dim = dim or MILVUS_DIM
+        # embedding 本地缓存（RETRIEVAL_EMBED_CACHE）：配额/网络中断后重跑只补未完成批次
+        self._cache_path = cache_path if cache_path is not None else EMBED_CACHE
 
     @property
     def available(self) -> bool:
@@ -142,7 +153,10 @@ class ZillizRestRetriever:
         }
 
     EMBED_BATCH = 10    # 阿里百炼 text-embedding-v3 单次请求上限为 10 条文本
-    INSERT_BATCH = 200  # 单次 insert 请求的行数上限（向量维度高，控制请求体大小）
+    INSERT_BATCH = 100  # 单次 insert 行数：serverless 上大批写入易触发上游超时（504）
+    INSERT_TIMEOUT = 120.0      # 单批写入超时：1024 维批量写入在 serverless 上可超默认 30s
+    INSERT_ATTEMPTS = 5         # 瞬态超时/504 重试次数（覆盖 serverless 冷启动窗口）
+    INSERT_RETRY_BASE = 10.0    # 重试退避基数（秒），线性 10/20/30/40s
 
     COLLECT_OP_TIMEOUT = 90.0  # Serverless 集群冷启动慢，集合管理操作放宽超时
 
@@ -213,6 +227,15 @@ class ZillizRestRetriever:
                 "source_id": chunk.source_id,
                 "source_url": chunk.source_url,
                 "energy_types": chunk.extra.get("energy_types") or [],
+                # 优化②：款型级元数据（在售过滤/价格域过滤的检索期下推）；
+                # Decimal 等非 JSON 原生类型统一转 float，防 insert 序列化崩溃
+                "status": chunk.extra.get("status"),
+                "price_cny": (
+                    float(chunk.extra["price_cny"])
+                    if chunk.extra.get("price_cny") is not None
+                    else None
+                ),
+                "body_type": chunk.extra.get("body_type"),
             },
         }
 
@@ -221,32 +244,129 @@ class ZillizRestRetriever:
         chunks: list[SearchChunk],
         on_progress: Callable[[int, int], None] | None = None,
     ) -> None:
+        """全量重建（低内存流式，2C2G 部署实测教训：全量向量驻留会吃穿整机内存）。
+
+        - 向量缓存为 **JSONL 追加文件**（每行 {"k": 键, "v": 向量}），任一时刻内存中
+          只有单批向量与单批待写行；中断恢复 = 重扫文件建偏移索引，已嵌入的切片
+          直接复用向量，只对未完成部分请求 embedding API；
+        - insert 随批滚动（EMBED_BATCH → 行缓冲 → INSERT_BATCH 落库，走
+          _insert_with_retry），不再先攒全量 rows；
+        - 集合在 _ensure_collection 中先删后建（全量重建语义），缓存行让重跑免重嵌。
+        """
         if not chunks:
             return
         self._ensure_collection()
-        texts = [c.text for c in chunks]
-        rows: list[dict] = []
-        for i in range(0, len(texts), self.EMBED_BATCH):
-            batch_texts = texts[i : i + self.EMBED_BATCH]
-            vectors = self._embedder.embed(batch_texts)
-            if len(vectors) != len(batch_texts):
-                raise RuntimeError(f"embedding 返回数量不符：{len(vectors)} != {len(batch_texts)}")
-            for j, vec in enumerate(vectors):
-                rows.append(self._row(batch_texts[j], vec, chunks[i + j]))
+        cache_path = Path(self._cache_path) if self._cache_path else None
+        offsets: dict[str, tuple[int, int]] = {}
+        if cache_path is not None and cache_path.exists():
+            off = 0
+            with cache_path.open("rb") as fh:
+                for raw in fh:
+                    try:
+                        obj = json.loads(raw)
+                        if isinstance(obj, dict) and isinstance(obj.get("k"), str) and isinstance(obj.get("v"), list):
+                            offsets[obj["k"]] = (off, len(raw))
+                    except ValueError:
+                        pass  # 半行（中断残留）：视为未缓存，重嵌一次
+                    off += len(raw)
+
+        def cache_key(chunk: SearchChunk) -> str:
+            # embedder 可能是验证脚本注入的桩对象：model 属性缺失时用固定值
+            model = getattr(self._embedder, "model", "embed")
+            return md5(f"{model}|{chunk.text}".encode("utf-8")).hexdigest()
+
+        def read_vector(key: str) -> list[float] | None:
+            if cache_path is None:
+                return None
+            o = offsets.get(key)
+            if o is None:
+                return None
+            with cache_path.open("rb") as fh:
+                fh.seek(o[0])
+                return json.loads(fh.read(o[1]))["v"]
+
+        rows_buf: list[dict] = []
+
+        def flush_rows() -> None:
+            for i in range(0, len(rows_buf), self.INSERT_BATCH):
+                resp = self._insert_with_retry(rows_buf[i : i + self.INSERT_BATCH])
+                if resp.get("code") not in (0, 200, None):
+                    raise RuntimeError(f"Zilliz 写入返回错误码 {resp.get('code')}: {str(resp)[:200]}")
+            rows_buf.clear()
+
+        append_f = cache_path.open("ab") if cache_path is not None else None
+        embed_buf: list[SearchChunk] = []
+        done = 0
+        try:
+            for chunk in chunks:
+                key = cache_key(chunk)
+                vec = read_vector(key)
+                if vec is not None:
+                    rows_buf.append(self._row(chunk.text, vec, chunk))
+                    done += 1
+                    if len(rows_buf) >= self.INSERT_BATCH:
+                        flush_rows()
+                else:
+                    embed_buf.append(chunk)
+                if len(embed_buf) >= self.EMBED_BATCH:
+                    texts = [c.text for c in embed_buf]
+                    vectors = self._embedder.embed(texts)
+                    if len(vectors) != len(texts):
+                        raise RuntimeError(f"embedding 返回数量不符：{len(vectors)} != {len(texts)}")
+                    for c, vec in zip(embed_buf, vectors):
+                        rows_buf.append(self._row(c.text, vec, c))
+                        if append_f is not None:
+                            append_f.write((json.dumps({"k": cache_key(c), "v": vec}, ensure_ascii=False) + "\n").encode("utf-8"))
+                    done += len(embed_buf)
+                    embed_buf = []
+                    flush_rows()
+                    if on_progress:
+                        on_progress(min(done, len(chunks)), len(chunks))
+                    time.sleep(0.05)  # 平滑请求节奏，429 由 embed 内重试兜底
+            if embed_buf:
+                texts = [c.text for c in embed_buf]
+                vectors = self._embedder.embed(texts)
+                if len(vectors) != len(texts):
+                    raise RuntimeError(f"embedding 返回数量不符：{len(vectors)} != {len(texts)}")
+                for c, vec in zip(embed_buf, vectors):
+                    rows_buf.append(self._row(c.text, vec, c))
+                    if append_f is not None:
+                        append_f.write((json.dumps({"k": cache_key(c), "v": vec}, ensure_ascii=False) + "\n").encode("utf-8"))
+                done += len(embed_buf)
+                embed_buf = []
+            flush_rows()
             if on_progress:
-                on_progress(min(i + self.EMBED_BATCH, len(texts)), len(texts))
-            time.sleep(0.05)  # 平滑请求节奏，避免触发 embedding 服务限流（429 由 embed 内重试兜底）
-        for i in range(0, len(rows), self.INSERT_BATCH):
-            batch_rows = rows[i : i + self.INSERT_BATCH]
-            resp = self._request(
-                "POST",
-                "/v2/vectordb/entities/insert",
-                {"collectionName": self._collection, "data": batch_rows},
-            )
-            if resp.get("code") not in (0, 200, None):
-                raise RuntimeError(f"Zilliz 写入返回错误码 {resp.get('code')}: {str(resp)[:200]}")
-            if on_progress:
-                on_progress(min(i + self.INSERT_BATCH, len(rows)), len(rows))
+                on_progress(len(chunks), len(chunks))
+        finally:
+            if append_f is not None:
+                append_f.close()
+
+    def _insert_with_retry(self, batch_rows: list[dict]) -> dict:
+        """批量写入：serverless 冷启动/高负载时 insert 可能返回 408/504 或读超时
+        （与集合管理操作同源，见 _retry_collect_op；请求本身可能已生效），
+        对瞬态错误按线性退避重试；极端情况下单批至多重复写入一份，
+        查询侧 rrf_fuse 按 chunk_id/文本两级去重兜底，不影响检索结果。"""
+        last: Exception | None = None
+        for attempt in range(1, self.INSERT_ATTEMPTS + 1):
+            try:
+                return self._request(
+                    "POST",
+                    "/v2/vectordb/entities/insert",
+                    {"collectionName": self._collection, "data": batch_rows},
+                    timeout=self.INSERT_TIMEOUT,
+                )
+            except Exception as err:  # noqa: BLE001 - 仅瞬态错误重试，其余直接抛出
+                last = err
+                msg = str(err).lower()
+                transient = (
+                    "timeout" in msg or "timed out" in msg or "timing out" in msg
+                    or "408" in msg or "504" in msg or "10001" in msg
+                )
+                if attempt < self.INSERT_ATTEMPTS and transient:
+                    time.sleep(self.INSERT_RETRY_BASE * attempt)
+                    continue
+                raise
+        raise last  # type: ignore[misc]
 
     @staticmethod
     def _quote(value: Any) -> str:

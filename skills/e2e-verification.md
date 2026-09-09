@@ -3,7 +3,7 @@
 - 用途：每轮交付前完成验证闭环：测试 → 冒烟 → 压测 → 密钥扫描 → 独立审查。
 - 来源：阶段 8 沉淀（对应 `backend/tools/e2e_smoke.py`、`load_test.py`）。
 - 适用阶段：8（评测和上线）；每个代码任务收尾时都适用。
-- 最后验证：2026-09（179 用例 + 16 项冒烟 + 压测全绿）。
+- 最后验证：2026-09（189 用例 + 16 项冒烟 + 压测全绿）。
 
 ## 流程
 
@@ -29,8 +29,8 @@ python tools/load_test.py --concurrency 20 --requests 500
 
 ## 注意
 
-- 部分执行环境对回环 http 客户端有限制（httpx 502），压测与冒烟脚本一律使用标准库
-  （http.client / urllib），不依赖第三方 HTTP 库。
+- 本环境 http 客户端走回环受沙箱限制（httpx 502），压测与冒烟脚本一律使用标准库
+  （http.client / urllib）。
 - 密钥红线：任何命中即 BLOCKED，修复后必须重新扫描确认干净。
 - 提交前确认 `git status` 无未跟踪的密钥/临时文件；`.env*`、`vendor/`、`.tmp/`
   等均在 .gitignore。

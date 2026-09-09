@@ -8,7 +8,15 @@ from app.retrieval.zilliz import OpenAICompatibleEmbedder as Embedder, ZillizRes
 
 
 class _FakeEmbedder:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    @property
+    def model(self) -> str:
+        return "test-embed"
+
     def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
         return [[float(len(t)), 1.0] for t in texts]  # 确定性伪向量，便于测试
 
 
@@ -146,3 +154,73 @@ def test_zilliz_requires_config():
         raise AssertionError("未配置时应抛 RuntimeError")
     except RuntimeError:
         pass
+
+
+def test_dense_index_embed_cache_resume(tmp_path, monkeypatch):
+    """embedding 本地缓存（JSONL 流式断点续跑）：首次全量请求并落盘；重跑零 API 调用；
+    中断时已完成的批次也落盘（配额恢复后只补未完成批次）。"""
+    import json as _json
+
+    def cache_lines(p) -> list[str]:
+        return [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    embedder = _FakeEmbedder()
+    cache_file = tmp_path / "embed-cache.jsonl"
+    retriever = ZillizRestRetriever(
+        endpoint="https://in03-x.api.zillizcloud.com",
+        token="placeholder-token",
+        collection="car_docs",
+        embedder=embedder,
+        dim=2,
+        cache_path=str(cache_file),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0})
+
+    retriever._client_factory = lambda: httpx.Client(base_url=retriever._endpoint, transport=_mock_transport(handler))
+    chunks = [SearchChunk(chunk_id=f"c{i}", text=f"款型文本{i}", kind="variant_spec") for i in range(3)]
+
+    retriever.index(chunks)
+    assert len(embedder.calls) == 1, "首次应发起一次批量 embedding"
+    assert len(cache_lines(cache_file)) == 3
+
+    retriever.index(chunks)  # 重跑：全部命中缓存
+    assert len(embedder.calls) == 1, "缓存命中时不应再请求 embedding API"
+
+    # 中断恢复语义：embed 抛异常时，本批次之前的缓存仍已落盘
+    class BoomAfter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @property
+        def model(self) -> str:
+            return "test-embed"
+
+        def embed(self, texts: list[str]) -> list[list[float]]:
+            self.calls += 1
+            if self.calls >= 2:
+                raise RuntimeError("quota gone")
+            return [[float(len(t)), 1.0] for t in texts]
+
+    boom = BoomAfter()
+    retriever2 = ZillizRestRetriever(
+        endpoint="https://in03-x.api.zillizcloud.com",
+        token="placeholder-token",
+        collection="car_docs",
+        embedder=boom,
+        dim=2,
+        cache_path=str(cache_file),
+    )
+    retriever2._client_factory = retriever._client_factory
+    more = [SearchChunk(chunk_id=f"d{i}", text=f"新款型文本{i}", kind="variant_spec") for i in range(20)]
+    try:
+        retriever2.index(more)  # 第 2 批抛异常（EMBED_BATCH=10）
+        raise AssertionError("应抛出 embedding 异常")
+    except RuntimeError as err:
+        assert "quota" in str(err) or "embedding" in str(err)
+    assert len(cache_lines(cache_file)) == 13, "中断前完成的 10 条新向量 + 原 3 条都应已落盘"
+    # JSONL 每行可独立解析（中断残留的半行按未缓存处理，不阻断重建）
+    for ln in cache_lines(cache_file):
+        obj = _json.loads(ln)
+        assert set(obj) == {"k", "v"}

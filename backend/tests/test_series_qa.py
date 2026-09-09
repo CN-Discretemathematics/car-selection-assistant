@@ -14,7 +14,7 @@ from app.agent.series_qa import (
 from app.catalog.series_index import normalize_name, resolve_series, series_headline
 from app.catalog.services import latest_full_month
 from app.common.enums import MISSING_VALUE_LABEL
-from app.common.models import Brand, VehicleSeries
+from app.common.models import Brand, VehicleSeries, VehicleVariant
 from tests.seed import make_brand, make_sales, make_series, make_source, make_variant, make_year
 
 
@@ -381,8 +381,37 @@ def test_variant_diff_answer_without_variant_data(db_session: Session):
     db_session.commit()
     text, rows = build_variant_diff_answer(db_session, series, brand, "星愿不同版本有什么区别")
     assert rows == []
-    assert "暂未收录在售款型数据" in text
+    assert "暂未收录该车型的款型数据" in text
     assert "example.com/series" in text
+
+
+def test_variant_diff_archived_series_shows_off_sale_rows(db_session: Session):
+    """部署实测（2026-09）：31 个车系款型全为停售（抓取覆盖缺口）——版本差异问答
+    不得对「有款型数据但非在售」的车系用「未收录」死胡同，应降级展示归档款型
+    并明确标注停售（数据本身完整：参数/价格都在库里）。"""
+    source = make_source(db_session, name="官方测试来源-archived")
+    brand = make_brand(db_session, name="测试品牌-archived", source=source)
+    series = make_series(db_session, brand, name="停售车系", body_type="sedan",
+                         energy_types=("ICE",), source=source)
+    year = make_year(db_session, series)
+    make_variant(
+        db_session, series, year, config_version="2023款 1.5L 舒适型",
+        facts=[("参数信息", "轴距(mm)", "2700", "mm", None)], source=source,
+    )
+    make_variant(
+        db_session, series, year, config_version="2023款 1.5L 旗舰型",
+        facts=[("参数信息", "轴距(mm)", "2700", "mm", None)], source=source,
+    )
+    # make_variant 默认 on_sale：部署场景是「款型在库但全为停售」，此处改为 off_sale
+    for v in db_session.query(VehicleVariant).filter_by(series_id=series.id).all():
+        v.status = "off_sale"
+    db_session.commit()
+
+    text, rows = build_variant_diff_answer(db_session, series, None, "停售车系 各版本有什么区别")
+    assert rows, "归档款型应作为版本行返回"
+    assert "无在售款型" in text and "停售" in text
+    assert "舒适型" in text and "旗舰型" in text
+    assert "暂未收录该车型的款型数据" not in text, "有款型数据时不得进入死胡同文案"
 
 
 def test_variant_diff_via_locked_series(client: TestClient, db_session: Session):

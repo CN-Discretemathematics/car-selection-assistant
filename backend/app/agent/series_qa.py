@@ -398,22 +398,40 @@ def build_variant_diff_answer(
         rows.append((variant, float(price.price_cny) if price else None))
     rows.sort(key=lambda r: (r[1] is None, r[1] if r[1] is not None else 0.0))
 
+    archived = False  # 无在售款型时降级展示库内归档款型（标注停售）
+    if not rows:
+        # 2026-09 部署实测：部分车系（护卫舰07/宝骏云朵/凯美瑞旧代次等 31 个）款型
+        # 全为停售——数据本身完整，直接展示并标注停售，比「未收录」死胡同更有用
+        for variant in catalog.series_variants(db, series.id, on_sale_only=False):
+            price = catalog.variant_current_price(db, variant.id)
+            rows.append((variant, float(price.price_cny) if price else None))
+        rows.sort(key=lambda r: (r[1] is None, r[1] if r[1] is not None else 0.0))
+        archived = True
+        if not rows:  # 连款型都没有（极少数）：保留原说明
+            official = f"：{series.official_page_url}" if series.official_page_url else "。"
+            text = (
+                f"【{name}】库内暂未收录该车型的款型数据。"
+                f"可能原因：数据源尚未收录。可先到品牌官网查看配置表{official}\n"
+                + "以上口径：只陈列数据库既有事实，绝不编造。"
+            )
+            return text, []
+
     footer = (
         "以上为数据库在售 SKU 的官方指导价与配置事实；标注「"
         + MISSING_VALUE_LABEL
         + "」表示暂未收录，不代表没有该配置。可在下方候选中点「加入对比」查看完整参数表。"
     )
-    if not rows:
-        official = f"：{series.official_page_url}" if series.official_page_url else "。"
-        text = (
-            f"【{name}】库内暂未收录在售款型数据，因此无法列出版本差异。"
-            f"可能原因：款型未上市 / 已停售，或数据源尚未收录。可先到品牌官网查看配置表{official}\n"
-            + footer
+    if archived:
+        footer = (
+            f"注意：该车系当前**无在售款型**（库内 {len(rows)} 个款型均为停售/未标注在售），"
+            "以上为已归档数据，仅供参考；如需在售车型可告诉我预算与用途，我帮你找同类替代。"
         )
-        return text, []
 
     shown = rows[:_VARIANT_DIFF_MAX]
-    head = f"【{name}】在售 {len(rows)} 个版本"
+    if archived:
+        head = f"【{name}】库内归档 {len(rows)} 个款型（均已停售，仅供参考）"
+    else:
+        head = f"【{name}】在售 {len(rows)} 个版本"
     if len(rows) > len(shown):
         head += f"（按官方指导价从低到高列出前 {len(shown)} 个）"
     lines = [head + "："]

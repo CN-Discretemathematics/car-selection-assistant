@@ -16,18 +16,48 @@ stages/warnings 走 operator.add reducer。异步调用方经 run_in_threadpool 
 """
 from __future__ import annotations
 
+import re
 import time
 
 from langgraph.graph import END, START, StateGraph
 
 from app.catalog.series_index import display_name, resolve_series
-from app.rag.rerank import LexicalReranker, get_reranker, rrf_fuse
+from app.rag.rerank import PassThroughReranker, get_reranker, rrf_fuse
 from app.rag.state import RagState, make_stage
+from app.rag.synonyms import expand_query
 from app.retrieval.backends import SearchResult, tokenize
-from app.retrieval.config import RECALL_MULTIPLIER, RELEVANCE_THRESHOLD, RRF_K
+from app.retrieval.config import (
+    HYDE_ENABLED,
+    RECALL_MULTIPLIER,
+    RELEVANCE_THRESHOLD,
+    RRF_K,
+    RRF_WEIGHT_DENSE,
+    RRF_WEIGHT_SPARSE,
+)
 
 _RECALL_FLOOR = 20
 _RECALL_CEILING = 100
+
+# 参数事实词（优化④路由启发式）：命中即视为「参数查询」候选
+_PARAM_HINT_RE = re.compile(
+    r"续航|油耗|耗电|电池|轴距|尺寸|马力|功率|扭矩|座位|几座|指导价|价位|多少钱"
+    r"|百公里加速|风阻|油箱|后备厢|行李厢|接近角|离去角|离地间隙|整备质量|轮胎规格"
+)
+_COMPARE_HINT_RE = re.compile(r"对比|差异|差别|区别|比较|哪个好|比一比|版本差异|款型差异")
+
+# 加权 RRF（优化⑤）：统一 0.6/0.4——权重网格消融（120 题五配置，2026-09）实测：
+# 0.6/0.4 MRR 0.7032 为最优平台期（0.5/0.5 等权 0.6948、纯稀疏 0.6898、0.4/0.6 有害）；
+# 原按桶路由的权重组（semantic 偏稠密）实测反而更差（0.7010），已删除。
+# 基准值可在 .env 用 RETRIEVAL_RRF_WEIGHT_* 调整。
+
+
+def _classify_query(query: str, resolved_count: int) -> str:
+    """查询意图启发式分类（确定性，无 LLM 调用）：parameter | compare | semantic。"""
+    if _COMPARE_HINT_RE.search(query):
+        return "compare"
+    if _PARAM_HINT_RE.search(query) and resolved_count >= 1:
+        return "parameter"
+    return "semantic"
 
 
 def _analyze(state: RagState) -> RagState:
@@ -39,6 +69,8 @@ def _analyze(state: RagState) -> RagState:
     recall_k = min(max(top_k * max(RECALL_MULTIPLIER, 1), _RECALL_FLOOR), _RECALL_CEILING)
 
     resolved_names: list[str] = []
+    resolved: list = []
+    query_type = "semantic"
     warnings: list[str] = []
     if query:
         try:
@@ -47,14 +79,23 @@ def _analyze(state: RagState) -> RagState:
             resolved = []
             warnings.append(f"车系解析失败（按无实体处理）：{err}")
         resolved_names = [display_name(s, b) for s, b in resolved]
-        if len(resolved) == 1 and "series_id" not in filters:
+        query_type = _classify_query(query, len(resolved))
+        # 单车系解析 → 自动加 series_id 过滤（抑制「语义近但实体错」噪声）；
+        # 对比类查询**不加**——多实体场景按其中一个子串解析结果过滤，
+        # 会把另一个被比对象的整系证据排除（实测 compare 桶 Hit@5 1.0→0.835 的根因）
+        if len(resolved) == 1 and "series_id" not in filters and query_type != "compare":
             filters["series_id"] = resolved[0][0].id
 
-    # 实体增强：把解析出的规范车系名并入查询（别名/口语 → 索引用语），已含则不重复
+    # 实体增强：单车系解析时把规范车系名并入查询（别名/口语 → 索引用语）；
+    # 多实体（对比类）不追加——原文已含全部实体，追加品牌词只会稀释双款型精确匹配
     entity_query = query
-    extra = [n for n in resolved_names if n and n.lower() not in query.lower()]
-    if extra:
-        entity_query = f"{query} {' '.join(extra)}".strip()
+    if len(resolved) == 1:
+        extra = [n for n in resolved_names if n and n.lower() not in query.lower()]
+        if extra:
+            entity_query = f"{query} {' '.join(extra)}".strip()
+
+    # 优化⑥：领域同义扩展（扩展串只服务稠密路与重排兜底，稀疏路用 entity_query）
+    search_query, expanded = expand_query(entity_query)
 
     return {
         "query": query,
@@ -62,22 +103,35 @@ def _analyze(state: RagState) -> RagState:
         "top_k": top_k,
         "recall_k": recall_k,
         "entity_query": entity_query,
+        "search_query": search_query,
+        "query_type": query_type,
         "resolved_series": resolved_names,
         "stages": [make_stage("analyze", 1, len(resolved_names), started,
-                              {"resolved_series": resolved_names, "filters": filters, "recall_k": recall_k})],
+                              {"resolved_series": resolved_names, "filters": filters,
+                               "recall_k": recall_k, "query_type": query_type,
+                               "expanded_terms": expanded})],
         "warnings": warnings,
     }
 
 
 def _route_after_analyze(state: RagState) -> list[str] | str:
-    """空查询直接终止；否则并行进入两路召回。"""
-    if not state.get("entity_query") or not tokenize(state["entity_query"]):
+    """空查询直接终止；否则并行进入两路召回。
+
+    优化④的参数快路不在这里裁剪分支（join 边要求两分支都完成），
+    而是让 _recall_dense 对参数查询空转跳过（等价效果、零 join 风险）。
+    """
+    if not state.get("search_query") or not tokenize(state["search_query"]):
         return END
     return ["recall_sparse", "recall_dense"]
 
 
 def _recall_sparse(state: RagState) -> RagState:
-    """稀疏召回：进程内 BM25（始终可用）。"""
+    """稀疏召回：进程内 BM25（始终可用）。
+
+    优化⑥ A/B 修正：稀疏路用 **entity_query（不含同义扩展）**——BM25 是词面精确
+    匹配，扩展词会把其他车系的同键切片拉进候选、稀释锚点匹配（实测 Hit@5
+    0.6718→0.643）；扩展后的 search_query 只服务稠密路（语义召回受益于上下文）。
+    """
     from app.rag.service import get_sparse_backend
 
     started = time.perf_counter()
@@ -92,7 +146,11 @@ def _recall_sparse(state: RagState) -> RagState:
 
 
 def _recall_dense(state: RagState) -> RagState:
-    """稠密召回：Zilliz/Milvus 向量检索（未配置时空转；失败降级为纯稀疏）。"""
+    """稠密召回：Zilliz/Milvus 向量检索（未配置时空转；失败降级为纯稀疏）。
+
+    优化⑥ HyDE：语义类查询可由 LLM 生成假设性证据文本替代原查询做向量召回
+    （RETRIEVAL_HYDE 开关，默认关）；生成失败静默回退原查询。
+    """
     from app.rag.service import get_dense_backend
 
     started = time.perf_counter()
@@ -100,11 +158,26 @@ def _recall_dense(state: RagState) -> RagState:
     hits: list[SearchResult] = []
     warnings: list[str] = []
     detail: dict = {"backend": None}
+    if state.get("query_type") in ("parameter", "compare"):
+        # 优化④：实体锚定查询（参数/对比）只走稀疏快路——键值模板/款型名强区分，
+        # 稠密候选「语义近但实体错」只会稀释精确匹配（520 题实测 compare 桶
+        # dense 单路 0.873 vs sparse 1.0；跳过还省 embedding 调用与云端延迟）
+        detail["skipped"] = f"{state['query_type']}_query"
+        return {
+            "dense_hits": [],
+            "stages": [make_stage("recall_dense", 0, 0, started, detail)],
+        }
     if backend is not None:
         detail["backend"] = backend.name
+        dense_query = state["search_query"]
+        if HYDE_ENABLED and state.get("query_type") == "semantic":
+            hyde_text = _hyde_text(state)
+            if hyde_text:
+                dense_query = hyde_text
+                detail["hyde"] = True
         try:
             hits = backend.search(
-                state["entity_query"], filters=state.get("filters"), top_k=state["recall_k"]
+                dense_query, filters=state.get("filters"), top_k=state["recall_k"]
             )
         except Exception as err:  # noqa: BLE001 - 云端不可用不阻断检索（原则 7）
             warnings.append(f"dense 召回失败（降级为纯稀疏）：{type(err).__name__}: {err}")
@@ -116,37 +189,83 @@ def _recall_dense(state: RagState) -> RagState:
     }
 
 
+def _hyde_text(state: RagState) -> str | None:
+    """HyDE（优化⑥）：LLM 生成一段「理想证据」文本用于向量召回。
+
+    在流水线线程（无事件循环）里同步调用；LLM 未配置/任何失败返回 None，
+    调用方静默回退原查询——HyDE 失败绝不阻断检索（原则 7）。
+    """
+    try:
+        import asyncio
+
+        from app.common.llm import LLMClient
+
+        client = LLMClient()
+        if not client.available:
+            return None
+        prompt = (
+            "你是汽车参数库的检索助写器。针对用户问题，直接写一段可能出现在车型参数文档里的"
+            "事实性描述（50字内，只含车系名与参数键值，不要解释、不要列表）：\n"
+            f"用户问题：{state.get('query') or ''}"
+        )
+        reply = asyncio.run(
+            client.chat([{"role": "user", "content": prompt}], temperature=0.1)
+        )
+        text = ""
+        if isinstance(reply, dict):
+            choices = reply.get("choices") or []
+            if choices:
+                text = ((choices[0].get("message") or {}).get("content") or "").strip()
+        return text[:300] or None
+    except Exception:  # noqa: BLE001 - HyDE 失败不阻断检索
+        return None
+
+
 def _fuse(state: RagState) -> RagState:
-    """RRF 融合两路召回：名次贡献叠加，chunk_id + 文本两级去重（rrf_fuse 内建）。"""
+    """RRF 融合两路召回（优化⑤：统一 0.6/0.4 加权，消融实测最优）；去重（rrf_fuse 内建）。"""
     started = time.perf_counter()
     sparse = state.get("sparse_hits") or []
     dense = state.get("dense_hits") or []
-    deduped = rrf_fuse([sparse, dense])
+    query_type = state.get("query_type") or ""
+    w_sparse, w_dense = RRF_WEIGHT_SPARSE, RRF_WEIGHT_DENSE
+    deduped = rrf_fuse([sparse, dense], weights=[w_sparse, w_dense])
     return {
         "fused": deduped,
         "stages": [make_stage("fuse", len(sparse) + len(dense), len(deduped), started,
-                              {"sparse": len(sparse), "dense": len(dense), "rrf_k": RRF_K})],
+                              {"sparse": len(sparse), "dense": len(dense), "rrf_k": RRF_K,
+                               "weights": [w_sparse, w_dense], "query_type": query_type})],
     }
 
 
 def _rerank(state: RagState) -> RagState:
-    """精排：Cross-Encoder API（配置时）→ 失败回退 lexical；默认 lexical。"""
+    """精排：Cross-Encoder API（配置时）→ 失败回退 lexical → none = 保持融合序。
+
+    重排按查询类型条件启用（520 题两轮实测收敛）：实体锚定查询（parameter/
+    compare）的 BM25 融合序已近最优，Cross-Encoder 中性偏负且白付 ~1s/题
+    （compare 桶 Hit@5 0.987→0.975、parameter NDCG 同降）；收益集中在
+    recommend/semantic（recommend Hit@5 +1.85pt）——只有这两类调用重排器。
+    """
     started = time.perf_counter()
     fused = state.get("fused") or []
     top_k = state["top_k"]
     warnings: list[str] = []
-    reranker = get_reranker()
+    query_type = state.get("query_type") or ""
+    if query_type in ("parameter", "compare"):
+        reranker = PassThroughReranker()
+    else:
+        reranker = get_reranker()
     try:
         ranked = reranker.rerank(state["entity_query"], fused, top_k)
     except Exception as err:  # noqa: BLE001 - 重排服务故障不阻断检索
-        warnings.append(f"重排失败（回退 lexical）：{type(err).__name__}: {err}")
-        reranker = LexicalReranker()
+        warnings.append(f"重排失败（回退融合序）：{type(err).__name__}: {err}")
+        reranker = PassThroughReranker()
         ranked = reranker.rerank(state["entity_query"], fused, top_k)
     return {
         "reranked": ranked,
         # grade 节点据此决定阈值语义：只有 Cross-Encoder 的绝对相关分可阈值化
         "reranker_absolute": bool(getattr(reranker, "absolute_scores", False)),
-        "stages": [make_stage("rerank", len(fused), len(ranked), started, {"reranker": reranker.name})],
+        "stages": [make_stage("rerank", len(fused), len(ranked), started,
+                              {"reranker": reranker.name, "query_type": query_type})],
         "warnings": warnings,
     }
 

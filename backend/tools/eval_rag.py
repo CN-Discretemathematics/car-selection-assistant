@@ -39,7 +39,7 @@ from app.common.database import get_session_factory  # noqa: E402
 from app.common.models import SourceDocument, VehicleVariant  # noqa: E402
 from app.rag.chunking import chunk_stats, split_text  # noqa: E402
 from app.rag.ingest import build_chunks  # noqa: E402
-from app.rag.rerank import rrf_fuse  # noqa: E402
+from app.rag.rerank import PassThroughReranker, rrf_fuse  # noqa: E402
 from app.retrieval.backends import InMemoryRetriever, SearchResult  # noqa: E402
 from app.retrieval.config import CHUNK_OVERLAP, CHUNK_SIZE, RETRIEVAL_BACKEND  # noqa: E402
 
@@ -110,6 +110,9 @@ def _run_strategy(
 ) -> dict:
     ranked_flags: list[list[bool]] = []
     rel_counts: list[int] = []
+    # 评审 ⑧：按查询类型分桶累积（parameter/recommend/semantic/compare）
+    bucket_flags: dict[str, list[list[bool]]] = {}
+    bucket_counts: dict[str, list[int]] = {}
     started = time.perf_counter()
     for q in questions:
         rel_series = _relevant_ids(q, variant_series)
@@ -122,7 +125,11 @@ def _run_strategy(
         flags = [_is_relevant(h, rel_series, rel_variants) for h in hits[:EVAL_DEPTH]]
         flags += [False] * (EVAL_DEPTH - len(flags))
         ranked_flags.append(flags)
-        rel_counts.append(sum(chunks_by_series.get(sid, 0) for sid in rel_series))
+        bucket = q.get("bucket") or "uncategorized"
+        bucket_flags.setdefault(bucket, []).append(flags)
+        rel = sum(chunks_by_series.get(sid, 0) for sid in rel_series)
+        rel_counts.append(rel)
+        bucket_counts.setdefault(bucket, []).append(rel)
     elapsed = round(time.perf_counter() - started, 1)
     out = {
         "strategy": name,
@@ -130,6 +137,14 @@ def _run_strategy(
         "elapsed_seconds": elapsed,
         f"@{top_k}": _metrics(ranked_flags, rel_counts, top_k),
         "@10": _metrics(ranked_flags, rel_counts, 10),
+        "by_bucket": {
+            bucket: {
+                "questions": len(flags),
+                f"@{top_k}": _metrics(flags, bucket_counts[bucket], top_k),
+                "@10": _metrics(flags, bucket_counts[bucket], 10),
+            }
+            for bucket, flags in sorted(bucket_flags.items())
+        },
     }
     return out
 
@@ -166,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=0, help="只评测前 N 条（0=全部）")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--with-dense", action="store_true", help="评测 dense/hybrid（需 Zilliz 已灌库，产生云端调用）")
+    parser.add_argument("--only", default="", help="只评测指定策略（逗号分隔，如 pipeline；默认全部）")
     parser.add_argument("--report", default=os.path.join("eval", "rag_eval_report.json"))
     args = parser.parse_args(argv)
     top_k = min(max(args.top_k, 1), 10)
@@ -239,6 +255,24 @@ def main(argv: list[str] | None = None) -> int:
             return rag.search(db2, text, top_k=EVAL_DEPTH)
 
     strategies.append(("pipeline", _pipeline))
+
+    # 重排对照：同配置全链路但强制不重排（保持融合序），隔离重排层边际收益。
+    # 单次运行同时拿到重排开/关两组指标，避免为对照重跑全策略（dense/hybrid 云端配额）。
+    import app.rag.pipeline as _pl
+
+    def _pipeline_norerank(text: str):
+        original = _pl.get_reranker
+        _pl.get_reranker = lambda: PassThroughReranker()
+        try:
+            return _pipeline(text)
+        finally:
+            _pl.get_reranker = original
+
+    strategies.append(("pipeline-norerank", _pipeline_norerank))
+
+    only = {s.strip() for s in args.only.split(",") if s.strip()}
+    if only:
+        strategies = [entry for entry in strategies if entry[0] in only]
 
     results = []
     for name, fn in strategies:
@@ -319,11 +353,33 @@ def _render_md(report: dict) -> str:
             f"| {r['strategy']} | {m['hit']} | {m['recall']} | {m['precision']} "
             f"| {m['mrr']} | {m10['ndcg']} | {r['elapsed_seconds']} |"
         )
+    # 评审 ⑧：按查询类型分桶（parameter/recommend/semantic/compare）
+    bucket_names: list[str] = []
+    for r in report["strategies"]:
+        for b in (r.get("by_bucket") or {}):
+            if b not in bucket_names:
+                bucket_names.append(b)
+    if bucket_names:
+        lines += ["", "## 分桶指标（Hit@%d / MRR）" % k, ""]
+        header = "| 策略 | " + " | ".join(bucket_names) + " |"
+        lines.append(header)
+        lines.append("| --- | " + " | ".join(["---"] * len(bucket_names)) + " |")
+        for r in report["strategies"]:
+            if "error" in r:
+                continue
+            cells = []
+            for b in bucket_names:
+                bb = (r.get("by_bucket") or {}).get(b)
+                if not bb:
+                    cells.append("-")
+                else:
+                    cells.append(f"{bb[f'@{k}']['hit']} / {bb[f'@{k}']['mrr']}")
+            lines.append(f"| {r['strategy']} | " + " | ".join(cells) + " |")
     lines += [
         "",
         "> 判定口径：相关 = 命中切片 series_id/variant_id 与问题 anchors 一致；",
         "> sparse-nooverlap 与 sparse 之差 = 重叠切分收益；hybrid − sparse = RRF 融合收益；",
-        "> pipeline − hybrid = 实体解析/重排/把关的端到端收益。",
+        "> pipeline − hybrid = 实体解析/重排/把关的端到端收益；分桶用于验收查询路由与各桶弱点。",
         "",
     ]
     return "\n".join(lines)
