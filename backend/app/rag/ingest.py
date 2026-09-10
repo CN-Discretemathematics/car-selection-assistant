@@ -16,7 +16,7 @@ import time
 from typing import Any, Callable
 
 from langgraph.graph import END, START, StateGraph
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, text
 from sqlalchemy.orm import Session
 
 from app.catalog.series_index import HEADLINE_ORDER, display_name, rank_headlines
@@ -57,10 +57,21 @@ _PRIORITY_KEY_GROUPS: tuple[tuple[str, ...], ...] = (
     ),
 )
 
-# 事实取样过采样倍数：去重前的 SQL 行数上限 = 配额 × 倍数（为去重留出余量）
-_OVERSAMPLE_FACTOR = 5
-
 _BODY_LABEL = {"sedan": "轿车", "suv": "SUV", "mpv": "MPV", "pickup": "皮卡"}
+
+
+def _relax_idle_transaction_timeout(db: Session) -> None:
+    """关闭本次构建会话的「事务空闲」超时（RDS 默认 1h）。
+
+    重建的 load/chunk 阶段会长时间只用 Python 处理已取回的行、不再发查询，
+    期间只读事务一直挂着；RDS 的 idle_in_transaction_session_timeout 到点会直接
+    掐断连接，下一次查询抛 psycopg.errors.IdleInTransactionSessionTimeout
+    （2026-09-10 rebuild4 就是这样失败的）。这里只针对构建会话关闭该保护，
+    不影响 API 进程；SQLite 等后端没有该参数，跳过。
+    """
+    bind = db.get_bind()
+    if getattr(getattr(bind, "dialect", None), "name", None) == "postgresql":
+        db.execute(text("SET idle_in_transaction_session_timeout = 0"))
 
 
 def _load(state: IngestState) -> IngestState:
@@ -68,6 +79,7 @@ def _load(state: IngestState) -> IngestState:
     started = time.perf_counter()
     db: Session = state["db"]
     limit = state.get("limit") or MAX_CHUNKS
+    _relax_idle_transaction_timeout(db)
 
     series_rows = db.execute(
         select(VehicleSeries, Brand)
@@ -77,7 +89,15 @@ def _load(state: IngestState) -> IngestState:
 
     # SKU 事实按款型分层取样（优化②——切分改为款型级合并切片，取样粒度同步到款型）；
     # 取样顺序按优先级（核心参数优先，M-M9-1），同优先级按 id 稳定，
-    # 每款型截断 FACTS_PER_VARIANT 条（过采样 ×5 供去重余量）。
+    # 每款型截断 FACTS_PER_VARIANT 条。
+    #
+    # 2026-09-10 重构：去重 + 配额截断全部下推到 SQL 窗口函数。原实现用
+    # 「配额 × 过采样倍数」把近百万行（约 6600 款型 × 150 条）四表 ORM 实体拉进内存，
+    # 再用 Python 逐行去重——两个后果：① 2C2G 机器被 OOM killer 杀掉构建进程；
+    # ② 去重循环期间只读事务空转，被 RDS idle_in_transaction_session_timeout 掐断。
+    # 现在 SQL 只回传 ≤ 配额 的行（约 20 万行），语义与原实现一致：
+    # 同一款型内 (fact_key, value, unit) 重复时保留优先级最高、id 最小的一条，
+    # 再按优先级排序取前 FACTS_PER_VARIANT 条。
     priority_case = case(
         *[
             (SpecFact.fact_key.in_(keys), idx)
@@ -85,44 +105,49 @@ def _load(state: IngestState) -> IngestState:
         ],
         else_=len(_PRIORITY_KEY_GROUPS),
     )
-    fact_subq = (
+    deduped_facts = (
         select(
             SpecFact.id.label("fid"),
+            SpecFact.variant_id.label("vid"),
+            priority_case.label("prio"),
             func.row_number()
             .over(
-                partition_by=SpecFact.variant_id,
+                partition_by=(
+                    SpecFact.variant_id,
+                    SpecFact.fact_key,
+                    func.trim(func.coalesce(SpecFact.fact_value, "")),
+                    SpecFact.unit,
+                ),
                 order_by=(priority_case, SpecFact.id),
             )
-            .label("rn"),
+            .label("dedup_rn"),
         )
         .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
         .where(VehicleVariant.status == "on_sale")
         .subquery()
     )
+    quota_facts = (
+        select(
+            deduped_facts.c.fid.label("fid"),
+            func.row_number()
+            .over(
+                partition_by=deduped_facts.c.vid,
+                order_by=(deduped_facts.c.prio, deduped_facts.c.fid),
+            )
+            .label("quota_rn"),
+        )
+        .where(deduped_facts.c.dedup_rn == 1)
+        .subquery()
+    )
     fact_rows = db.execute(
         select(SpecFact, VehicleVariant, VehicleSeries, Brand)
-        .join(fact_subq, SpecFact.id == fact_subq.c.fid)
+        .join(quota_facts, SpecFact.id == quota_facts.c.fid)
         .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
         .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
         .join(Brand, VehicleSeries.brand_id == Brand.id)
-        .where(fact_subq.c.rn <= FACTS_PER_VARIANT * _OVERSAMPLE_FACTOR)
-        .order_by(VehicleVariant.series_id, VehicleVariant.id, fact_subq.c.rn)
+        .where(quota_facts.c.quota_rn <= FACTS_PER_VARIANT)
+        .order_by(VehicleVariant.series_id, VehicleVariant.id, quota_facts.c.quota_rn)
     ).all()
-
-    # 去重 + 每款型配额截断（顺序已由 rn 保证：高优先级在前）
-    deduped_rows: list = []
-    _seen: dict[int, set] = {}
-    _count: dict[int, int] = {}
-    for row in fact_rows:
-        fact, variant, _series, _brand = row
-        dedupe_key = (fact.fact_key, (fact.fact_value or "").strip(), fact.unit)
-        seen = _seen.setdefault(variant.id, set())
-        if dedupe_key in seen or _count.get(variant.id, 0) >= FACTS_PER_VARIANT:
-            continue
-        seen.add(dedupe_key)
-        _count[variant.id] = _count.get(variant.id, 0) + 1
-        deduped_rows.append(row)
-    fact_rows = deduped_rows
 
     # 车系画像聚合原料（摘要切片用）：全量在售事实 + 价格区间 + 在售数 + 最新月销量
     series_ids = [s.id for s, _ in series_rows]

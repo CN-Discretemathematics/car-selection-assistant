@@ -292,7 +292,46 @@ def get_status(db: Session | None = None) -> dict:
         status["db_counts"]["latest_sales_month"] = (
             int(str(latest).replace("-", "")[:6]) if latest is not None else None
         )
+        annotate_dense_watermark(status)
     return status
+
+
+def _as_yyyymm(value: Any) -> int | None:
+    """销量月份归一化为 YYYYMM 整数（'2026-08' / '202608' / 202608 → 202608）。"""
+    if value is None:
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    return int(digits[:6]) if len(digits) >= 6 else None
+
+
+def annotate_dense_watermark(status: dict) -> None:
+    """给 status['dense'] 补水位对比字段：集合构建时的销量月份 vs 库内最新月份。
+
+    stale=True 表示「集合可能滞后于库内数据」，两种情形都算：
+    ① 标记里的销量月份 < 库内最新月份（确实落后一个月）；
+    ② 标记文件缺失（旧版工具灌入或重建从未成功过）——无法证明新鲜，按需重建暴露。
+    只有 built_at 与 sales_month 都齐、且不落后时才是 stale=False。
+    """
+    dense = status.get("dense")
+    db_month = (status.get("db_counts") or {}).get("latest_sales_month")
+    if not isinstance(dense, dict):
+        return
+    dense["db_sales_month"] = db_month
+    if not dense.get("built_at"):
+        dense["sales_month"] = None
+        dense["stale"] = db_month is not None
+        dense["stale_reason"] = (
+            "缺少构建水位标记 dense-build-meta.json，无法确认集合是否与库内数据同步"
+            if db_month is not None
+            else None
+        )
+        return
+    month = _as_yyyymm(dense.get("sales_month"))
+    dense["sales_month"] = month
+    dense["stale"] = bool(month and db_month and month < db_month)
+    dense["stale_reason"] = (
+        f"集合构建于销量 {month}，库内已到 {db_month}，需重建稠密索引" if dense["stale"] else None
+    )
 
 
 def dense_build_meta() -> dict:

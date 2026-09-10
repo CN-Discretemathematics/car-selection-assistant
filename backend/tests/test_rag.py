@@ -516,3 +516,46 @@ def test_config_env_float_tolerant(monkeypatch):
     assert retrieval_config._env_float("RETRIEVAL_EMBED_RETRY_SECONDS", 2.0) == 2.0
     monkeypatch.setenv("RETRIEVAL_EMBED_RETRY_SECONDS", "3.5")
     assert retrieval_config._env_float("RETRIEVAL_EMBED_RETRY_SECONDS", 2.0) == 3.5
+
+
+# ── 稠密集合水位（/ops/rag 滞后判定）────────────────────────────────────────
+def test_dense_watermark_month_normalization():
+    """水位月份归一化：'2026-08' / '202608' / 202608 都归到 YYYYMM 整数。"""
+    assert rag._as_yyyymm("2026-08") == 202608
+    assert rag._as_yyyymm("202608") == 202608
+    assert rag._as_yyyymm(202608) == 202608
+    assert rag._as_yyyymm(None) is None
+    assert rag._as_yyyymm("") is None
+
+
+def test_dense_watermark_flags_missing_marker():
+    """标记缺失（重建从未成功/旧版工具灌入）→ 按滞后暴露，并给出原因。"""
+    status = {"dense": {"enabled": True}, "db_counts": {"latest_sales_month": 202608}}
+    rag.annotate_dense_watermark(status)
+    assert status["dense"]["stale"] is True
+    assert status["dense"]["db_sales_month"] == 202608
+    assert "dense-build-meta.json" in status["dense"]["stale_reason"]
+
+
+def test_dense_watermark_detects_lagging_month():
+    """集合构建于 2026-07、库内已到 2026-08 → stale=True（2026-09-10 实况）。"""
+    status = {
+        "dense": {"built_at": "2026-09-08T13:14:00+00:00", "sales_month": "2026-07"},
+        "db_counts": {"latest_sales_month": 202608},
+    }
+    rag.annotate_dense_watermark(status)
+    assert status["dense"]["sales_month"] == 202607
+    assert status["dense"]["stale"] is True
+    assert "202607" in status["dense"]["stale_reason"]
+
+
+def test_dense_watermark_fresh_when_months_match():
+    """月份一致 → stale=False 且无原因文案。"""
+    status = {
+        "dense": {"built_at": "2026-09-10T20:00:00+00:00", "sales_month": "2026-08"},
+        "db_counts": {"latest_sales_month": 202608},
+    }
+    rag.annotate_dense_watermark(status)
+    assert status["dense"]["stale"] is False
+    assert status["dense"]["stale_reason"] is None
+
