@@ -34,12 +34,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # tools/（复用问题生成器的措辞映射）
 
-from gen_eval_questions import (  # noqa: E402  # 措辞映射/约束判定与生成器单一事实源
+from gen_eval_questions import (  # noqa: E402  # 措辞映射与生成器单一事实源
     HINT_TO_ENERGY,
     HEAD_LABEL_TO_BODY,
     _PARAM_KEYS,
-    series_satisfies as _series_satisfies,
 )
+from app.catalog.series_constraints import load_series_attrs, series_satisfies as _series_satisfies  # noqa: E402
 
 from sqlalchemy import select  # noqa: E402
 
@@ -118,19 +118,16 @@ def _metrics(ranked_relevance: list[list[bool]], relevant_counts: list[int], k: 
 
 
 def _build_eval_context(db) -> dict:
-    """预载判定所需的车系属性 / 参数事实 / 款型映射（一次性，全部策略共用）。"""
+    """预载判定所需的车系属性 / 参数事实 / 款型映射（一次性，全部策略共用）。
+
+    车系属性装载走 app/catalog/series_constraints 的共享实现（与流水线 grade 同源）；
+    参数事实（含单位，供 fact-coverage 的 needle 构造）为本评测专属。
+    """
     param_keys = {key for key, _phrase in _PARAM_KEYS}
-    series_rows = db.scalars(select(VehicleSeries)).all()
+    series_attrs = load_series_attrs(db)
     variants = db.scalars(
         select(VehicleVariant).where(VehicleVariant.status == "on_sale")
     ).all()
-    prices: dict[int, float] = {}
-    for p in db.scalars(
-        select(OfficialPrice).where(OfficialPrice.effective_to.is_(None))
-    ).all():
-        cur = prices.get(p.variant_id)
-        if cur is None or float(p.price_cny) < cur:
-            prices[p.variant_id] = float(p.price_cny)
     facts: dict[int, dict[str, tuple[str, str | None]]] = {}
     for vid, key, value, unit in db.execute(
         select(SpecFact.variant_id, SpecFact.fact_key, SpecFact.fact_value, SpecFact.unit)
@@ -139,23 +136,6 @@ def _build_eval_context(db) -> dict:
     ).all():
         if value:
             facts.setdefault(vid, {})[key] = (value, unit)
-    seats_by_variant: dict[int, int] = {}
-    for vid, f in facts.items():
-        v = f.get("座位数(个)")
-        if v and v[0].strip().isdigit():
-            seats_by_variant[vid] = int(v[0])
-    series_attrs: dict[int, dict] = {}
-    for s in series_rows:
-        sv = [v for v in variants if v.series_id == s.id]
-        sv_seats = [seats_by_variant[v.id] for v in sv if v.id in seats_by_variant]
-        series_attrs[s.id] = {
-            "name": s.name,
-            "brand_id": s.brand_id,
-            "body_type": s.body_type,
-            "energy_types": set(s.energy_types or []),
-            "min_price": min((prices[v.id] for v in sv if v.id in prices), default=None),
-            "max_seats": max(sv_seats) if sv_seats else None,
-        }
     variants_by_series: dict[int, list[int]] = {}
     for v in variants:
         variants_by_series.setdefault(v.series_id, []).append(v.id)

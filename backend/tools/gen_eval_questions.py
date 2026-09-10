@@ -24,8 +24,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import select  # noqa: E402
 
+from app.catalog.series_constraints import load_series_attrs, series_satisfies  # noqa: E402
 from app.common.database import get_session_factory  # noqa: E402
-from app.common.models import Brand, OfficialPrice, SpecFact, VehicleSeries, VehicleVariant  # noqa: E402
+from app.common.models import Brand, VehicleSeries, VehicleVariant  # noqa: E402
 
 # 意图模板 → 评测分桶（eval_rag 按桶出报告；查询路由按桶验收）
 INTENT_BUCKET = {
@@ -85,65 +86,8 @@ def _wan(price: float | None) -> int:
     return max(int((price or 150000) / 10000) + 1, 3)
 
 
-def _load_series_attrs(db) -> dict[int, dict]:
-    """车系约束属性（min_price/能源/车身/最大座位）：多约束出题与约束满足度判定共用。"""
-    variants = db.scalars(
-        select(VehicleVariant).where(VehicleVariant.status == "on_sale")
-    ).all()
-    prices: dict[int, float] = {}
-    for p in db.scalars(
-        select(OfficialPrice).where(OfficialPrice.effective_to.is_(None))
-    ).all():
-        cur = prices.get(p.variant_id)
-        if cur is None or float(p.price_cny) < cur:
-            prices[p.variant_id] = float(p.price_cny)
-    param_keys = {key for key, _phrase in _PARAM_KEYS}
-    facts: dict[int, dict[str, str]] = {}
-    for vid, key, value in db.execute(
-        select(SpecFact.variant_id, SpecFact.fact_key, SpecFact.fact_value)
-        .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
-        .where(VehicleVariant.status == "on_sale", SpecFact.fact_key.in_(param_keys))
-    ).all():
-        if value:
-            facts.setdefault(vid, {})[key] = value
-    seats: dict[int, int] = {
-        vid: int(f["座位数(个)"]) for vid, f in facts.items()
-        if (f.get("座位数(个)") or "").strip().isdigit()
-    }
-    attrs: dict[int, dict] = {}
-    for s in db.scalars(select(VehicleSeries)).all():
-        sv = [v for v in variants if v.series_id == s.id]
-        sv_seats = [seats[v.id] for v in sv if v.id in seats]
-        attrs[s.id] = {
-            "name": s.name,
-            "brand_id": s.brand_id,
-            "body_type": s.body_type,
-            "energy_types": set(s.energy_types or []),
-            "min_price": min((prices[v.id] for v in sv if v.id in prices), default=None),
-            "max_seats": max(sv_seats) if sv_seats else None,
-        }
-    return attrs, facts, variants
-
-
-def series_satisfies(attr: dict | None, constraints: dict) -> bool:
-    """约束满足度判定（多约束出题与 eval_rag 评测共用同一实现，避免口径漂移）。"""
-    if not attr:
-        return False
-    budget = constraints.get("budget_max")
-    if budget is not None and (attr["min_price"] is None or attr["min_price"] > budget):
-        return False
-    energy = constraints.get("energy_type")
-    if energy and energy not in attr["energy_types"]:
-        return False
-    if constraints.get("new_energy") and not (attr["energy_types"] - {"ICE"}):
-        return False
-    body = constraints.get("body_type")
-    if body and attr["body_type"] != body:
-        return False
-    passengers = constraints.get("passengers")
-    if passengers and (attr["max_seats"] is None or attr["max_seats"] < int(passengers)):
-        return False
-    return True
+# 车系约束属性装载与 series_satisfies 判定统一在 app/catalog/series_constraints.py
+# （出题、评测、流水线 grade 三处共用同一实现，避免口径漂移）。
 
 
 def _build_unanswerable(
@@ -151,7 +95,6 @@ def _build_unanswerable(
     brands: list,
     series_list: list,
     variants_by_series: dict[int, list],
-    facts: dict[int, dict[str, str]],
     known_keys_by_series: dict[int, set[str]],
     count: int,
 ) -> list[dict]:
@@ -418,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
 
     factory = get_session_factory()
     with factory() as db:
+        from app.common.models import OfficialPrice, SpecFact  # noqa: E402  # 局部依赖（价格/参数键）
+
         brands = db.scalars(select(Brand).where(Brand.active_status == "active")).all()
         series_rows = db.scalars(select(VehicleSeries).where(VehicleSeries.active_status == "active")).all()
         variants_rows = db.scalars(
@@ -429,8 +374,8 @@ def main(argv: list[str] | None = None) -> int:
                 select(OfficialPrice).where(OfficialPrice.effective_to.is_(None))
             ).all()
         }
-        # v3：车系约束属性 + 参数事实（多约束出题 / 不可回答题共用）
-        series_attrs, facts, _variants = _load_series_attrs(db)
+        # v3：车系约束属性（多约束出题 / 不可回答题共用）
+        series_attrs = load_series_attrs(db)
         known_keys_by_series: dict[int, set[str]] = {}
         for sid, key in db.execute(
             select(VehicleVariant.series_id, SpecFact.fact_key)
@@ -460,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
         questions.append(q)
 
     unanswerable = _build_unanswerable(
-        rng2, brands, series_rows, variants_by_series, facts, known_keys_by_series, args.unanswerable,
+        rng2, brands, series_rows, variants_by_series, known_keys_by_series, args.unanswerable,
     )
     for i, q in enumerate(unanswerable):
         q["id"] = f"u{i + 1:03d}"
