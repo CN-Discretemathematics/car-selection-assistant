@@ -8,6 +8,7 @@ from app.agent.series_qa import (
     asks_variant_diff,
     build_series_qa_answer,
     build_variant_diff_answer,
+    missing_param_labels,
     negates_series,
     should_answer,
 )
@@ -62,6 +63,37 @@ def test_normalize_name():
     assert normalize_name("腾势Z9 GT") == "腾势z9gt"
     assert normalize_name("丰田-卡罗拉锐放") == "丰田卡罗拉锐放"
     assert normalize_name("腾势·Z9GT") == "腾势z9gt"
+
+
+def test_unanswerable_param_marks_missing(db_session: Session):
+    """评测 v3 不可回答题（诚实性）：问到的维度 DB 完全没有 → 必须显式「官方资料未披露」。
+
+    修复前 probe_facts 对「DB 完全没有的维度」沉默跳过，回答是一份不回应问题的
+    车系画像（不可回答题拒答判定 0/60 通过）。
+    """
+    ids = _seed_two_series(db_session)
+    resolved = resolve_series(db_session, "卡罗拉锐放 的电池容量是多少")
+    assert [s.id for s, _ in resolved] == [ids["raf"]]
+    answer = build_series_qa_answer(db_session, resolved, "卡罗拉锐放 的电池容量是多少")
+    assert "电池与充电" in answer
+    assert "官方资料未披露" in answer
+
+    # 同维度在别的车系有数据，但锚定车系没有：仍按锚定车系判定
+    z9_answer = build_series_qa_answer(db_session, resolve_series(db_session, "腾势Z9GT 的电池容量是多少"),
+                                       "腾势Z9GT 的电池容量是多少")
+    assert "官方资料未披露" in z9_answer
+
+    # 车系有该维度数据：正常作答，不误标
+    ok_answer = build_series_qa_answer(db_session, resolve_series(db_session, "腾势Z9GT 的续航是多少"),
+                                       "腾势Z9GT 的续航是多少")
+    assert "官方资料未披露" not in ok_answer
+    assert "你问到的相关参数" in ok_answer
+
+
+def test_missing_param_labels_unit():
+    facts = [("CLTC综合续航(km)", "710", "km", "CLTC")]
+    assert missing_param_labels(facts, "电池容量是多少") == ["电池与充电"]
+    assert missing_param_labels(facts, "续航是多少") == []  # 该维度有数据：不标缺失
 
 
 def test_resolve_and_dedupe_longest_wins(db_session: Session):

@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 import time
 
@@ -24,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import select  # noqa: E402
 
 from app.common.database import get_session_factory  # noqa: E402
-from app.common.models import Brand, VehicleSeries, VehicleVariant  # noqa: E402
+from app.common.models import Brand, OfficialPrice, SpecFact, VehicleSeries, VehicleVariant  # noqa: E402
 
 # 意图模板 → 评测分桶（eval_rag 按桶出报告；查询路由按桶验收）
 INTENT_BUCKET = {
@@ -37,6 +38,7 @@ INTENT_BUCKET = {
     "commute": "recommend",
     "long_range_bev": "recommend",
     "brand_series_ask": "recommend",
+    "multi_constraint": "recommend",
     "open_clarify": "semantic",
     "semantic_fuzzy": "semantic",
     "series_spec": "parameter",
@@ -44,8 +46,17 @@ INTENT_BUCKET = {
     "param_variant_key": "parameter",
     "compare_two": "compare",
     "variant_diff": "compare",
+    "unanswerable_param": "unanswerable",
 }
-INTENT_TEMPLATES = list(INTENT_BUCKET)
+INTENT_TEMPLATES = [
+    # 基础题模板池：顺序固定，保证种子 20260829 可复现、与历史问题库逐字一致。
+    # v3 新增意图（multi_constraint/unanswerable_param）只进 INTENT_BUCKET 供分桶，
+    # 由独立随机源追加，不进本池——否则会扰动基础题的抽样序列。
+    "budget_suv", "budget_sedan", "budget_mpv", "energy_bev", "energy_phev_erev",
+    "family_seats", "commute", "long_range_bev", "brand_series_ask", "open_clarify",
+    "semantic_fuzzy", "series_spec", "param_series_key", "param_variant_key",
+    "compare_two", "variant_diff",
+]
 
 # 参数问答用的（事实键, 问法）——键名与数据库 fact_key 对齐（取样自 _PRIORITY_KEY_GROUPS）
 _PARAM_KEYS: tuple[tuple[str, str], ...] = (
@@ -72,6 +83,169 @@ BODY_TO_LABEL: dict[str, str] = {v: k for k, v in HEAD_LABEL_TO_BODY.items()}
 
 def _wan(price: float | None) -> int:
     return max(int((price or 150000) / 10000) + 1, 3)
+
+
+def _load_series_attrs(db) -> dict[int, dict]:
+    """车系约束属性（min_price/能源/车身/最大座位）：多约束出题与约束满足度判定共用。"""
+    variants = db.scalars(
+        select(VehicleVariant).where(VehicleVariant.status == "on_sale")
+    ).all()
+    prices: dict[int, float] = {}
+    for p in db.scalars(
+        select(OfficialPrice).where(OfficialPrice.effective_to.is_(None))
+    ).all():
+        cur = prices.get(p.variant_id)
+        if cur is None or float(p.price_cny) < cur:
+            prices[p.variant_id] = float(p.price_cny)
+    param_keys = {key for key, _phrase in _PARAM_KEYS}
+    facts: dict[int, dict[str, str]] = {}
+    for vid, key, value in db.execute(
+        select(SpecFact.variant_id, SpecFact.fact_key, SpecFact.fact_value)
+        .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
+        .where(VehicleVariant.status == "on_sale", SpecFact.fact_key.in_(param_keys))
+    ).all():
+        if value:
+            facts.setdefault(vid, {})[key] = value
+    seats: dict[int, int] = {
+        vid: int(f["座位数(个)"]) for vid, f in facts.items()
+        if (f.get("座位数(个)") or "").strip().isdigit()
+    }
+    attrs: dict[int, dict] = {}
+    for s in db.scalars(select(VehicleSeries)).all():
+        sv = [v for v in variants if v.series_id == s.id]
+        sv_seats = [seats[v.id] for v in sv if v.id in seats]
+        attrs[s.id] = {
+            "name": s.name,
+            "brand_id": s.brand_id,
+            "body_type": s.body_type,
+            "energy_types": set(s.energy_types or []),
+            "min_price": min((prices[v.id] for v in sv if v.id in prices), default=None),
+            "max_seats": max(sv_seats) if sv_seats else None,
+        }
+    return attrs, facts, variants
+
+
+def series_satisfies(attr: dict | None, constraints: dict) -> bool:
+    """约束满足度判定（多约束出题与 eval_rag 评测共用同一实现，避免口径漂移）。"""
+    if not attr:
+        return False
+    budget = constraints.get("budget_max")
+    if budget is not None and (attr["min_price"] is None or attr["min_price"] > budget):
+        return False
+    energy = constraints.get("energy_type")
+    if energy and energy not in attr["energy_types"]:
+        return False
+    if constraints.get("new_energy") and not (attr["energy_types"] - {"ICE"}):
+        return False
+    body = constraints.get("body_type")
+    if body and attr["body_type"] != body:
+        return False
+    passengers = constraints.get("passengers")
+    if passengers and (attr["max_seats"] is None or attr["max_seats"] < int(passengers)):
+        return False
+    return True
+
+
+def _build_unanswerable(
+    rng: random.Random,
+    brands: list,
+    series_list: list,
+    variants_by_series: dict[int, list],
+    facts: dict[int, dict[str, str]],
+    known_keys_by_series: dict[int, set[str]],
+    count: int,
+) -> list[dict]:
+    """不可回答题：锚定车系在探针维度上**完全无数据** → 期望「官方资料未披露」。
+
+    「完全无数据」必须与线上 probe_facts 同口径：按 _PARAM_PROBES 的维度归类，
+    车系事实里存在**同维度任一键**（如问 WLTC 续航但车系有 CLTC 续航）就算可答——
+    只看精确键缺失会把这类题误判成不可回答（2026-09-11 首版 51/60 误报的教训）。
+    考察答案层诚实性（宁标未披露不编造），由 eval_agent 的拒答判定消费。
+    """
+    from app.agent.series_qa import _PARAM_PROBES  # 探针口径与线上一致
+
+    key_to_phrase = dict(_PARAM_KEYS)
+    # 只保留「问法能触发探针、键名能归入该探针维度」的参数键
+    usable_keys: dict[str, tuple[str, str]] = {}
+    for key, phrase in _PARAM_KEYS:
+        for query_re, key_re in _PARAM_PROBES:
+            if re.search(query_re, phrase) and re.search(key_re, key):
+                usable_keys[key] = (phrase, query_re)
+                break
+    brands_by_id = {b.id: b for b in brands}
+    usable = [s for s in series_list if variants_by_series.get(s.id)]
+    out: list[dict] = []
+    attempts = 0
+    while len(out) < count and attempts < count * 60:
+        attempts += 1
+        s = rng.choice(usable)
+        brand = brands_by_id.get(s.brand_id)
+        if not brand:
+            continue
+        known = known_keys_by_series.get(s.id, set())
+        for key, (phrase, query_re) in usable_keys.items():
+            key_re = next(kr for qr, kr in _PARAM_PROBES if qr == query_re)
+            if re.search(key_re, key) and not any(re.search(key_re, k) for k in known):
+                # 该维度车系完全无数据：真·不可回答
+                out.append({
+                    "strat": "series", "intent": "unanswerable_param", "bucket": "unanswerable",
+                    "text": f"{brand.name} {s.name} 的{phrase}是多少",
+                    "anchors": {"brand_name": brand.name, "series_id": s.id},
+                    "expect": {"series_id": s.id, "fact_key": key, "unanswerable": True},
+                })
+                break  # 每个车系最多出 1 题
+        if len(out) >= count:
+            break
+    return out
+
+
+def _build_multi_constraint(
+    rng: random.Random,
+    series_attrs: dict[int, dict],
+    brands_by_id: dict[int, object],
+    count: int,
+) -> list[dict]:
+    """多约束推荐题：预算/能源/车身/座位组合，满足车系集合可计算（配合 valid-precision）。
+
+    文本刻意不点名车系（v2 口径：未点名的推荐/语义按约束满足度判定）；
+    satisfying_count 随题输出，供报告把 valid-precision 放在「有效答案池大小」背景下解读。
+    """
+    energy_label = {"BEV": "纯电", "PHEV": "插混", "EREV": "增程", "HEV": "油电混动", "ICE": "燃油"}
+    body_label = {"suv": "SUV", "sedan": "轿车", "mpv": "MPV", "pickup": "皮卡"}
+    sids = [sid for sid, a in series_attrs.items() if a.get("min_price") is not None]
+    out: list[dict] = []
+    attempts = 0
+    while len(out) < count and attempts < count * 500:
+        attempts += 1
+        constraints: dict = {"budget_max": rng.choice([100000, 150000, 200000, 300000, 500000])}
+        if rng.random() < 0.85:
+            constraints["energy_type"] = rng.choice(["BEV", "PHEV", "ICE"])
+        if rng.random() < 0.85:
+            constraints["body_type"] = rng.choice(["suv", "sedan", "mpv"])
+        if rng.random() < 0.5:
+            constraints["passengers"] = rng.choice([5, 6, 7])
+        if sum(1 for k in ("energy_type", "body_type", "passengers") if k in constraints) < 2:
+            continue  # 至少两个硬约束，否则没有区分度
+        satisfying = [sid for sid in sids if series_satisfies(series_attrs[sid], constraints)]
+        if not (2 <= len(satisfying) <= 80):
+            continue  # 0/1 = 无解或唯一解（不可答/无区分度）；>80 = 约束没有区分度
+        target = rng.choice(satisfying)
+        brand = brands_by_id.get(series_attrs[target]["brand_id"])
+        text = f"预算{constraints['budget_max'] // 10000}万"
+        if constraints.get("energy_type"):
+            text += f"，要{energy_label[constraints['energy_type']]}"
+        if constraints.get("body_type"):
+            text += f"{body_label[constraints['body_type']]}"
+        if constraints.get("passengers"):
+            text += f"，{constraints['passengers']}座以上"
+        text += "，有推荐吗"
+        out.append({
+            "strat": "sku", "intent": "multi_constraint", "bucket": "recommend",
+            "text": text,
+            "anchors": {"brand_name": brand.name if brand else "", "series_id": target},
+            "expect": {**constraints, "series_id": target, "satisfying_count": len(satisfying)},
+        })
+    return out
 
 
 def _build_questions(brands, series_by_brand, variants_by_series, price_by_variant, count: int) -> list[dict]:
@@ -230,8 +404,15 @@ def _build_questions(brands, series_by_brand, variants_by_series, price_by_varia
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="生成评测问题库（分层抽样 + 查询类型分桶）")
-    parser.add_argument("--count", type=int, default=520, help="问题数量（100~1000，默认 520）")
+    parser.add_argument("--count", type=int, default=520, help="基础问题数量（100~1000，默认 520）")
     parser.add_argument("--output", default=os.path.join("eval", "questions.json"))
+    parser.add_argument("--multi-constraint", type=int, default=80, help="追加多约束推荐题数量（v3）")
+    parser.add_argument(
+        "--unanswerable", type=int, default=60, help="不可回答题数量（v3，单独成库供答案层拒答评测）",
+    )
+    parser.add_argument(
+        "--unanswerable-output", default=os.path.join("eval", "questions-unanswerable.json"),
+    )
     args = parser.parse_args(argv)
     count = min(max(args.count, 100), 1000)
 
@@ -242,14 +423,22 @@ def main(argv: list[str] | None = None) -> int:
         variants_rows = db.scalars(
             select(VehicleVariant).where(VehicleVariant.status == "on_sale")
         ).all()
-        from app.common.models import OfficialPrice
-
         price_by_variant = {
             p.variant_id: float(p.price_cny)
             for p in db.scalars(
                 select(OfficialPrice).where(OfficialPrice.effective_to.is_(None))
             ).all()
         }
+        # v3：车系约束属性 + 参数事实（多约束出题 / 不可回答题共用）
+        series_attrs, facts, _variants = _load_series_attrs(db)
+        known_keys_by_series: dict[int, set[str]] = {}
+        for sid, key in db.execute(
+            select(VehicleVariant.series_id, SpecFact.fact_key)
+            .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
+            .where(VehicleVariant.status == "on_sale")
+            .distinct()
+        ).all():
+            known_keys_by_series.setdefault(sid, set()).add(key)
 
     series_by_brand: dict[int, list[VehicleSeries]] = {}
     for s in series_rows:
@@ -258,7 +447,24 @@ def main(argv: list[str] | None = None) -> int:
     for v in variants_rows:
         variants_by_series.setdefault(v.series_id, []).append(v)
 
+    # 基础题（种子 20260829 不变：与历史报告逐字可比）
     questions = _build_questions(brands, series_by_brand, variants_by_series, price_by_variant, count)
+
+    # v3 追加题：独立随机源（不扰动基础题的抽样序列）；约束有效集只统计活跃车系
+    active_ids = {s.id for s in series_rows}
+    active_attrs = {sid: a for sid, a in series_attrs.items() if sid in active_ids}
+    rng2 = random.Random(20260911)
+    brands_by_id = {b.id: b for b in brands}
+    for q in _build_multi_constraint(rng2, active_attrs, brands_by_id, args.multi_constraint):
+        q["id"] = f"q{len(questions) + 1:04d}"
+        questions.append(q)
+
+    unanswerable = _build_unanswerable(
+        rng2, brands, series_rows, variants_by_series, facts, known_keys_by_series, args.unanswerable,
+    )
+    for i, q in enumerate(unanswerable):
+        q["id"] = f"u{i + 1:03d}"
+
     by_bucket: dict[str, int] = {}
     for q in questions:
         by_bucket[q["bucket"]] = by_bucket.get(q["bucket"], 0) + 1
@@ -272,7 +478,19 @@ def main(argv: list[str] | None = None) -> int:
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=1)
-    print(f"已生成 {len(questions)} 条问题（分桶 {by_bucket}）→ {args.output}")
+    ua_payload = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "source": "不可回答题：锚定车系全部在售款型均无该参数，期望「官方资料未披露」（答案层拒答评测）",
+        "count": len(unanswerable),
+        "questions": unanswerable,
+    }
+    os.makedirs(os.path.dirname(args.unanswerable_output), exist_ok=True)
+    with open(args.unanswerable_output, "w", encoding="utf-8") as fh:
+        json.dump(ua_payload, fh, ensure_ascii=False, indent=1)
+    print(
+        f"已生成 {len(questions)} 条问题（分桶 {by_bucket}）→ {args.output}；"
+        f"不可回答题 {len(unanswerable)} 条 → {args.unanswerable_output}"
+    )
     return 0
 
 

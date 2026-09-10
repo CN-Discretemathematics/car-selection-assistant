@@ -68,6 +68,20 @@ _PARAM_PROBES: tuple[tuple[str, str], ...] = (
 _PROBE_SKIP_KEYS = {"优惠信息"}
 _PROBE_SKIP_VALUES = {"暂无", "-", "--", "未知"}
 _PROBE_MAX_KEYS = 8
+
+# 探针维度 → 用户可读名（v3 不可回答题诚实性标注：问了但 DB 完全没有的维度，
+# 必须显式回答「官方资料未披露」——评测 v3 拒答判定 0/60 通过暴露的缺失）
+_PARAM_DIM_LABELS: dict[str, str] = {
+    r"(续航|能跑多少|跑多远)": "续航",
+    r"(油耗|电耗|能耗|耗油|费油|省电)": "油耗/电耗",
+    r"(空间|轴距|车长|尺寸|后备箱|行李厢)": "空间尺寸",
+    r"(动力|功率|马力|扭矩|加速|零百|几秒|推背)": "动力参数",
+    r"(电池|充电|快充|慢充)": "电池与充电",
+    r"(安全|气囊|主动刹车|碰撞)": "安全配置",
+    r"(悬架|悬挂|底盘|四驱|越野|操控)": "底盘与驱动",
+    r"(智驾|辅助驾驶|自动驾驶|车机|芯片|屏幕|音响|抬头显示|雷达|摄像头|泊车)": "智驾与座舱",
+    r"(座椅|空调|天窗|冰箱|隔音|按摩|通风|加热|彩电|沙发)": "舒适配置",
+}
 # 汽车之家配置表的特征标记值 → 用户可读表述（●=标配、○=选装；- 已在跳过表内）
 _FEATURE_VALUE_LABEL = {"●": "有（标配）", "○": "选装"}
 
@@ -96,6 +110,28 @@ def negates_series(message: str, series_name: str) -> bool:
         )
         _NEGATION_SERIES_CACHE[series_name] = pattern
     return bool(pattern.search(message))
+
+
+def missing_param_labels(
+    facts: list[tuple[str, str, str | None, str | None]], message: str
+) -> list[str]:
+    """提问命中了参数探针维度、但该车系全量事实里没有任何对应键 → 返回可读维度名。
+
+    M-R10 的探针只处理「DB 有参数」的情形；DB 完全没有该维度时会沉默跳过，
+    用户得到一份不回应问题的车系画像（评测 v3 不可回答题拒答判定 0/60 通过暴露）。
+    诚实性原则要求这里显式回答「官方资料未披露」。
+    """
+    known_keys = {row[0] for row in facts}
+    labels: list[str] = []
+    for query_re, key_re in _PARAM_PROBES:
+        if not re.search(query_re, message):
+            continue
+        if any(re.search(key_re, key) for key in known_keys if key not in _PROBE_SKIP_KEYS):
+            continue  # 该维度车系有数据，由 probe_facts 正常作答
+        label = _PARAM_DIM_LABELS.get(query_re)
+        if label and label not in labels:
+            labels.append(label)
+    return labels
 
 # 亮点配置（用户可感知的进阶项；按顺序最多取 5 个实际存在的）
 _FEATURE_HIGHLIGHTS: list[tuple[str, str]] = [
@@ -262,6 +298,11 @@ def build_series_qa_answer(
         probed = probe_facts(facts, message)
         if probed:
             parts.append("你问到的相关参数：" + "；".join(probed) + "。")
+        missing = missing_param_labels(facts, message)
+        if missing:
+            # 诚实性兜底（评测 v3）：问到的维度 DB 完全没有 → 显式「官方资料未披露」，
+            # 绝不沉默跳过，也绝不编造
+            parts.append("你问到的" + "、".join(missing) + "：官方资料未披露。")
         parts.append(footer)
         return "\n".join(parts)
 

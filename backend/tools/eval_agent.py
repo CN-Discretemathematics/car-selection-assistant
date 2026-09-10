@@ -36,6 +36,9 @@ RECOMMEND_INTENTS = {
 RETRIEVAL_INTENTS = {"series_spec", "brand_series_ask", "energy_bev", "energy_phev_erev", "long_range_bev", "commute"}
 COMPARE_INTENTS = {"compare_two"}
 CLARIFY_INTENTS = {"open_clarify"}
+# v3 不可回答题（诚实性）：锚定车系的在售款型均无该参数，期望答案明确标注「官方资料未披露」
+UNANSWERABLE_INTENTS = {"unanswerable_param"}
+_HONEST_MARKERS = ("未披露", "未查到", "暂无", "没有")
 
 
 def _check_recommendation(q: dict, out) -> tuple[bool, str]:
@@ -129,6 +132,19 @@ def main(argv: list[str] | None = None) -> int:
                     clar_ok = out.need_clarification is True
                     ok = ok and clar_ok
                     notes.append("已追问" if clar_ok else "未追问")
+                if intent in UNANSWERABLE_INTENTS:
+                    # 诚实性判定：证据/数据缺失时必须标注未披露，不得编造数值
+                    out = asyncio.run(_run_engine(db, engine, q["text"]))
+                    answer = getattr(out, "explanation", "") or ""
+                    honest = any(marker in answer for marker in _HONEST_MARKERS)
+                    retrieval_total += 1
+                    res = retrieval_search(db, q["text"], top_k=5)
+                    if res:
+                        retrieval_hits += 1
+                    ok = ok and honest
+                    notes.append(
+                        "正确标注未披露" if honest else f"缺失未标注（explanation: {answer[:48]}）"
+                    )
                 if not notes:
                     notes.append("跳过（未知意图）")
                 if not ok:
