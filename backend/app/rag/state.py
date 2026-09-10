@@ -32,6 +32,10 @@ class RagState(TypedDict, total=False):
     # analyze 输出：实体增强查询 + 归一化过滤条件
     entity_query: str
     resolved_series: list[str]
+    # 评测 v4：锚定车系 id（compare 双侧均衡）与从问题文本解析的硬约束（recommend
+    # 约束下推——未点名车系时证据按约束满足度重排）
+    anchor_series_ids: list[int]
+    constraints: dict
     # 优化④⑤：查询意图（parameter|recommend|semantic|compare）与同义扩展后的检索串
     query_type: str
     search_query: str

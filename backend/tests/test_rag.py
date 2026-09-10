@@ -599,3 +599,66 @@ def test_dense_watermark_fresh_when_months_match():
     assert status["dense"]["stale"] is False
     assert status["dense"]["stale_reason"] is None
 
+
+# ── 评测 v4：约束解析 / compare 双侧均衡 / 约束下推重排 ─────────────────────
+def test_parse_constraints():
+    from app.rag.pipeline import _parse_constraints
+
+    assert _parse_constraints("预算15万，要纯电SUV，6座以上，有推荐吗") == {
+        "budget_max": 150000, "energy_type": "BEV", "body_type": "suv", "passengers": 6,
+    }
+    assert _parse_constraints("想要增程式的车") == {"energy_type": "EREV"}
+    assert _parse_constraints("新能源轿车有哪些") == {"new_energy": True, "body_type": "sedan"}
+    assert _parse_constraints("看看车") == {}  # 无约束不触发重排
+
+
+def test_balance_by_series_interleaves():
+    from app.rag.pipeline import _balance_by_series
+
+    h1a = SearchResult(chunk_id="1a", score=0.9, text="a1", kind="variant_spec", series_id=1)
+    h1b = SearchResult(chunk_id="1b", score=0.8, text="a2", kind="variant_spec", series_id=1)
+    h2a = SearchResult(chunk_id="2a", score=0.7, text="b1", kind="variant_spec", series_id=2)
+    # 单侧挤占：交错后双侧都在前两名
+    balanced = _balance_by_series([h1a, h1b, h2a], [1, 2])
+    assert [h.chunk_id for h in balanced[:2]] == ["1a", "2a"]
+    assert [h.chunk_id for h in balanced] == ["1a", "2a", "1b"]
+    # 非对比场景 / 单锚点：原序不动
+    assert _balance_by_series([h1a, h1b], [1]) == [h1a, h1b]
+
+
+def test_reorder_by_constraints_puts_valid_first(monkeypatch):
+    import app.catalog.series_constraints as sc
+    from app.rag.pipeline import _reorder_by_constraints
+
+    attrs = {
+        1: {"name": "纯电SUV", "brand_id": 1, "body_type": "suv", "energy_types": {"BEV"},
+            "min_price": 120000.0, "max_seats": 5},
+        2: {"name": "燃油轿车", "brand_id": 1, "body_type": "sedan", "energy_types": {"ICE"},
+            "min_price": 200000.0, "max_seats": 5},
+    }
+    monkeypatch.setattr(sc, "load_series_attrs", lambda db, sids=None: attrs)
+    invalid = SearchResult(chunk_id="2a", score=0.9, text="燃油车", kind="variant_spec", series_id=2)
+    valid = SearchResult(chunk_id="1a", score=0.8, text="纯电车", kind="variant_spec", series_id=1)
+    out = _reorder_by_constraints(db=None, results=[invalid, valid],
+                                  constraints={"budget_max": 150000, "energy_type": "BEV",
+                                               "body_type": "suv"})
+    assert [h.chunk_id for h in out] == ["1a", "2a"], "满足约束的证据应排到前面"
+
+
+def test_compare_query_covers_both_series(db_session: Session):
+    """评测 v4 端到端：对比类查询 top-2 必须双侧车系都在场（pair-coverage 修复）。"""
+    ids = _seed(db_session)
+    rag.reset_index()
+    results = rag.search(db_session, "对比 家用SUV标准版 和 通勤轿车舒适版 的配置差异", top_k=5)
+    top2 = {r.series_id for r in results[:2]}
+    assert top2 == {ids["suv"], ids["sedan"]}, f"双侧证据都应在 top-2：{top2}"
+
+
+def test_recommend_query_prefers_constraint_satisfying(db_session: Session):
+    """评测 v4 端到端：未点名车系 + 硬约束 → 满足约束的车系证据优先。"""
+    ids = _seed(db_session)
+    rag.reset_index()
+    results = rag.search(db_session, "预算15万，要纯电SUV，5座以上，有推荐吗", top_k=3)
+    assert results, "应命中证据"
+    assert results[0].series_id == ids["suv"], "燃油轿车证据不得排在纯电SUV之前（约束满足度优先）"
+

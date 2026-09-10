@@ -45,6 +45,11 @@ _PARAM_HINT_RE = re.compile(
 )
 _COMPARE_HINT_RE = re.compile(r"对比|差异|差别|区别|比较|哪个好|比一比|版本差异|款型差异")
 
+# 约束解析（评测规范 v4：recommend 约束下推）——从问题文本解析硬约束，
+# grade 据此把「满足约束」的证据排到前面（未点名车系时才生效）
+_BUDGET_RE = re.compile(r"(\d+(?:\.\d+)?)\s*万")
+_SEATS_RE = re.compile(r"(\d)\s*座")
+
 # 加权 RRF（优化⑤）：统一 0.6/0.4——权重网格消融（120 题五配置，2026-09）实测：
 # 0.6/0.4 MRR 0.7032 为最优平台期（0.5/0.5 等权 0.6948、纯稀疏 0.6898、0.4/0.6 有害）；
 # 原按桶路由的权重组（semantic 偏稠密）实测反而更差（0.7010），已删除。
@@ -58,6 +63,78 @@ def _classify_query(query: str, resolved_count: int) -> str:
     if _PARAM_HINT_RE.search(query) and resolved_count >= 1:
         return "parameter"
     return "semantic"
+
+
+def _parse_constraints(query: str) -> dict:
+    """从问题文本解析硬约束（预算/能源/车身/座位），供 grade 约束优先重排。"""
+    out: dict = {}
+    m = _BUDGET_RE.search(query)
+    if m:
+        out["budget_max"] = int(float(m.group(1)) * 10000)
+    if "纯电" in query:
+        out["energy_type"] = "BEV"
+    elif "插混" in query or "能加油" in query:
+        out["energy_type"] = "PHEV"
+    elif "增程" in query:
+        out["energy_type"] = "EREV"
+    elif "混动" in query:
+        out["energy_type"] = "HEV"
+    elif "燃油" in query:
+        out["energy_type"] = "ICE"
+    elif "新能源" in query:
+        out["new_energy"] = True
+    upper = query.upper()
+    if "SUV" in upper:
+        out["body_type"] = "suv"
+    elif "MPV" in upper:
+        out["body_type"] = "mpv"
+    elif "轿车" in query:
+        out["body_type"] = "sedan"
+    elif "皮卡" in query:
+        out["body_type"] = "pickup"
+    m = _SEATS_RE.search(query)
+    if m:
+        out["passengers"] = int(m.group(1))
+    return out
+
+
+def _balance_by_series(results: list[SearchResult], anchor_ids: list[int]) -> list[SearchResult]:
+    """对比类双侧均衡（评测 v4）：各锚定车系的证据按名次交错，保证 top_k 内双侧都在场。
+
+    只交错、不丢弃：全部证据仍按原相对名次保留，仅重排前 top_k 的构成——
+    修复 pair-coverage 0.439（top_k 被单侧切片挤占，另一侧证据缺席）。
+    """
+    anchors = [sid for sid in anchor_ids if sid is not None]
+    if len(anchors) < 2 or len(results) <= 1:
+        return results
+    queues: dict[int, list[SearchResult]] = {sid: [] for sid in anchors}
+    rest: list[SearchResult] = []
+    for hit in results:
+        if hit.series_id in queues:
+            queues[hit.series_id].append(hit)
+        else:
+            rest.append(hit)
+    ordered: list[SearchResult] = []
+    while any(queues.values()):
+        for sid in anchors:
+            if queues[sid]:
+                ordered.append(queues[sid].pop(0))
+    return ordered + rest
+
+
+def _reorder_by_constraints(
+    db, results: list[SearchResult], constraints: dict
+) -> list[SearchResult]:
+    """未点名车系的推荐/语义查询：满足硬约束的证据优先（稳定重排，组内保持原名次）。"""
+    sids = {h.series_id for h in results if h.series_id is not None}
+    if not sids:
+        return results
+    from app.catalog.series_constraints import load_series_attrs, series_satisfies
+
+    attrs = load_series_attrs(db, sids)
+    valid = [h for h in results if series_satisfies(attrs.get(h.series_id), constraints)]
+    invalid = [h for h in results if not series_satisfies(attrs.get(h.series_id), constraints)]
+    return valid + invalid
 
 
 def _analyze(state: RagState) -> RagState:
@@ -106,9 +183,13 @@ def _analyze(state: RagState) -> RagState:
         "search_query": search_query,
         "query_type": query_type,
         "resolved_series": resolved_names,
+        # 评测 v4：锚定车系（compare 双侧均衡）+ 文本解析硬约束（未点名车系的约束下推）
+        "anchor_series_ids": [s.id for s, _ in resolved],
+        "constraints": _parse_constraints(query) if not resolved else {},
         "stages": [make_stage("analyze", 1, len(resolved_names), started,
                               {"resolved_series": resolved_names, "filters": filters,
                                "recall_k": recall_k, "query_type": query_type,
+                               "constraints": _parse_constraints(query) if not resolved else {},
                                "expanded_terms": expanded})],
         "warnings": warnings,
     }
@@ -271,7 +352,14 @@ def _rerank(state: RagState) -> RagState:
 
 
 def _grade(state: RagState) -> RagState:
-    """证据把关：丢弃空文本；重排分具备绝对语义时应用相关性阈值。"""
+    """证据把关：丢弃空文本；重排分具备绝对语义时应用相关性阈值。
+
+    评测 v4 两项信息需求对齐的排序修正（意图互斥，只在明确条件下生效）：
+    - compare 双侧均衡：对比类查询两侧锚定车系的证据按名次交错，避免 top_k 被单侧
+      挤占（pair-coverage 0.439 的根因）；
+    - 约束下推：未点名车系 + 文本解析出硬约束（预算/能源/车身/座位）时，满足约束的
+      证据优先（valid-precision 0.445 的根因）。点名车系的车系问答不受影响。
+    """
     started = time.perf_counter()
     ranked = state.get("reranked") or []
     absolute = bool(state.get("reranker_absolute"))
@@ -281,11 +369,19 @@ def _grade(state: RagState) -> RagState:
         if hit.text and hit.text.strip() and (threshold <= 0 or hit.score >= threshold)
     ]
     dropped = len(ranked) - len(results)
+    reorder = None
+    if state.get("query_type") == "compare":
+        results = _balance_by_series(results, state.get("anchor_series_ids") or [])
+        reorder = "compare_balance"
+    elif state.get("constraints") and not state.get("resolved_series"):
+        results = _reorder_by_constraints(state["db"], results, state["constraints"])
+        reorder = "constraint_first"
     final = results[: state["top_k"]]
     return {
         "results": final,
         "stages": [make_stage("grade", len(ranked), len(final), started,
-                              {"dropped": dropped, "threshold": threshold if absolute else None})],
+                              {"dropped": dropped, "threshold": threshold if absolute else None,
+                               "reorder": reorder})],
     }
 
 

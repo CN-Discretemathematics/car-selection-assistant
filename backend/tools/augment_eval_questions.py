@@ -29,12 +29,55 @@ from app.common.llm import LLMClient  # noqa: E402
 _PROMPT = (
     "把下面的用户买车提问改写成更口语化的说法，像真实用户在聊天窗口随手打字。\n"
     "硬性要求：\n"
-    "1. 原句中的所有数字必须原样保留，用阿拉伯数字，不得增减或改成中文数字；\n"
+    "1. 数字语义必须与原句完全一致（预算/座位/续航不得增减），可以用中文数字（如十五万）；\n"
     "2. 品牌名、车系名、款型名必须原样保留，一个字都不能改；\n"
     "3. 不新增任何要求、车型或配置；不改变原意；\n"
     "4. 只输出改写后的一句话，不要任何解释或引号。\n"
     "用户提问：{text}"
 )
+
+# 中文数字等价判定（v4 扩样）：「十五万」≡ 150000、「六座」≡ 6座——
+# 首版要求阿拉伯数字逐组一致，28% 改写成功率过低（LLM 爱用中文数字）。
+_CN_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千]+(?:万)?")
+_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+             "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cn_to_int(cn: str) -> int | None:
+    has_wan = cn.endswith("万")
+    body = cn[:-1] if has_wan else cn
+    units = {"十": 10, "百": 100, "千": 1000}
+    total = 0
+    num = 0
+    any_digit = False
+    for ch in body:
+        if ch in _CN_DIGIT:
+            num = _CN_DIGIT[ch]
+            any_digit = True
+        elif ch in units:
+            total += (num or 1) * units[ch]
+            num = 0
+            any_digit = True
+        else:
+            return None
+    total += num
+    if not any_digit:
+        return None
+    return total * (10000 if has_wan else 1)
+
+
+def _number_semantics(text: str) -> list[int]:
+    """把「15万」「十五万」统一成语义整数，返回排序后的数字多集（口径：语义等价）。"""
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*万", lambda m: str(int(float(m.group(1)) * 10000)), text)
+    parts: list[str] = []
+    pos = 0
+    for m in _CN_NUM_RE.finditer(text):
+        parts.append(text[pos:m.start()])
+        value = _cn_to_int(m.group())
+        parts.append(str(value) if value is not None else m.group())
+        pos = m.end()
+    parts.append(text[pos:])
+    return sorted(int(x) for x in re.findall(r"\d+", "".join(parts)))
 
 
 def _digits(text: str) -> list[str]:
@@ -44,8 +87,8 @@ def _digits(text: str) -> list[str]:
 def _validate(original: str, variant: str, series_name: str | None) -> bool:
     if not variant or not (6 <= len(variant) <= 120):
         return False
-    if _digits(variant) != _digits(original):
-        return False  # 数字必须逐组一致（预算/座位/续航不得改动）
+    if _number_semantics(variant) != _number_semantics(original):
+        return False  # 数字语义必须一致（预算/座位/续航不得增减，中文数字等价可接受）
     if series_name and series_name not in variant:
         return False  # 点名车系的题：车系名丢了会让实体解析失效（假跌）
     return variant != original
