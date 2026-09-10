@@ -59,6 +59,16 @@ _PARAM_KEYS: tuple[tuple[str, str], ...] = (
     ("电池能量(kWh)", "电池容量"),
 )
 
+# 语义题的能源/车身措辞映射（module 级：eval_rag 的约束满足度判定复用同一张表，
+# 从问题文本反解结构化约束，避免两处口径漂移）
+ENERGY_TO_HINT: dict[str, str] = {
+    "BEV": "纯电的", "PHEV": "能加油能充电的插混", "EREV": "增程式的",
+    "HEV": "油电混动的", "ICE": "燃油的",
+}
+HINT_TO_ENERGY: dict[str, str] = {v: k for k, v in ENERGY_TO_HINT.items()}
+HEAD_LABEL_TO_BODY: dict[str, str] = {"轿车": "sedan", "SUV": "suv", "MPV": "mpv", "皮卡": "pickup"}
+BODY_TO_LABEL: dict[str, str] = {v: k for k, v in HEAD_LABEL_TO_BODY.items()}
+
 
 def _wan(price: float | None) -> int:
     return max(int((price or 150000) / 10000) + 1, 3)
@@ -170,12 +180,9 @@ def _build_questions(brands, series_by_brand, variants_by_series, price_by_varia
         elif intent == "semantic_fuzzy":
             # 不点名车系：用定位/能源/车身特征描述（anchors=生成时的目标车系，
             # 考察检索的语义匹配而非实体命中）
-            head = {"sedan": "轿车", "suv": "SUV", "mpv": "MPV", "pickup": "皮卡"}.get(series.body_type or "", "车")
+            head = BODY_TO_LABEL.get(series.body_type or "", "车")
             energy = rng.choice(series.energy_types or ["BEV"])
-            energy_hint = {
-                "BEV": "纯电的", "PHEV": "能加油能充电的插混", "EREV": "增程式的",
-                "HEV": "油电混动的", "ICE": "燃油的",
-            }.get(energy, "新能源的")
+            energy_hint = ENERGY_TO_HINT.get(energy, "新能源的")
             positioning = (series.positioning or f"{brand.name} 旗下的家用{head}").strip()
             add({"strat": "series", "intent": intent,
                  "text": f"帮我推荐一台{energy_hint}{head}，{positioning}",
