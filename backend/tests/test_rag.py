@@ -320,6 +320,33 @@ def test_variant_chunks_dedupe_within_variant(db_session: Session):
         assert c.text.count("轴距(mm) = 3125") == 1, "同款型内重复行应去重为一条"
 
 
+def test_variant_chunks_dedupe_ignores_surrounding_whitespace(db_session: Session):
+    """评审 v5-3：去重口径与 Python strip() 对齐——只有首尾空白差异的值视为同一条。
+
+    旧实现（Python 侧 strip 后比较）会把 "3125" 与 "\\t3125" 当同一条；改成 SQL 窗口
+    去重后若只用 ASCII 空格 trim，两者会落进两个分组：白占一个配额槽、切片里还会
+    输出两行同样的值。
+    """
+    source = make_source(db_session, name="官方测试来源6")
+    brand = make_brand(db_session, name="测试品牌6", source=source)
+    suv = make_series(db_session, brand, name="空白SUV", body_type="suv", energy_types=("BEV",), source=source)
+    year = make_year(db_session, suv)
+    variant = make_variant(
+        db_session, suv, year, config_version="标准版", energy_type="BEV",
+        facts=[("参数信息", "轴距(mm)", "3125", "mm", None)], source=source,
+    )
+    for value in ("\t3125", "3125 ", "\u30003125"):
+        db_session.add(
+            SpecFact(variant_id=variant.id, source_id=source.id, category="参数信息",
+                     fact_key="轴距(mm)", fact_value=value, unit="mm")
+        )
+    db_session.commit()
+
+    chunks = [c for c in build_chunks(db_session) if c.kind == "variant_spec" and c.series_id == suv.id]
+    lines = sum(c.text.count("轴距(mm) = 3125") for c in chunks)
+    assert lines == 1, "仅首尾空白不同的值必须去重为一条，不得白占配额或重复输出"
+
+
 # ── 查询流水线（LangGraph）────────────────────────────────────────────────────
 def test_pipeline_stages_and_entity_filter(db_session: Session):
     ids = _seed(db_session)
@@ -524,8 +551,21 @@ def test_dense_watermark_month_normalization():
     assert rag._as_yyyymm("2026-08") == 202608
     assert rag._as_yyyymm("202608") == 202608
     assert rag._as_yyyymm(202608) == 202608
+    # 评审 v5-10：库里出现未补零的 '2026-8' 也不能退化成无法比较
+    assert rag._as_yyyymm("2026-8") == 202608
     assert rag._as_yyyymm(None) is None
     assert rag._as_yyyymm("") is None
+
+
+def test_dense_watermark_missing_month_is_stale():
+    """评审 v5-2：标记有 built_at 但没写销量月份（构建时那次查询失败）不能算「新鲜」。"""
+    status = {
+        "dense": {"built_at": "2026-09-10T04:00:00+00:00", "sales_month": None},
+        "db_counts": {"latest_sales_month": 202608},
+    }
+    rag.annotate_dense_watermark(status)
+    assert status["dense"]["stale"] is True
+    assert "销量月份" in status["dense"]["stale_reason"]
 
 
 def test_dense_watermark_flags_missing_marker():

@@ -346,12 +346,11 @@ function StatusTab({ token, onError }: TabProps) {
               <p className="mt-1 text-xs text-gray-500">
                 构建于 {status.dense.built_at ?? "未知（无水位标记）"}
                 {status.dense.chunks ? ` · ${status.dense.chunks.toLocaleString()} 切片` : ""}
-                {status.dense.sales_month ? ` · 销量水位 ${status.dense.sales_month}` : ""}
+                {status.dense.sales_month ? ` · 构建时销量水位 ${status.dense.sales_month}` : ""}
               </p>
               {status.dense.stale && (
                 <p className="mt-1 text-xs font-medium text-amber-600">
                   ⚠ 集合可能滞后：{status.dense.stale_reason ?? "与库内数据不同步"}
-                  {status.dense.db_sales_month ? `（库内最新 ${status.dense.db_sales_month}）` : ""}
                 </p>
               )}
             </>
@@ -377,7 +376,7 @@ function StatusTab({ token, onError }: TabProps) {
           {status.db_counts ? (
             <ul className="space-y-0.5 text-xs text-gray-600">
               {Object.entries(status.db_counts).map(([k, v]) => (
-                <li key={k}>{k}: {v.toLocaleString()}</li>
+                <li key={k}>{k}: {typeof v === "number" ? v.toLocaleString() : "—"}</li>
               ))}
             </ul>
           ) : (

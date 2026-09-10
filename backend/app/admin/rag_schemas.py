@@ -45,6 +45,13 @@ class DenseStatusOut(BaseModel):
     dim: int | None = None
     embedding_model: str | None = None
     error: str | None = None
+    # 构建水位（.tmp/dense-build-meta.json）+ 与库内销量月份的滞后判定（2026-09 新增）
+    built_at: str | None = None
+    chunks: int | None = None
+    sales_month: int | None = None
+    db_sales_month: int | None = None
+    stale: bool | None = None
+    stale_reason: str | None = None
 
 
 class RerankerStatusOut(BaseModel):

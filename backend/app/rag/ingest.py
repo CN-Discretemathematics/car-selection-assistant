@@ -16,7 +16,7 @@ import time
 from typing import Any, Callable, NamedTuple
 
 from langgraph.graph import END, START, StateGraph
-from sqlalchemy import case, func, select, text
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.catalog.series_index import HEADLINE_ORDER, HEADLINE_SPECS, display_name, rank_headlines
@@ -70,19 +70,23 @@ class _Fact(NamedTuple):
     last_verified_at: Any
 
 
+# 去重口径：与 Python str.strip() 对齐的字符集（SQL trim(x, chars) 在 PostgreSQL/SQLite
+# 都是「去掉两端属于该字符集的字符」）。只写 ASCII 空白会让 "\t10" 与 "10" 落进两个分组，
+# 白占一个配额槽、并在切片里输出两行重复值（评审 v5-3）。
+_STRIP_CHARS = " \t\n\r\f\v\u00a0\u3000"
 
-def _relax_idle_transaction_timeout(db: Session) -> None:
-    """关闭本次构建会话的「事务空闲」超时（RDS 默认 1h）。
 
-    重建的 load/chunk 阶段会长时间只用 Python 处理已取回的行、不再发查询，
-    期间只读事务一直挂着；RDS 的 idle_in_transaction_session_timeout 到点会直接
-    掐断连接，下一次查询抛 psycopg.errors.IdleInTransactionSessionTimeout
-    （2026-09-10 rebuild4 就是这样失败的）。这里只针对构建会话关闭该保护，
-    不影响 API 进程；SQLite 等后端没有该参数，跳过。
+def _end_read_transaction(db: Session) -> None:
+    """结束只读事务：load / chunk 的读取到此为止。
+
+    embedding + 上传要跑十几分钟到数小时，期间不该留一个只读事务挂着——RDS 的
+    idle_in_transaction_session_timeout（默认 1h）会直接掐断连接，下一次查询抛
+    psycopg.errors.IdleInTransactionSessionTimeout（2026-09-10 rebuild4 的失败原因），
+    长时间持有快照也会拖住 vacuum。实体先 expunge 再 rollback：脱离会话的实例保留
+    已加载属性，下游拼装逻辑不受影响。
     """
-    bind = db.get_bind()
-    if getattr(getattr(bind, "dialect", None), "name", None) == "postgresql":
-        db.execute(text("SET idle_in_transaction_session_timeout = 0"))
+    db.expunge_all()
+    db.rollback()
 
 
 def _load(state: IngestState) -> IngestState:
@@ -90,7 +94,6 @@ def _load(state: IngestState) -> IngestState:
     started = time.perf_counter()
     db: Session = state["db"]
     limit = state.get("limit") or MAX_CHUNKS
-    _relax_idle_transaction_timeout(db)
 
     series_rows = db.execute(
         select(VehicleSeries, Brand)
@@ -120,13 +123,14 @@ def _load(state: IngestState) -> IngestState:
         select(
             SpecFact.id.label("fid"),
             SpecFact.variant_id.label("vid"),
+            VehicleVariant.series_id.label("sid"),
             priority_case.label("prio"),
             func.row_number()
             .over(
                 partition_by=(
                     SpecFact.variant_id,
                     SpecFact.fact_key,
-                    func.trim(func.coalesce(SpecFact.fact_value, "")),
+                    func.trim(func.coalesce(SpecFact.fact_value, ""), _STRIP_CHARS),
                     SpecFact.unit,
                 ),
                 order_by=(priority_case, SpecFact.id),
@@ -140,6 +144,7 @@ def _load(state: IngestState) -> IngestState:
     quota_facts = (
         select(
             deduped_facts.c.fid.label("fid"),
+            deduped_facts.c.sid.label("sid"),
             func.row_number()
             .over(
                 partition_by=deduped_facts.c.vid,
@@ -174,7 +179,8 @@ def _load(state: IngestState) -> IngestState:
         )
         .join(quota_facts, SpecFact.id == quota_facts.c.fid)
         .where(quota_facts.c.quota_rn <= FACTS_PER_VARIANT)
-        .order_by(SpecFact.variant_id, quota_facts.c.quota_rn)
+        # 与旧实现同样的输出序（车系 → 款型 → 配额名次），保证 --limit 截断可复现
+        .order_by(quota_facts.c.sid, SpecFact.variant_id, quota_facts.c.quota_rn)
     ).all()
 
     # 车系画像聚合原料（摘要切片用）：核心参数事实 + 价格区间 + 在售数 + 最新月销量。
@@ -257,6 +263,7 @@ def _load(state: IngestState) -> IngestState:
         "count_by_series": dict(count_rows),
         "sales_by_series": sales_by_series,
     }
+    _end_read_transaction(db)  # 读取到此为止：后面的 embedding/上传不再持有只读事务
     return {
         "materials": materials,
         "stages": [make_stage("load", len(series_ids), len(fact_rows), started,
@@ -496,6 +503,7 @@ def _chunk(state: IngestState) -> IngestState:
             )
 
     final_chunks = chunks[:limit]
+    _end_read_transaction(db)  # 读取到此为止：index 阶段不再持有只读事务
     return {
         "chunks": final_chunks,
         "stages": [make_stage("chunk", doc_piece_total, len(final_chunks), started,

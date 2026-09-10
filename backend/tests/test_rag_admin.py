@@ -43,6 +43,27 @@ def test_rag_status_endpoint(client: TestClient, db_session: Session):
     assert body["db_counts"]["series"] == 1
 
 
+def test_rag_status_exposes_dense_watermark(client: TestClient, db_session: Session, monkeypatch):
+    """水位字段必须穿过 Pydantic 响应模型（评审 v5-1：schema 漏字段会让整个滞后判定静默消失）。"""
+    _seed(db_session)
+    rag.reset_index()
+    work = Path(__file__).resolve().parent / ".tmp" / "watermark-status"
+    (work / ".tmp").mkdir(parents=True, exist_ok=True)
+    (work / ".tmp" / "dense-build-meta.json").write_text(
+        '{"built_at": "2026-09-08T13:14:00+00:00", "chunks": 12078, '
+        '"sales_month": "2026-07", "indexed": 12078}',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(work)
+
+    dense = client.get("/api/v1/admin/rag/status", headers=ADMIN).json()["dense"]
+    assert dense["built_at"] == "2026-09-08T13:14:00+00:00"
+    assert dense["chunks"] == 12078
+    assert dense["sales_month"] == 202607
+    assert dense["db_sales_month"] is None  # 测试库无销量数据
+    assert dense["stale"] is False
+
+
 def test_rag_try_query_and_runs(client: TestClient, db_session: Session):
     _seed(db_session)
     rag.reset_index()
