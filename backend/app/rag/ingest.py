@@ -19,7 +19,7 @@ from langgraph.graph import END, START, StateGraph
 from sqlalchemy import case, func, select, text
 from sqlalchemy.orm import Session
 
-from app.catalog.series_index import HEADLINE_ORDER, display_name, rank_headlines
+from app.catalog.series_index import HEADLINE_ORDER, HEADLINE_SPECS, display_name, rank_headlines
 from app.common.models import (
     Brand,
     MonthlySales,
@@ -149,7 +149,11 @@ def _load(state: IngestState) -> IngestState:
         .order_by(VehicleVariant.series_id, VehicleVariant.id, quota_facts.c.quota_rn)
     ).all()
 
-    # 车系画像聚合原料（摘要切片用）：全量在售事实 + 价格区间 + 在售数 + 最新月销量
+    # 车系画像聚合原料（摘要切片用）：核心参数事实 + 价格区间 + 在售数 + 最新月销量。
+    # 只取 rank_headlines 真正会读的核心参数键（其余键它一律跳过），并走流式游标
+    # 逐行并入 dict——原先「全量在售事实」一次物化 74 万行，是 2C2G 上构建阶段
+    # 内存峰值的主要来源（2026-09-10 实测 build_chunks 峰值 ~1GB）。
+    headline_keys = tuple(sorted({k for _label, keys, _mode in HEADLINE_SPECS for k in keys}))
     series_ids = [s.id for s, _ in series_rows]
     facts_by_series: dict[int, list[tuple[str, str, str | None, str | None]]] = {}
     if series_ids:
@@ -159,8 +163,10 @@ def _load(state: IngestState) -> IngestState:
             .where(
                 VehicleVariant.status == "on_sale",
                 VehicleVariant.series_id.in_(series_ids),
+                SpecFact.fact_key.in_(headline_keys),
             )
-        ).all()
+            .execution_options(yield_per=5000)
+        )
         for key, value, unit, cycle, sid in headline_rows:
             facts_by_series.setdefault(sid, []).append((key, value, unit, cycle))
 
