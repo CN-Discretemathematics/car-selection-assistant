@@ -1,0 +1,16 @@
+[Unit]
+Description=carSelection 月度销量数据自动获取（幂等：未发布则次日重试）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=carsel
+WorkingDirectory=/srv/carsel/backend
+EnvironmentFile=/srv/carsel/backend/.env
+Environment=PYTHONUNBUFFERED=1
+# 每日由 carsel-sales-fetch.timer 触发；可手动 systemctl start 立即试跑
+ExecStart=/srv/carsel/backend/.venv/bin/python tools/fetch_sales_scheduled.py
+
+[Install]
+WantedBy=multi-user.target

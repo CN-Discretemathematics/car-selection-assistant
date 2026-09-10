@@ -5,6 +5,8 @@
   embedding 灌入 Zilliz/Milvus 集合（需要 .env 中配置 Milvus 连接与 embedding 服务，
   变量清单见 backend/.env.example）；
 - --dry-run：只统计切片，不写索引；--smoke：灌入后做 embedding/检索冒烟。
+- dense 构建成功后写构建元数据标记（.tmp/dense-build-meta.json），/ops/rag 状态页
+  据此展示集合水位（构建时间/切片数）；销售导入 cron 链式触发增量重建时也复用此逻辑。
 
 用法：
     python tools/build_retrieval_index.py --dry-run
@@ -16,15 +18,54 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.common.database import get_session_factory  # noqa: E402
+from app.common.models import MonthlySales  # noqa: E402
 from app.rag.ingest import build_chunks  # noqa: E402
 from app.rag.service import get_dense_backend, run_reindex  # noqa: E402
 from app.retrieval.config import MAX_CHUNKS  # noqa: E402
+
+
+def _latest_sales_month(db) -> str | None:
+    """构建时库内最新销量月份（写入 marker 供 /ops/rag 水位对比）。"""
+    try:
+        from sqlalchemy import func, select
+
+        latest = db.scalar(select(func.max(MonthlySales.month)))
+        return str(latest) if latest is not None else None
+    except Exception:  # noqa: BLE001 - 查询失败不影响重建主流程
+        return None
+
+
+def write_dense_build_marker(summary: dict, sales_month: str | None = None) -> None:
+    """dense 灌入成功后写构建元数据（.tmp 目录随 compose volume 持久化）。"""
+    try:
+        meta_dir = Path(".tmp")
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        (meta_dir / "dense-build-meta.json").write_text(
+            json.dumps(
+                {
+                    "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "chunks": summary.get("chunks"),
+                    "indexed": summary.get("indexed"),
+                    "by_kind": summary.get("by_kind"),
+                    "sales_month": sales_month,  # 构建时库内最新销量月份（水位对比直接可用）
+                    "warnings": summary.get("warnings", [])[:3],
+                },
+                ensure_ascii=False,
+                indent=1,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # 标记文件写失败不阻断（水位显示降级）
 
 
 def _progress(done: int, total: int) -> None:
@@ -68,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"分布：{summary['by_kind']}")
         for w in summary.get("warnings") or []:
             print(f"警告：{w}")
+        if args.target == "dense":
+            write_dense_build_marker(summary, sales_month=_latest_sales_month(db))
 
         if args.smoke and args.target == "dense":
             print("检索冒烟…")

@@ -201,7 +201,10 @@ def main(argv: list[str] | None = None) -> int:
         }
         print("构建切片（load → chunk）…")
         chunks = build_chunks(db)
-        chunks_noovl = _chunks_without_overlap(db)
+        need_noovl = (not args.only.strip()) or "sparse-nooverlap" in {
+            s.strip() for s in args.only.split(",")
+        }
+        chunks_noovl = _chunks_without_overlap(db) if need_noovl else []
 
     by_kind: dict[str, int] = {}
     for c in chunks:
@@ -217,13 +220,17 @@ def main(argv: list[str] | None = None) -> int:
     # sparse 检索器（两份切分各建一个 BM25 索引）
     retr = InMemoryRetriever()
     retr.index(chunks)
-    retr_noovl = InMemoryRetriever()
-    retr_noovl.index(chunks_noovl)
+    only = {s.strip() for s in args.only.split(",") if s.strip()}
+    need_noovl = (not only) or "sparse-nooverlap" in only
+    retr_noovl = None
+    if need_noovl:
+        retr_noovl = InMemoryRetriever()
+        retr_noovl.index(chunks_noovl)
 
-    strategies: list[tuple[str, object]] = [
-        ("sparse-nooverlap", lambda text: retr_noovl.search(text, top_k=EVAL_DEPTH)),
-        ("sparse", lambda text: retr.search(text, top_k=EVAL_DEPTH)),
-    ]
+    strategies: list[tuple[str, object]] = []
+    if retr_noovl is not None:
+        strategies.append(("sparse-nooverlap", lambda text: retr_noovl.search(text, top_k=EVAL_DEPTH)))
+    strategies.append(("sparse", lambda text: retr.search(text, top_k=EVAL_DEPTH)))
 
     dense_retr = None
     if args.with_dense:

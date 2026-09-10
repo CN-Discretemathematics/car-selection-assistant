@@ -47,3 +47,17 @@ free_port.ps1
 
 # embedding 本地向量缓存（断点续跑，体积大不入库）
 backend/.embed_cache.json*
+
+# ── 内部工作文档（本地保留、本地归档可读；不随开源仓库发布）──
+/PROJECT_PLAN.md
+/DELIVERY.md
+/DEPLOYMENT.md
+/OPS_GUIDE.md
+/deploy/ALIYUN_RUNBOOK.md
+/reviewer/REVIEWER_AGENT.md
+
+# ── 部署凭据与运维暂存（本地） ──
+/.deploy/
+/backend/eval/
+/.tmp/
+*.tgz

@@ -124,6 +124,56 @@ def test_success_verifies_rows_in_db(db_session: Session, monkeypatch):
     assert "成功" in log_path.read_text(encoding="utf-8")
 
 
+def test_successful_import_sets_rebuild_flag(db_session: Session, monkeypatch):
+    """成功导入新月份销量 → 必须置稠密重建标记（数据按月更新，标记驱动、不每晚重建）。"""
+    factory = _factory(db_session)
+    source = make_source(db_session)
+    brand = make_brand(db_session, source=source)
+    series = make_series(db_session, brand, source=source)
+    db_session.commit()
+
+    def fake_fetch(month, **kwargs):
+        with factory() as db2:
+            make_sales(db2, series, "2026-08", 321, source=source)
+            db2.commit()
+        return {
+            "requested_month": "2026-08", "month": "2026-08", "rows": 20,
+            "imported": True, "errors": [], "created": 1, "updated": 0,
+            "skipped_reason": None,
+        }
+
+    monkeypatch.setattr(fss, "fetch_and_import_month", fake_fetch)
+    flag = LOG_DIR / "sales-changed.test.flag"
+    monkeypatch.setattr(fss, "FLAG_PATH", str(flag))
+    log_path = _log_path("flagok")
+    rc = fss.main(["--month", "2026-08", "--log", str(log_path)], session_factory=factory)
+    assert rc == 0
+    assert flag.exists(), "成功导入新月份必须写入重建标记"
+    assert flag.read_text(encoding="utf-8").strip() == "2026-08"
+    flag.unlink(missing_ok=True)
+
+
+def test_ready_month_does_not_set_flag(db_session: Session, monkeypatch):
+    """库内已有目标月（未导入任何新数据）→ 不得置重建标记。"""
+    source = make_source(db_session)
+    brand = make_brand(db_session, source=source)
+    series = make_series(db_session, brand, source=source)
+    make_sales(db_session, series, "2026-08", 100, source=source)
+    db_session.commit()
+
+    def boom(**kwargs):
+        raise AssertionError("已就绪不应抓取")
+
+    monkeypatch.setattr(fss, "fetch_and_import_month", boom)
+    flag = LOG_DIR / "sales-changed.notest.flag"
+    monkeypatch.setattr(fss, "FLAG_PATH", str(flag))
+    log_path = _log_path("flagskip")
+    rc = fss.main(["--month", "2026-08", "--log", str(log_path)], session_factory=_factory(db_session))
+    assert rc == 0
+    assert not flag.exists(), "无新数据时不得置重建标记"
+    flag.unlink(missing_ok=True)
+
+
 def test_fetch_error_returns_exit_2(db_session: Session, monkeypatch):
     def boom(month, **kwargs):
         raise RuntimeError("网络中断")
