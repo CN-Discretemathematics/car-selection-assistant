@@ -155,17 +155,29 @@ class ZillizRestRetriever:
             return resp.json()
 
     def _schema(self) -> dict:
+        """建集合 payload（Milvus v2 REST 完整格式：schema.fields + indexParams）。
+
+        2026-09-10 修正：Zilliz Cloud 对扁平写法（顶层 `fields` 数组 + `enableDynamicField`）
+        会**静默忽略**，按 collectionName+dimension 自动生成「id + vector + 动态字段」的极简
+        schema——控制台里看到的正是它，text/meta 全被塞进动态字段，声明的 VarChar 上限与
+        JSON 字段形同虚设。换成 `schema.fields` 完整格式后自定义字段才真正生效
+        （两种写法已各建探针集合实测对比，扁平写法 → 2 字段，完整写法 → 4 字段）。
+        """
         return {
             "collectionName": self._collection,
-            "dimension": self._dim,
-            "metricType": "COSINE",
-            "autoID": True,
-            "enableDynamicField": False,
-            "fields": [
-                {"fieldName": "id", "dataType": "Int64", "isPrimary": True, "autoID": True},
-                {"fieldName": "text", "dataType": "VarChar", "maxLength": 8192},
-                {"fieldName": "vector", "dataType": "FloatVector", "dimension": self._dim},
-                {"fieldName": "meta", "dataType": "JSON"},
+            "schema": {
+                "autoId": True,
+                "enableDynamicField": False,
+                "description": "car-selection RAG chunks（车系/款型/来源文档切片）",
+                "fields": [
+                    {"fieldName": "id", "dataType": "Int64", "isPrimary": True, "autoId": True},
+                    {"fieldName": "text", "dataType": "VarChar", "elementTypeParams": {"max_length": "8192"}},
+                    {"fieldName": "vector", "dataType": "FloatVector", "elementTypeParams": {"dim": str(self._dim)}},
+                    {"fieldName": "meta", "dataType": "JSON"},
+                ],
+            },
+            "indexParams": [
+                {"fieldName": "vector", "indexName": "vector", "indexType": "AUTOINDEX", "metricType": "COSINE"}
             ],
         }
 

@@ -173,6 +173,36 @@ def test_zilliz_search_parses_string_meta(monkeypatch):
     assert hits[2].chunk_id == f"z{md5('无 meta'.encode('utf-8')).hexdigest()[:16]}"
 
 
+def test_zilliz_create_payload_declares_fields():
+    """评审回归：Zilliz Cloud 会静默忽略顶层的 `fields` 数组——必须用 schema.fields 完整格式。
+
+    2026-09-10 线上实测：扁平写法 create 返回成功，但建出来的集合只有 id+vector+动态字段
+    （text/meta 被塞进动态字段），声明的 VarChar 上限与 JSON 字段形同虚设；
+    schema.fields 完整写法才能落成 id/text/vector/meta 四字段。
+    """
+    retriever = ZillizRestRetriever(
+        endpoint="https://in03-x.api.zillizcloud.com",
+        token="placeholder-token",
+        collection="car_docs",
+        embedder=_FakeEmbedder(),
+        dim=1024,
+    )
+    payload = retriever._schema()
+    assert payload["collectionName"] == "car_docs"
+    body = payload["schema"]
+    assert body["enableDynamicField"] is False
+    fields = {f["fieldName"]: f for f in body["fields"]}
+    assert set(fields) == {"id", "text", "vector", "meta"}
+    assert fields["id"]["isPrimary"] is True and fields["id"]["autoId"] is True
+    assert fields["text"]["dataType"] == "VarChar"
+    assert fields["text"]["elementTypeParams"]["max_length"] == "8192"
+    assert fields["vector"]["dataType"] == "FloatVector"
+    assert fields["vector"]["elementTypeParams"]["dim"] == "1024"
+    assert fields["meta"]["dataType"] == "JSON"
+    assert payload["indexParams"][0]["fieldName"] == "vector"
+    assert payload["indexParams"][0]["metricType"] == "COSINE"
+
+
 def test_zilliz_index_drops_existing_collection(monkeypatch):
     """集合已存在时：先 drop 再 create（全量重建语义）。"""
     calls: list[str] = []
