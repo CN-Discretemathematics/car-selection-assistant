@@ -370,6 +370,22 @@ v2 复测暴露的两个短板的检索侧闭环（`pipeline.py`）：
 
 compare pair-coverage 的补召回后复测明细见 `eval/eval-v4a.json`（本地）。
 
+#### v5 答案层（LLM-as-judge，已实现工具、待 ECS 运行）
+
+`tools/eval_judge.py`：作答走 AgentEngine（DeepSeek，生产同款路径），judge 走独立模型
+（默认 DashScope qwen-plus，`JUDGE_MODEL` 可覆盖）——judge 与作答模型分离。三维度：
+
+| 维度 | 判定 | 适用 |
+| --- | --- | --- |
+| faithfulness | 回答的事实性主张是否全部被证据支持（幻觉检测，双评一致性 30% 抽样校准） | 全部 |
+| completeness | 期望要点（参数/车身/能源，来自生成器结构化字段）是否被覆盖 | 参数/推荐/语义 |
+| refusal | 不可回答题是否显式「官方资料未披露」（确定性字符串判定） | 不可回答题 |
+
+```bash
+python tools/eval_judge.py --questions eval/questions-v3.json --sample 100 \
+    --report eval/eval-judge.json
+```
+
 #### v4 待办（答案层与剩余项）
 
 - 答案层 LLM-as-judge（faithfulness / completeness），judge 与作答模型分离 + 双评一致性校准；
