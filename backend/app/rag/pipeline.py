@@ -122,6 +122,32 @@ def _balance_by_series(results: list[SearchResult], anchor_ids: list[int]) -> li
     return ordered + rest
 
 
+def _ensure_anchor_coverage(state: RagState, results: list[SearchResult], anchor_ids: list[int]) -> list[SearchResult]:
+    """对比类兜底：某锚定车系在候选中完全缺席时，按 series_id 过滤补召回。
+
+    评测 v4 诊断：对比题以款型名表述（「2023款 470km 引领版」），BM25 候选常被
+    词面近邻的其他车系占满，锚定车系切片整系缺席——均衡无从交错。先按侧补召回
+    再交错，pair-coverage 才能真正闭环。
+    """
+    present = {h.series_id for h in results}
+    missing = [sid for sid in anchor_ids if sid is not None and sid not in present]
+    if not missing:
+        return results
+    from app.rag.service import get_sparse_backend
+
+    backend = get_sparse_backend()
+    added: list[SearchResult] = []
+    for sid in missing:
+        try:
+            added.extend(backend.search(
+                state.get("entity_query") or state.get("query") or "",
+                filters={"series_id": sid}, top_k=2,
+            ))
+        except Exception:  # noqa: BLE001 - 补召回失败不阻断检索
+            continue
+    return added + results
+
+
 def _reorder_by_constraints(
     db, results: list[SearchResult], constraints: dict
 ) -> list[SearchResult]:
@@ -371,8 +397,11 @@ def _grade(state: RagState) -> RagState:
     dropped = len(ranked) - len(results)
     reorder = None
     if state.get("query_type") == "compare":
-        results = _balance_by_series(results, state.get("anchor_series_ids") or [])
-        reorder = "compare_balance"
+        anchors = state.get("anchor_series_ids") or []
+        if len(anchors) >= 2:
+            results = _ensure_anchor_coverage(state, results, anchors)
+            results = _balance_by_series(results, anchors)
+            reorder = "compare_balance"
     elif state.get("constraints") and not state.get("resolved_series"):
         results = _reorder_by_constraints(state["db"], results, state["constraints"])
         reorder = "constraint_first"

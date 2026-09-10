@@ -626,6 +626,26 @@ def test_balance_by_series_interleaves():
     assert _balance_by_series([h1a, h1b], [1]) == [h1a, h1b]
 
 
+def test_ensure_anchor_coverage_adds_missing_side(monkeypatch):
+    """评测 v4：锚定车系整系缺席候选时按侧补召回（对比题 pair-coverage 的真正根因）。"""
+    import app.rag.service as rag_service
+    from app.rag.pipeline import _ensure_anchor_coverage
+
+    class FakeBackend:
+        def search(self, query, filters=None, top_k=5):
+            sid = (filters or {}).get("series_id")
+            return [SearchResult(chunk_id=f"c{sid}", score=0.5, text=f"车系{sid}证据",
+                                 kind="variant_spec", series_id=sid)]
+
+    monkeypatch.setattr(rag_service, "get_sparse_backend", lambda: FakeBackend())
+    state = {"entity_query": "对比 A 和 B", "query": "对比 A 和 B"}
+    present = SearchResult(chunk_id="p1", score=0.9, text="A侧证据", kind="variant_spec", series_id=1)
+    out = _ensure_anchor_coverage(state, [present], [1, 2])
+    got = {h.series_id for h in out}
+    assert got == {1, 2}, "缺席侧必须补召回"
+    assert out[0].series_id == 2, "补召回的证据排在最前，先于均衡交错"
+
+
 def test_reorder_by_constraints_puts_valid_first(monkeypatch):
     import app.catalog.series_constraints as sc
     from app.rag.pipeline import _reorder_by_constraints
