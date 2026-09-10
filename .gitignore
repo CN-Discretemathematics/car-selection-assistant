@@ -53,6 +53,8 @@ backend/.embed_cache.json*
 /DELIVERY.md
 /DEPLOYMENT.md
 /OPS_GUIDE.md
+/CHANGES.md
+/RAG_TECH_SELECTION.md
 /deploy/ALIYUN_RUNBOOK.md
 /reviewer/REVIEWER_AGENT.md
 
