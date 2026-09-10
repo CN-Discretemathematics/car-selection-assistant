@@ -90,6 +90,23 @@ def make_embedder() -> OpenAICompatibleEmbedder:
     )
 
 
+def _as_meta_dict(raw: Any) -> dict:
+    """把检索命中里的 meta 归一成 dict。
+
+    2026-09-10 schema 迁移实测：meta 为**声明式 JSON 字段**时，/entities/search 返回的是
+    JSON 字符串（动态字段时代才是 dict）；容错解析，坏 JSON / 其他类型一律降级为空 dict。
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 class ZillizRestRetriever:
     """Zilliz Cloud REST v2 检索后端（建集合/写入/检索，元数据过滤）。"""
 
@@ -409,7 +426,7 @@ class ZillizRestRetriever:
             entities = entities[0]["entities"]
         results: list[SearchResult] = []
         for hit in entities:
-            meta = hit.get("meta") or {}
+            meta = _as_meta_dict(hit.get("meta"))
             text = hit.get("text") or ""
             # 旧集合 meta 无 chunk_id：回退文本哈希，保证融合去重仍可用（重建索引后恢复精确 id）
             chunk_id = meta.get("chunk_id") or f"z{md5(text.encode('utf-8')).hexdigest()[:16]}"

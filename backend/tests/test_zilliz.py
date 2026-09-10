@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import httpx
+from hashlib import md5
 
 from app.retrieval.backends import SearchChunk
 from app.retrieval.zilliz import OpenAICompatibleEmbedder as Embedder, ZillizRestRetriever
@@ -122,6 +123,54 @@ def test_zilliz_retriever_create_insert_search(monkeypatch):
     assert insert[2]["data"][0]["meta"]["series_id"] == 7
     search = next(c for c in calls if c[1].endswith("/entities/search"))
     assert search[2]["filter"] == 'meta["series_id"] == 7'
+
+
+def test_zilliz_search_parses_string_meta(monkeypatch):
+    """schema 迁移回归：meta 为声明式 JSON 字段时 /entities/search 返回 JSON 字符串。
+
+    2026-09-10 实测：动态字段时代 search 返回 dict，声明字段后返回 str，
+    直接 .get() 会 AttributeError 让稠密路 0 命中；必须容错解析。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        if request.url.path.endswith("/entities/search"):
+            return httpx.Response(
+                200,
+                json={
+                    "code": 0,
+                    "data": [
+                        {
+                            "entities": [
+                                {"id": "1", "distance": 0.9, "text": "车系摘要",
+                                 "meta": '{"kind": "series_summary", "series_id": 5, "chunk_id": "summary-5"}'},
+                                {"id": "2", "distance": 0.8, "text": "坏 meta", "meta": "{not-json"},
+                                {"id": "3", "distance": 0.7, "text": "无 meta"},
+                            ]
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(200, json={"code": 0})
+
+    retriever = ZillizRestRetriever(
+        endpoint="https://in03-x.api.zillizcloud.com",
+        token="placeholder-token",
+        collection="car_docs",
+        embedder=_FakeEmbedder(),
+        dim=2,
+    )
+    retriever._client_factory = lambda: httpx.Client(base_url=retriever._endpoint, transport=_mock_transport(handler))
+
+    hits = retriever.search("查询", top_k=3)
+    assert len(hits) == 3
+    assert hits[0].chunk_id == "summary-5"
+    assert hits[0].kind == "series_summary" and hits[0].series_id == 5
+    # 坏 JSON / 缺 meta：回退文本哈希 chunk_id，不抛异常
+    assert hits[1].chunk_id == f"z{md5('坏 meta'.encode('utf-8')).hexdigest()[:16]}"
+    assert hits[1].kind == ""
+    assert hits[2].chunk_id == f"z{md5('无 meta'.encode('utf-8')).hexdigest()[:16]}"
 
 
 def test_zilliz_index_drops_existing_collection(monkeypatch):
