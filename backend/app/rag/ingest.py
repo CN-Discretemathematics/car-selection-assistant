@@ -13,13 +13,13 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from app.catalog.series_index import HEADLINE_ORDER, display_name, rank_headlines
+from app.catalog.series_index import HEADLINE_ORDER, HEADLINE_SPECS, display_name, rank_headlines
 from app.common.models import (
     Brand,
     MonthlySales,
@@ -57,10 +57,36 @@ _PRIORITY_KEY_GROUPS: tuple[tuple[str, ...], ...] = (
     ),
 )
 
-# 事实取样过采样倍数：去重前的 SQL 行数上限 = 配额 × 倍数（为去重留出余量）
-_OVERSAMPLE_FACTOR = 5
-
 _BODY_LABEL = {"sedan": "轿车", "suv": "SUV", "mpv": "MPV", "pickup": "皮卡"}
+
+
+class _Fact(NamedTuple):
+    """事实的轻量视图：装载时不建 ORM 实例（15 万行 ORM 实测 ~870MB，标量仅几十 MB）。"""
+
+    fact_key: str
+    fact_value: str | None
+    unit: str | None
+    cycle: str | None
+    last_verified_at: Any
+
+
+# 去重口径：与 Python str.strip() 对齐的字符集（SQL trim(x, chars) 在 PostgreSQL/SQLite
+# 都是「去掉两端属于该字符集的字符」）。只写 ASCII 空白会让 "\t10" 与 "10" 落进两个分组，
+# 白占一个配额槽、并在切片里输出两行重复值（评审 v5-3）。
+_STRIP_CHARS = " \t\n\r\f\v\u00a0\u3000"
+
+
+def _end_read_transaction(db: Session) -> None:
+    """结束只读事务：load / chunk 的读取到此为止。
+
+    embedding + 上传要跑十几分钟到数小时，期间不该留一个只读事务挂着——RDS 的
+    idle_in_transaction_session_timeout（默认 1h）会直接掐断连接，下一次查询抛
+    psycopg.errors.IdleInTransactionSessionTimeout（2026-09-10 rebuild4 的失败原因），
+    长时间持有快照也会拖住 vacuum。实体先 expunge 再 rollback：脱离会话的实例保留
+    已加载属性，下游拼装逻辑不受影响。
+    """
+    db.expunge_all()
+    db.rollback()
 
 
 def _load(state: IngestState) -> IngestState:
@@ -77,7 +103,15 @@ def _load(state: IngestState) -> IngestState:
 
     # SKU 事实按款型分层取样（优化②——切分改为款型级合并切片，取样粒度同步到款型）；
     # 取样顺序按优先级（核心参数优先，M-M9-1），同优先级按 id 稳定，
-    # 每款型截断 FACTS_PER_VARIANT 条（过采样 ×5 供去重余量）。
+    # 每款型截断 FACTS_PER_VARIANT 条。
+    #
+    # 2026-09-10 重构：去重 + 配额截断全部下推到 SQL 窗口函数。原实现用
+    # 「配额 × 过采样倍数」把近百万行（约 6600 款型 × 150 条）四表 ORM 实体拉进内存，
+    # 再用 Python 逐行去重——两个后果：① 2C2G 机器被 OOM killer 杀掉构建进程；
+    # ② 去重循环期间只读事务空转，被 RDS idle_in_transaction_session_timeout 掐断。
+    # 现在 SQL 只回传 ≤ 配额 的行（约 20 万行），语义与原实现一致：
+    # 同一款型内 (fact_key, value, unit) 重复时保留优先级最高、id 最小的一条，
+    # 再按优先级排序取前 FACTS_PER_VARIANT 条。
     priority_case = case(
         *[
             (SpecFact.fact_key.in_(keys), idx)
@@ -85,46 +119,75 @@ def _load(state: IngestState) -> IngestState:
         ],
         else_=len(_PRIORITY_KEY_GROUPS),
     )
-    fact_subq = (
+    deduped_facts = (
         select(
             SpecFact.id.label("fid"),
+            SpecFact.variant_id.label("vid"),
+            VehicleVariant.series_id.label("sid"),
+            priority_case.label("prio"),
             func.row_number()
             .over(
-                partition_by=SpecFact.variant_id,
+                partition_by=(
+                    SpecFact.variant_id,
+                    SpecFact.fact_key,
+                    func.trim(func.coalesce(SpecFact.fact_value, ""), _STRIP_CHARS),
+                    SpecFact.unit,
+                ),
                 order_by=(priority_case, SpecFact.id),
             )
-            .label("rn"),
+            .label("dedup_rn"),
         )
         .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
         .where(VehicleVariant.status == "on_sale")
         .subquery()
     )
+    quota_facts = (
+        select(
+            deduped_facts.c.fid.label("fid"),
+            deduped_facts.c.sid.label("sid"),
+            func.row_number()
+            .over(
+                partition_by=deduped_facts.c.vid,
+                order_by=(deduped_facts.c.prio, deduped_facts.c.fid),
+            )
+            .label("quota_rn"),
+        )
+        .where(deduped_facts.c.dedup_rn == 1)
+        .subquery()
+    )
+    # 款型/车系/品牌元数据单独装载（约 6600 行，identity map 去重）：事实查询里不再
+    # join 这三张宽表——15.4 万行 × 40 列的重复列值实测把峰值顶到 ~600MB RSS。
+    variant_meta = {
+        variant.id: (variant, series, brand)
+        for variant, series, brand in db.execute(
+            select(VehicleVariant, VehicleSeries, Brand)
+            .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
+            .join(Brand, VehicleSeries.brand_id == Brand.id)
+            .where(VehicleVariant.status == "on_sale")
+            .order_by(VehicleVariant.id)
+        ).all()
+    }
+    # 事实只取 6 个标量列（不建 ORM 实例、不 join 宽表），按款型归并交给下游。
     fact_rows = db.execute(
-        select(SpecFact, VehicleVariant, VehicleSeries, Brand)
-        .join(fact_subq, SpecFact.id == fact_subq.c.fid)
-        .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
-        .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
-        .join(Brand, VehicleSeries.brand_id == Brand.id)
-        .where(fact_subq.c.rn <= FACTS_PER_VARIANT * _OVERSAMPLE_FACTOR)
-        .order_by(VehicleVariant.series_id, VehicleVariant.id, fact_subq.c.rn)
+        select(
+            SpecFact.fact_key,
+            SpecFact.fact_value,
+            SpecFact.unit,
+            SpecFact.cycle,
+            SpecFact.last_verified_at,
+            SpecFact.variant_id,
+        )
+        .join(quota_facts, SpecFact.id == quota_facts.c.fid)
+        .where(quota_facts.c.quota_rn <= FACTS_PER_VARIANT)
+        # 与旧实现同样的输出序（车系 → 款型 → 配额名次），保证 --limit 截断可复现
+        .order_by(quota_facts.c.sid, SpecFact.variant_id, quota_facts.c.quota_rn)
     ).all()
 
-    # 去重 + 每款型配额截断（顺序已由 rn 保证：高优先级在前）
-    deduped_rows: list = []
-    _seen: dict[int, set] = {}
-    _count: dict[int, int] = {}
-    for row in fact_rows:
-        fact, variant, _series, _brand = row
-        dedupe_key = (fact.fact_key, (fact.fact_value or "").strip(), fact.unit)
-        seen = _seen.setdefault(variant.id, set())
-        if dedupe_key in seen or _count.get(variant.id, 0) >= FACTS_PER_VARIANT:
-            continue
-        seen.add(dedupe_key)
-        _count[variant.id] = _count.get(variant.id, 0) + 1
-        deduped_rows.append(row)
-    fact_rows = deduped_rows
-
-    # 车系画像聚合原料（摘要切片用）：全量在售事实 + 价格区间 + 在售数 + 最新月销量
+    # 车系画像聚合原料（摘要切片用）：核心参数事实 + 价格区间 + 在售数 + 最新月销量。
+    # 只取 rank_headlines 真正会读的核心参数键（其余键它一律跳过），并走流式游标
+    # 逐行并入 dict——原先「全量在售事实」一次物化 74 万行，是 2C2G 上构建阶段
+    # 内存峰值的主要来源（2026-09-10 实测 build_chunks 峰值 ~1GB）。
+    headline_keys = tuple(sorted({k for _label, keys, _mode in HEADLINE_SPECS for k in keys}))
     series_ids = [s.id for s, _ in series_rows]
     facts_by_series: dict[int, list[tuple[str, str, str | None, str | None]]] = {}
     if series_ids:
@@ -134,8 +197,10 @@ def _load(state: IngestState) -> IngestState:
             .where(
                 VehicleVariant.status == "on_sale",
                 VehicleVariant.series_id.in_(series_ids),
+                SpecFact.fact_key.in_(headline_keys),
             )
-        ).all()
+            .execution_options(yield_per=5000)
+        )
         for key, value, unit, cycle, sid in headline_rows:
             facts_by_series.setdefault(sid, []).append((key, value, unit, cycle))
 
@@ -191,12 +256,14 @@ def _load(state: IngestState) -> IngestState:
     materials = {
         "series_rows": series_rows,
         "fact_rows": fact_rows,
+        "variant_meta": variant_meta,
         "facts_by_series": facts_by_series,
         "price_by_series": {sid: (pmin, pmax) for sid, pmin, pmax in price_rows},
         "price_by_variant": dict(variant_price_rows),
         "count_by_series": dict(count_rows),
         "sales_by_series": sales_by_series,
     }
+    _end_read_transaction(db)  # 读取到此为止：后面的 embedding/上传不再持有只读事务
     return {
         "materials": materials,
         "stages": [make_stage("load", len(series_ids), len(fact_rows), started,
@@ -219,7 +286,7 @@ def _variant_header(
 
 
 def _variant_chunk_text(
-    facts: list[SpecFact], header: str, size: int
+    facts: list[_Fact], header: str, size: int
 ) -> list[str]:
     """把一个款型的（优先级有序、去重后的）事实合并为若干 ≤size 的切片。
 
@@ -329,12 +396,18 @@ def _chunk(state: IngestState) -> IngestState:
     #    metadata 带全 series/variant/energy/price/status——检索命中即对齐 SKU，
     #    证据归属映射消失；仅索引在售款型（停售参数不污染证据）。
     facts_by_variant: dict[int, list] = {}
+    all_variant_meta: dict[int, tuple[VehicleVariant, VehicleSeries, Brand]] = materials["variant_meta"]
     variant_meta: dict[int, tuple[VehicleVariant, VehicleSeries, Brand]] = {}
-    for fact, variant, series, brand in materials["fact_rows"]:
-        if fact.fact_key in _SKIP_FACT_KEYS or (fact.fact_value or "").strip() in _SKIP_FACT_VALUES:
+    for fact_key, fact_value, unit, cycle, verified_at, variant_id in materials["fact_rows"]:
+        meta = all_variant_meta.get(variant_id)
+        if meta is None:
             continue
-        facts_by_variant.setdefault(variant.id, []).append(fact)
-        variant_meta.setdefault(variant.id, (variant, series, brand))
+        if fact_key in _SKIP_FACT_KEYS or (fact_value or "").strip() in _SKIP_FACT_VALUES:
+            continue
+        facts_by_variant.setdefault(variant_id, []).append(
+            _Fact(fact_key, fact_value, unit, cycle, verified_at)
+        )
+        variant_meta.setdefault(variant_id, meta)
     for vid, facts in facts_by_variant.items():
         variant, series, brand = variant_meta[vid]
         raw_price = materials["price_by_variant"].get(vid)
@@ -430,6 +503,7 @@ def _chunk(state: IngestState) -> IngestState:
             )
 
     final_chunks = chunks[:limit]
+    _end_read_transaction(db)  # 读取到此为止：index 阶段不再持有只读事务
     return {
         "chunks": final_chunks,
         "stages": [make_stage("chunk", doc_piece_total, len(final_chunks), started,

@@ -91,6 +91,13 @@ export interface RagStatus {
     dim: number | null;
     embedding_model: string | null;
     error: string | null;
+    /** 水位（dense-build-meta.json）：集合构建时间/切片数/构建时库内销量月份 */
+    built_at?: string | null;
+    chunks?: number | null;
+    sales_month?: number | null;
+    db_sales_month?: number | null;
+    stale?: boolean;
+    stale_reason?: string | null;
   };
   reranker: { provider: string; active: string; model: string | null };
   strategy: {

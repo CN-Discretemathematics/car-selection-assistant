@@ -17,6 +17,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
@@ -289,10 +290,60 @@ def get_status(db: Session | None = None) -> dict:
         status["db_counts"] = dict(zip(("documents", "facts", "series", "variants"), _counts(db)))
         latest = db.scalar(select(func.max(MonthlySales.month)))
         # 销量月份转 YYYYMM 整数（2026-08 → 202608），与 RagStatusOut.db_counts 的 int 字段一致
-        status["db_counts"]["latest_sales_month"] = (
-            int(str(latest).replace("-", "")[:6]) if latest is not None else None
-        )
+        status["db_counts"]["latest_sales_month"] = _as_yyyymm(latest)
+    # 无 db 时也补齐字段（db_sales_month=None）：消费者按「字段恒在」判断，避免缺字段被当成新鲜
+    annotate_dense_watermark(status)
     return status
+
+
+def _as_yyyymm(value: Any) -> int | None:
+    """销量月份归一化为 YYYYMM 整数（'2026-08' / '2026-8' / '202608' / 202608 → 202608）。"""
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if 190001 <= value <= 999912 else None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if len(digits) == 5:  # 库里出现未补零的 '2026-8'
+        return int(digits[:4]) * 100 + int(digits[4])
+    return int(digits[:6]) if len(digits) >= 6 else None
+
+
+def annotate_dense_watermark(status: dict) -> None:
+    """给 status['dense'] 补水位对比字段：集合构建时的销量月份 vs 库内最新月份。
+
+    stale=True 表示「集合可能滞后于库内数据」，三种情形都算：
+    ① 标记里的销量月份 < 库内最新月份（确实落后一个月）；
+    ② 标记文件缺失（旧版工具灌入或重建从未成功过）——无法证明新鲜，按需重建暴露；
+    ③ 标记有 built_at 但没写下销量月份（构建时那次查询失败）——同样无法证明新鲜。
+    只有 built_at 与 sales_month 都齐、且不落后时才是 stale=False。
+    """
+    dense = status.get("dense")
+    db_month = _as_yyyymm((status.get("db_counts") or {}).get("latest_sales_month"))
+    if not isinstance(dense, dict):
+        return
+    dense["db_sales_month"] = db_month
+    if not dense.get("built_at"):
+        dense["sales_month"] = None
+        dense["stale"] = db_month is not None
+        dense["stale_reason"] = (
+            "缺少构建水位标记 dense-build-meta.json，无法确认集合是否与库内数据同步"
+            if db_month is not None
+            else None
+        )
+        return
+    month = _as_yyyymm(dense.get("sales_month"))
+    dense["sales_month"] = month
+    if month is None:
+        # 标记里没写销量月份（构建时该查询异常被吞掉）：不能当成「新鲜」
+        dense["stale"] = db_month is not None
+        dense["stale_reason"] = (
+            "构建水位标记缺少销量月份，无法确认集合是否与库内数据同步" if db_month is not None else None
+        )
+        return
+    dense["stale"] = bool(db_month and month < db_month)
+    dense["stale_reason"] = (
+        f"集合构建于销量 {month}，库内已到 {db_month}，需重建稠密索引" if dense["stale"] else None
+    )
 
 
 def dense_build_meta() -> dict:
@@ -305,7 +356,10 @@ def dense_build_meta() -> dict:
         return {
             "built_at": data.get("built_at"),
             "chunks": data.get("indexed") or data.get("chunks"),
-            "sales_month": data.get("sales_month"),
+            # 归一化为 YYYYMM 整数：响应模型该字段是 int，字符串会让 /ops/rag 直接 500
+            "sales_month": _as_yyyymm(data.get("sales_month")),
         }
-    except Exception:  # noqa: BLE001 - 水位缺失不影响状态页
+    except (OSError, ValueError, AttributeError):
+        # 文件缺失/半写/坏 JSON 时水位降级；刻意不吞 NameError 之类的编码错误
+        # （曾因本模块漏 import Path 让水位一直静默返回空，见 2026-09-10 排查）
         return {}
