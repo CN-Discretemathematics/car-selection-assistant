@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import case, func, select, text
@@ -58,6 +58,17 @@ _PRIORITY_KEY_GROUPS: tuple[tuple[str, ...], ...] = (
 )
 
 _BODY_LABEL = {"sedan": "轿车", "suv": "SUV", "mpv": "MPV", "pickup": "皮卡"}
+
+
+class _Fact(NamedTuple):
+    """事实的轻量视图：装载时不建 ORM 实例（15 万行 ORM 实测 ~870MB，标量仅几十 MB）。"""
+
+    fact_key: str
+    fact_value: str | None
+    unit: str | None
+    cycle: str | None
+    last_verified_at: Any
+
 
 
 def _relax_idle_transaction_timeout(db: Session) -> None:
@@ -139,8 +150,20 @@ def _load(state: IngestState) -> IngestState:
         .where(deduped_facts.c.dedup_rn == 1)
         .subquery()
     )
+    # 事实列只取标量（不建 SpecFact ORM 实例）：实测同一查询用 4 个 ORM 实体装载
+    # 15.4 万行要吃掉 ~870MB RSS，而标量元组只有几十 MB；车系/款型/品牌仍走实体
+    # （约 6600 款型，identity map 去重，代价可忽略），下游拼装逻辑不变。
     fact_rows = db.execute(
-        select(SpecFact, VehicleVariant, VehicleSeries, Brand)
+        select(
+            SpecFact.fact_key,
+            SpecFact.fact_value,
+            SpecFact.unit,
+            SpecFact.cycle,
+            SpecFact.last_verified_at,
+            VehicleVariant,
+            VehicleSeries,
+            Brand,
+        )
         .join(quota_facts, SpecFact.id == quota_facts.c.fid)
         .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
         .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
@@ -250,7 +273,7 @@ def _variant_header(
 
 
 def _variant_chunk_text(
-    facts: list[SpecFact], header: str, size: int
+    facts: list[_Fact], header: str, size: int
 ) -> list[str]:
     """把一个款型的（优先级有序、去重后的）事实合并为若干 ≤size 的切片。
 
@@ -361,10 +384,12 @@ def _chunk(state: IngestState) -> IngestState:
     #    证据归属映射消失；仅索引在售款型（停售参数不污染证据）。
     facts_by_variant: dict[int, list] = {}
     variant_meta: dict[int, tuple[VehicleVariant, VehicleSeries, Brand]] = {}
-    for fact, variant, series, brand in materials["fact_rows"]:
-        if fact.fact_key in _SKIP_FACT_KEYS or (fact.fact_value or "").strip() in _SKIP_FACT_VALUES:
+    for fact_key, fact_value, unit, cycle, verified_at, variant, series, brand in materials["fact_rows"]:
+        if fact_key in _SKIP_FACT_KEYS or (fact_value or "").strip() in _SKIP_FACT_VALUES:
             continue
-        facts_by_variant.setdefault(variant.id, []).append(fact)
+        facts_by_variant.setdefault(variant.id, []).append(
+            _Fact(fact_key, fact_value, unit, cycle, verified_at)
+        )
         variant_meta.setdefault(variant.id, (variant, series, brand))
     for vid, facts in facts_by_variant.items():
         variant, series, brand = variant_meta[vid]
