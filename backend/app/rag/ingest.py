@@ -150,9 +150,19 @@ def _load(state: IngestState) -> IngestState:
         .where(deduped_facts.c.dedup_rn == 1)
         .subquery()
     )
-    # 事实列只取标量（不建 SpecFact ORM 实例）：实测同一查询用 4 个 ORM 实体装载
-    # 15.4 万行要吃掉 ~870MB RSS，而标量元组只有几十 MB；车系/款型/品牌仍走实体
-    # （约 6600 款型，identity map 去重，代价可忽略），下游拼装逻辑不变。
+    # 款型/车系/品牌元数据单独装载（约 6600 行，identity map 去重）：事实查询里不再
+    # join 这三张宽表——15.4 万行 × 40 列的重复列值实测把峰值顶到 ~600MB RSS。
+    variant_meta = {
+        variant.id: (variant, series, brand)
+        for variant, series, brand in db.execute(
+            select(VehicleVariant, VehicleSeries, Brand)
+            .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
+            .join(Brand, VehicleSeries.brand_id == Brand.id)
+            .where(VehicleVariant.status == "on_sale")
+            .order_by(VehicleVariant.id)
+        ).all()
+    }
+    # 事实只取 6 个标量列（不建 ORM 实例、不 join 宽表），按款型归并交给下游。
     fact_rows = db.execute(
         select(
             SpecFact.fact_key,
@@ -160,16 +170,11 @@ def _load(state: IngestState) -> IngestState:
             SpecFact.unit,
             SpecFact.cycle,
             SpecFact.last_verified_at,
-            VehicleVariant,
-            VehicleSeries,
-            Brand,
+            SpecFact.variant_id,
         )
         .join(quota_facts, SpecFact.id == quota_facts.c.fid)
-        .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
-        .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
-        .join(Brand, VehicleSeries.brand_id == Brand.id)
         .where(quota_facts.c.quota_rn <= FACTS_PER_VARIANT)
-        .order_by(VehicleVariant.series_id, VehicleVariant.id, quota_facts.c.quota_rn)
+        .order_by(SpecFact.variant_id, quota_facts.c.quota_rn)
     ).all()
 
     # 车系画像聚合原料（摘要切片用）：核心参数事实 + 价格区间 + 在售数 + 最新月销量。
@@ -245,6 +250,7 @@ def _load(state: IngestState) -> IngestState:
     materials = {
         "series_rows": series_rows,
         "fact_rows": fact_rows,
+        "variant_meta": variant_meta,
         "facts_by_series": facts_by_series,
         "price_by_series": {sid: (pmin, pmax) for sid, pmin, pmax in price_rows},
         "price_by_variant": dict(variant_price_rows),
@@ -383,14 +389,18 @@ def _chunk(state: IngestState) -> IngestState:
     #    metadata 带全 series/variant/energy/price/status——检索命中即对齐 SKU，
     #    证据归属映射消失；仅索引在售款型（停售参数不污染证据）。
     facts_by_variant: dict[int, list] = {}
+    all_variant_meta: dict[int, tuple[VehicleVariant, VehicleSeries, Brand]] = materials["variant_meta"]
     variant_meta: dict[int, tuple[VehicleVariant, VehicleSeries, Brand]] = {}
-    for fact_key, fact_value, unit, cycle, verified_at, variant, series, brand in materials["fact_rows"]:
+    for fact_key, fact_value, unit, cycle, verified_at, variant_id in materials["fact_rows"]:
+        meta = all_variant_meta.get(variant_id)
+        if meta is None:
+            continue
         if fact_key in _SKIP_FACT_KEYS or (fact_value or "").strip() in _SKIP_FACT_VALUES:
             continue
-        facts_by_variant.setdefault(variant.id, []).append(
+        facts_by_variant.setdefault(variant_id, []).append(
             _Fact(fact_key, fact_value, unit, cycle, verified_at)
         )
-        variant_meta.setdefault(variant.id, (variant, series, brand))
+        variant_meta.setdefault(variant_id, meta)
     for vid, facts in facts_by_variant.items():
         variant, series, brand = variant_meta[vid]
         raw_price = materials["price_by_variant"].get(vid)
