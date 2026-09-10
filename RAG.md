@@ -54,7 +54,7 @@ graph TD;
    - sparse：进程内 Okapi BM25（k1=1.5, b=0.75），中文分词口径可配（`RETRIEVAL_TOKENIZER`：**bigram**（默认，A/B 实测本语料最优）/ jieba 整词 / hybrid；jieba 附车圈领域词表 + 运行期注册车系专名）；
    - dense：Zilliz Cloud REST v2 向量检索（cosine，autoindex），`RETRIEVAL_BACKEND=milvus` 且 URI/Token 齐备时启用；未配置空转、调用失败降级为纯稀疏并记 warning（原则 7）；
    - **HyDE（优化⑥，可选）**：`RETRIEVAL_HYDE` 开启时，semantic 查询由 LLM 生成假设性证据文本替代原查询做向量召回（仅稠密路，+1 次 LLM 调用，失败静默回退）。
-3. **fuse（加权 RRF 融合）**：Reciprocal Rank Fusion（k=60，业界默认），路权重按 `query_type` 取权重组（优化⑤：parameter=0.7/0.3、recommend=0.5/0.5、semantic=0.4/0.6、compare=0.6/0.4，基准可用 `RETRIEVAL_RRF_WEIGHT_*` 调整）——参数查询键值模板强区分偏稀疏，语义查询词面不匹配多偏稠密。两路分数量纲不可比，RRF 只用名次。按 `chunk_id` 去重（Zilliz meta 存原始 chunk_id；旧集合回退文本哈希），再按文本兜底去重。
+3. **fuse（加权 RRF 融合）**：Reciprocal Rank Fusion（k=60，业界默认），统一路权重 **sparse 0.6 / dense 0.4**（优化⑤；120 题五配置权重网格消融实测 0.6/0.4 MRR 0.7032 为最优平台期——等权 0.6948、纯稀疏 0.6898、0.4/0.6 有害，曾试的按 `query_type` 分路权重表已删除），基准可用 `RETRIEVAL_RRF_WEIGHT_*` 调整。两路分数量纲不可比，RRF 只用名次。按 `chunk_id` 去重（Zilliz meta 存原始 chunk_id；旧集合回退文本哈希），再按文本兜底去重。
 4. **rerank（精排，条件启用）**：可插拔重排器（`rerank.py`），**按查询类型路由**——
    parameter/compare（实体锚定，BM25 融合序已近最优）保持融合序不重排；semantic/recommend
    才调用重排器（v13 实测收敛，520 题三配置对照见 §4.2）：
@@ -88,7 +88,23 @@ graph TD;
 	classDef last fill:#bfb6fc
 ```
 
-- **load**：SQL 装载原料——活跃车系、**按款型分层取样的在售 SKU 事实**（`row_number() over (partition by variant)`，核心参数优先级分组，**过采样 ×5 + (款型,键,值,单位) 去重后再截配额**，每款型入索引 `RETRIEVAL_FACTS_PER_VARIANT` 条**去重后**事实）、车系画像聚合（价格区间/在售数/最新月销量）、款型当前指导价。
+- **load**：SQL 装载原料——活跃车系、**按款型分层取样的在售 SKU 事实**（每款型入索引
+  `RETRIEVAL_FACTS_PER_VARIANT` 条**去重后**事实）、车系画像聚合（价格区间/在售数/最新月销量）、
+  款型当前指导价。2026-09-10 重构后：
+  - **去重与配额截断全部下推 SQL 窗口函数**（双层 `row_number()`：先按
+    (款型, `fact_key`, `trim(value)`, `unit`) 去重、保留优先级最高且 id 最小的一条，再按优先级
+    取前 `FACTS_PER_VARIANT` 条）——取代旧的「配额 ×5 过采样拉进内存 + Python 逐行去重」。
+    旧实现在真实库上要物化 ~15.4 万行 × 4 个 ORM 实体（宽表 join），正是 2C2G 重建被
+    OOM killer 杀掉、以及只读事务空转 1 小时被 RDS `idle_in_transaction_session_timeout`
+    掐断的根因；
+  - 事实行只取 6 个标量列（不建 ORM 实例），款型/车系/品牌元数据拆成单独一条查询
+    （identity map 去重，约 6600 行）——线上 dry-run 实测构建期峰值内存 976MB → **286MB**、
+    load+chunk 数小时 → **5.1s**；
+  - 车系画像原料只取 `HEADLINE_SPECS` 实际会读的核心参数键并走流式游标（`yield_per`）——
+    `rank_headlines` 对其余键一律跳过，原先「全量在售事实」一次物化 74 万行纯属白占内存；
+  - **load / chunk 读完即结束只读事务**（`expunge_all + rollback`，脱离会话的实例保留已加载
+    属性）：embedding + 上传的十几分钟里不再持有事务，RDS 的空闲超时无从触发，也不再
+    长时间吊住快照影响 vacuum。
 - **chunk**：构造四类切片（元数据符合 §16.3）：
   | kind | chunk_id | 内容 |
   | --- | --- | --- |
@@ -97,8 +113,23 @@ graph TD;
   | `variant_spec` | `variant-{id}#{i}` | **款型级合并切片（优化②）**：一个在售款型的核心事实按优先级合入 1~N 片（头部=品牌+车系+款型名+能源+指导价，任意切片独立可读）；metadata 全量携带 `series_id/variant_id/energy_type/price_cny/status/body_type`——检索命中即对齐 SKU，证据归属映射消失；停售款型不进索引 |
   | `source_document` | `doc-{id}#{i}` | 来源文档正文，**递归字符切分**（`chunking.py`：段落→行→中文句读→英文句读→空格→字符级硬切；`CHUNK_SIZE=500`、`CHUNK_OVERLAP=64`，重叠窗口防止句界证据割裂——LangChain RecursiveCharacterTextSplitter 同款语义） |
 - **index**：写入目标后端（`target=sparse|dense`；dense 走批量 embedding + Zilliz upsert，幂等重建集合，限流自动指数退避；meta 额外携带 `status/price_cny/body_type` 供检索期过滤下推）。`build_chunks()` 复用同一条图的 load+chunk 两节点（`target=""` 时 index 被条件边跳过）。索引构建前把车系/品牌展示名注册为分词专名（优化③）。
+  - **稠密集合 schema 必须用 Milvus v2 REST 完整格式**（`schema.fields` + `indexParams`）声明
+    `id / text(VarChar 8192) / vector / meta(JSON)`、`enableDynamicField=false`。Zilliz Cloud 对
+    顶层 `fields` 数组的扁平写法**不报错但静默忽略**，按 `collectionName+dimension` 自动生成
+    「id+vector+动态字段」极简 schema——两种写法已各建探针集合实测对比确认（2026-09-10）；
+  - 声明式 JSON 字段下 `/entities/search` 命中里的 `meta` 是 **JSON 字符串**（动态字段时代是
+    dict），检索侧 `_as_meta_dict` 容错解析（坏 JSON 降级空 dict，chunk_id 缺失仍回退文本哈希）；
+  - `_ensure_collection` 先删后建（全量重建语义）：**集合「创建时间」只在 drop 重建时刷新，
+    insert 不改变它**——判断数据新鲜度以 `.tmp/dense-build-meta.json` 水位为准（built_at /
+    chunks / 构建时销量月份），`/ops/rag` 直接与 `db_counts.latest_sales_month` 对比给出
+    `stale` 判定与原因；
+  - **向量缓存**：embedding 流式 JSONL 追加（`RETRIEVAL_EMBED_CACHE`，随 compose 卷持久化），
+    重跑按缓存命中跳过 embedding——实测 12,078 条全量 drop+create+insert 仅约 **2 分钟**。
 
-索引新鲜度：开发模式（inmemory）按数据量快照自动重建；生产（milvus）稀疏索引进程首用构建、稠密索引显式重建（工具或管理后台），避免请求路径上的全量 embedding。
+索引新鲜度：开发模式（inmemory）按数据量快照自动重建；生产（milvus）稀疏索引进程首用构建、
+稠密索引显式重建（工具或管理后台），避免请求路径上的全量 embedding。生产重建由**销量导入
+驱动**：`tools/fetch_sales_scheduled.py` 成功导入新月度后写 `sales-changed.flag`，
+cron `carsel-nightly.sh`（02:30）仅在 flag 存在时触发稠密重建——无新月度零成本跳过。
 
 ## 4. 评估（主流指标 + 黄金集）
 
@@ -210,6 +241,28 @@ Agent 端到端评测（硬约束零违规 + 引用校验 + hit@k）仍由 `tool
 **收敛结论**：当前生产配置即为该架构下的实测局部最优，所有开关保持默认；
 报告存档 `eval/comprehensive-baseline.json`、`eval/opt-arm*.json`。
 
+### 4.4 工程重构复测（2026-09-11，451 题 · 生产配置 · 真云 dense）
+
+> 2026-09-10 摄取/检索工程重构落地（§3：SQL 窗口去重+配额、标量列装载、读完即结束只读事务；
+> Zilliz 声明式 schema 迁移、`meta` 字符串容错）。同题库（md5 一致）、同机（生产 ECS ·
+> milvus · 真云 dense + qwen3.7 rerank）复测，与 §4.3 基线逐项对照——**验证「零回归」**：
+
+| 策略 | Hit@5 | Recall@5 | P@5 | MRR | NDCG@10 | 耗时s |
+| --- | --- | --- | --- | --- | --- | --- |
+| sparse | 0.6718 | 0.2636 | 0.5632 | 0.6488 | 0.5529 | 20.4 |
+| **pipeline（生产）** | **0.6763** | **0.2929** | **0.6182** | **0.6656** | **0.6138** | **181.4** |
+
+- **五项指标与 §4.3 基线逐位一致，四个分桶（compare 0.9873/0.9593 · parameter 1.0/1.0 ·
+  recommend 0.4907/0.4867 · semantic 0.1463/0.1045）同样逐位一致**——重构对检索行为
+  零影响的直接证据（切片文本除 20 条摘要的销量数字外逐位相同）；
+- 端到端耗时 418.9s → **181.4s**。pipeline 耗时由 embedding + rerank 云端调用主导，
+  同配置历史运行本就在 245s（§4.3 综合基线）与 419s 之间波动，基线当次疑似命中百炼
+  重排配额限流（重试退避计入耗时）；保守结论是「未回归」，不把差值全部归因于代码；
+- **索引侧实测（2C2G 生产 ECS）**：load+chunk 数小时 → **5.1s**；构建期峰值内存 ~1GB →
+  **286MB**；向量缓存命中后全量 drop+create+insert（12,078 条）约 **2 分钟**；
+  重建成功率 0/3（OOM×2、RDS 超时×1）→ 3/3；
+- 报告存档：`eval/eval-pipeline-v6.json` / `.md`（本地，不入库）。
+
 ## 5. 流程管理可视化
 
 - **web 页面**：`/ops/rag`（`web/app/ops/rag/page.tsx`，管理凭据入口）
@@ -240,7 +293,7 @@ Agent 端到端评测（硬约束零违规 + 引用校验 + hit@k）仍由 `tool
 | `RETRIEVAL_EMBED_CACHE` | 空（关） | 稠密灌库流式 JSONL 向量缓存文件路径（如 `./.embed_cache.json`）：断点续跑、低内存 |
 | `RETRIEVAL_CHUNK_SIZE` / `RETRIEVAL_CHUNK_OVERLAP` | 500 / 64 | 递归切分参数（字符） |
 | `RETRIEVAL_RECALL_MULTIPLIER` | 6 | 每路召回 = top_k × N（20~100 截断） |
-| `RETRIEVAL_FACTS_PER_SERIES` | 40 | 每车系入索引的去重后事实条数（配合 ×5 过采样） |
+| `RETRIEVAL_FACTS_PER_VARIANT` | 30 | 每款型入索引的去重后事实条数（SQL 窗口去重 + 配额截断，无过采样） |
 | `RETRIEVAL_MAX_CHUNKS` | 60000 | 全库切片上限 |
 | `RETRIEVAL_RRF_K` | 60 | RRF 平滑常数 |
 | `RERANK_PROVIDER` | 空（lexical） | `api` 启用 Cross-Encoder（仅 semantic/recommend 查询实际调用，v13） |
@@ -262,6 +315,22 @@ python tools/verify_zilliz.py                                     # 集群连通
 python tools/build_retrieval_index.py --target dense --smoke      # 全量灌库 + 冒烟
 python tools/eval_rag.py --with-dense                             # 策略评测（含云端召回）
 ```
+
+生产水位核对与自动重建（2026-09 起）：
+
+- **水位自证**：`/ops/rag` 直接对照 `dense.built_at / sales_month`（构建标记
+  `.tmp/dense-build-meta.json`）与 `db_counts.latest_sales_month`，滞后自动置
+  `stale` 并给原因——不要用 Zilliz 控制台的集合「创建时间」判断新旧（insert 不改它，
+  只有 drop 重建才刷新）；
+- **重建由销量导入驱动**：`tools/fetch_sales_scheduled.py` 成功导入新月度后写
+  `.tmp/sales-changed.flag`，cron `carsel-nightly.sh`（02:30）仅在 flag 存在时触发
+  稠密重建；无新月度零成本跳过。手动全量重建走向量缓存约 2 分钟；
+- **容器内跑评测**（`eval/` 问题库不在镜像内，经持久卷传入，报告也落卷上）：
+  ```bash
+  docker exec -w /srv/carsel/backend deploy-api-1 python tools/eval_rag.py \
+    --questions .tmp/questions.json --with-dense --only pipeline,sparse \
+    --report .tmp/eval-pipeline-v6.json
+  ```
 
 故障降级矩阵：
 
