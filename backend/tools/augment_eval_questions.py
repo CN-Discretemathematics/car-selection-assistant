@@ -30,7 +30,7 @@ _PROMPT = (
     "把下面的用户买车提问改写成更口语化的说法，像真实用户在聊天窗口随手打字。\n"
     "硬性要求：\n"
     "1. 数字语义必须与原句完全一致（预算/座位/续航不得增减），可以用中文数字（如十五万）；\n"
-    "2. 品牌名、车系名、款型名必须原样保留，一个字都不能改；\n"
+    "2. 以下词必须原样保留、一个字都不能改：{protected}；\n"
     "3. 不新增任何要求、车型或配置；不改变原意；\n"
     "4. 只输出改写后的一句话，不要任何解释或引号。\n"
     "用户提问：{text}"
@@ -96,16 +96,18 @@ def _validate(original: str, variant: str, series_name: str | None) -> bool:
 
 async def _rewrite(llm: LLMClient, sem: asyncio.Semaphore, q: dict, out: list, series_names: dict) -> None:
     async with sem:
+        sid = (q.get("anchors") or {}).get("series_id")
+        series_name = series_names.get(int(sid)) if sid else None
+        brand_name = (q.get("anchors") or {}).get("brand_name") or ""
+        protected = "、".join(n for n in (brand_name, series_name) if n) or "（本题无固定车系名）"
         try:
             resp = await llm.chat(
-                [{"role": "user", "content": _PROMPT.format(text=q["text"])}],
+                [{"role": "user", "content": _PROMPT.format(text=q["text"], protected=protected)}],
                 temperature=0.9,
             )
             text = str(resp["choices"][0]["message"]["content"] or "").strip().strip("\"“”")
         except Exception:  # noqa: BLE001 - 单条失败直接跳过（改写体不足不影响其余）
             return
-        sid = (q.get("anchors") or {}).get("series_id")
-        series_name = series_names.get(int(sid)) if sid else None
         if not _validate(q["text"], text, series_name):
             return
         out.append({**q, "id": f"v{q['id'][1:]}", "parent_id": q["id"], "text": text, "paraphrased": True})
