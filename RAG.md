@@ -344,12 +344,39 @@ v2 在旧口径之上**并排**新增四类指标（全部由生成器写入的�
 报告存档：`eval/eval-v3a.json`（600 题全量）、`eval/eval-v3b.json`（改写体）、
 `eval/eval-v3c.json`（多约束专项）、`eval/eval-refusal.json`（拒答，本地不入库）。
 
-#### v4 待办（答案层与鲁棒性）
+#### v4 落地（2026-09-11）：compare 双侧均衡 + recommend 约束下推
 
-- LLM-as-judge（faithfulness / completeness），judge 与作答模型分离 + 双评一致性；
-- 改写增强扩样（数字校验放宽为「数字集合等价」判定）；
-- compare 双侧覆盖优化（检索侧给第二锚定车系保底槽位）后复测 pair-coverage；
-- recommend 约束有效率优化（检索期下推 budget/energy 过滤）后复测 valid-precision。
+v2 复测暴露的两个短板的检索侧闭环（`pipeline.py`）：
+
+- **compare 双侧均衡**：grade 对对比类查询按锚定车系交错证据（`_balance_by_series`），
+  修复 top_k 被单侧挤占；诊断发现更深的根因——对比题以款型名表述（「2023款 470km
+  引领版」）时，BM25 候选常被词面近邻的其他车系占满、锚定车系整系缺席，故先
+  `_ensure_anchor_coverage` 按缺席侧 series_id 过滤补召回（top2）再交错；
+- **recommend 约束下推**：analyze 从文本解析硬约束（`_parse_constraints`：预算/能源/
+  车身/座位），未点名车系时 grade 把满足约束的证据排前（`_reorder_by_constraints`，
+  稳定重排、组内保持原名次）。点名车系的车系问答不受影响（单答案意图）；
+- 约束判定与属性装载统一在 `app/catalog/series_constraints.py`（出题/评测/流水线三处
+  单一事实源，属性带进程内缓存）。
+
+复测（531 题 · 真云 dense）：
+
+| 指标 | v4 前 | v4 后 |
+| --- | --- | --- |
+| valid-hit@5（recommend+semantic 约束满足） | 0.7415 | **0.8136**（+7.2pt） |
+| valid-precision@5 | 0.5517 | **0.6992**（+14.8pt） |
+| valid-MRR | 0.6604 | **0.7607**（+10.0pt） |
+| semantic 桶 valid-precision@5 | 0.9707 | **1.0** |
+| pipeline 总 Hit@5 / NDCG@10 | 0.5857 / 0.5244 | 0.5913 / **0.5304**（无回退） |
+
+compare pair-coverage 的补召回后复测明细见 `eval/eval-v4a.json`（本地）。
+
+#### v4 待办（答案层与剩余项）
+
+- 答案层 LLM-as-judge（faithfulness / completeness），judge 与作答模型分离 + 双评一致性校准；
+- 改写成功率提升：数字语义等价判定已落地（成功率 28% → 26%，未提升），剩余失败多为
+  改写时丢失车系名/约束，需 prompt 与校验继续放宽后扩样（semantic 变体仅 4 条）；
+- compare 锚定缺席的根因复核：部分对比题款型名对应的变体为非在售/别名表述，
+  补召回也无法覆盖（与「31 车系索引覆盖缺口」待办同源）。
 
 ## 5. 流程管理可视化
 
