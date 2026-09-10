@@ -1,0 +1,47 @@
+# carSelection 生产部署（PROJECT_PLAN.md 阶段 2 云端架构）
+#
+# 用法（服务器上，仓库根目录）：
+#   1) 准备 backend/.env（生产值：数据库、Redis、OSS、SMTP 与管理凭据，见 .env.example）
+#   2) docker compose -f deploy/docker-compose.yml up -d --build
+#   3) nginx 用 deploy/nginx.conf 反代 80/443 → 前端 3000（/api 已由前端容器内部转回后端）
+#
+# 注：数据库/Redis/Milvus/OSS 均为云托管，不在此 compose 内启动
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../backend/.env
+    environment:
+      # 默认单 worker：Redis 不可用时认证/会话回退进程内，多 worker 会分裂脑（评审 M8）
+      UVICORN_WORKERS: ${API_WORKERS:-1}
+    volumes:
+      # embedding 向量缓存 / dense 构建水位标记持久化：容器重建不丢（2026-09-10）
+      - ../backend/.tmp:/srv/carsel/backend/.tmp
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+      args:
+        # 构建期固化浏览器端 /api 转发目标为 api 服务（评审 N1）
+        BACKEND_URL: http://api:8000
+    restart: unless-stopped
+    environment:
+      # 服务端渲染调用后端（容器内直连 api 服务）
+      BACKEND_URL: http://api:8000
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy

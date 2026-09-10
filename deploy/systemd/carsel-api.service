@@ -1,0 +1,26 @@
+# carSelection 后端服务（systemd，非容器部署选项）
+# 安装：cp deploy/systemd/carsel-api.service /etc/systemd/system/
+#       systemctl daemon-reload && systemctl enable --now carsel-api
+[Unit]
+Description=carSelection FastAPI backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=carsel
+Group=carsel
+WorkingDirectory=/srv/carsel/backend
+EnvironmentFile=/srv/carsel/backend/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/bin/python3 -m alembic upgrade head
+# 单 worker：Redis 不可用时认证/会话回退进程内，多 worker 会分裂脑（评审 M8）
+ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+# 轻量服务器内存保护
+MemoryMax=1.5G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

@@ -20,7 +20,7 @@ import {
 
 const MISSING_LABEL = "官方资料未披露";
 
-/** 车型详情页。 */
+/** 车型详情页（PROJECT_PLAN.md §10）。 */
 export default async function VehiclePage({
   params,
   searchParams,

@@ -37,6 +37,9 @@ from tools.fetch_autohome_sales import fetch_and_import_month  # noqa: E402
 
 DEFAULT_LOG_PATH = os.path.join("logs", "sales_fetch.log")
 DEFAULT_WARN_DAYS = 15
+# 稠密索引重建触发标记：成功导入「新月份」数据后写入（放持久化 .tmp 目录；
+# cron 仅在标记存在时触发增量重建——销量按月更新，不每晚重建）
+FLAG_PATH = os.path.join(".tmp", "sales-changed.flag")
 
 
 def sales_month_count(db, month: str) -> int:
@@ -146,6 +149,13 @@ def main(argv: list[str] | None = None, session_factory=None) -> int:
         log("失败：导入完成但库内目标月仍无数据行，请人工检查 importer 日志")
         return 2
     log(f"成功：{month} 数据到位，库内 {after} 行（新建 {report['created']}，更新 {report['updated']}）")
+    try:
+        os.makedirs(os.path.dirname(FLAG_PATH) or ".", exist_ok=True)
+        with open(FLAG_PATH, "w", encoding="utf-8") as fh:
+            fh.write(month + "\n")
+        log(f"已置重建标记（{FLAG_PATH}）：下次定时任务将触发稠密索引增量重建")
+    except OSError as err:
+        log(f"注意：重建标记写入失败（{FLAG_PATH} 不可写）：{err}——稠密索引不会自动刷新")
     return 0
 
 

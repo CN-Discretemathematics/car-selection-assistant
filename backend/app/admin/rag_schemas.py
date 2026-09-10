@@ -68,7 +68,7 @@ class RagStatusOut(BaseModel):
     reranker: RerankerStatusOut
     strategy: StrategyOut
     runs_logged: int
-    db_counts: dict[str, int] | None = None
+    db_counts: dict[str, int | None] | None = None
 
 
 # ── 运行轨迹 / 试运行 ──────────────────────────────────────────────────────

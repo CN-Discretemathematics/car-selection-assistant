@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections import deque
@@ -21,7 +22,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.common.models import SourceDocument, SpecFact, VehicleSeries, VehicleVariant
+from app.common.models import MonthlySales, SourceDocument, SpecFact, VehicleSeries, VehicleVariant
 from app.rag.ingest import get_ingest_graph, run_ingest
 from app.rag.pipeline import build_query_graph
 from app.rag.rerank import get_reranker
@@ -262,6 +263,10 @@ def get_status(db: Session | None = None) -> dict:
             "dim": MILVUS_DIM if dense is not None else None,
             "embedding_model": EMBEDDING_MODEL if EMBEDDING_BASE_URL else None,
             "error": _dense_probe_error,
+            # 水位（2026-09 新增）：dense-build-meta.json 由重建工具写入
+            # （.tmp 目录随 compose volume 持久化）；latest_sales_month 为数据库水位——
+            # 两者对比即可判断集合是否滞后于最新销量数据
+            **dense_build_meta(),
         },
         "reranker": {
             "provider": RERANK_PROVIDER or "lexical",
@@ -282,4 +287,25 @@ def get_status(db: Session | None = None) -> dict:
     }
     if db is not None:
         status["db_counts"] = dict(zip(("documents", "facts", "series", "variants"), _counts(db)))
+        latest = db.scalar(select(func.max(MonthlySales.month)))
+        # 销量月份转 YYYYMM 整数（2026-08 → 202608），与 RagStatusOut.db_counts 的 int 字段一致
+        status["db_counts"]["latest_sales_month"] = (
+            int(str(latest).replace("-", "")[:6]) if latest is not None else None
+        )
     return status
+
+
+def dense_build_meta() -> dict:
+    """稠密集合构建水位：读重建工具写下的 dense-build-meta.json。"""
+    try:
+        p = Path(".tmp") / "dense-build-meta.json"
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return {
+            "built_at": data.get("built_at"),
+            "chunks": data.get("indexed") or data.get("chunks"),
+            "sales_month": data.get("sales_month"),
+        }
+    except Exception:  # noqa: BLE001 - 水位缺失不影响状态页
+        return {}

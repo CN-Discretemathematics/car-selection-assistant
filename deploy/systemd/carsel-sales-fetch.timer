@@ -1,0 +1,11 @@
+[Unit]
+Description=每日尝试获取上月销量数据（1 号起每天一次，直到数据发布；未发布时首页自动展示上上月并标注）
+
+[Timer]
+OnCalendar=*-*-* 08:30:00 Asia/Shanghai
+# 错开 08:30 峰值与多机同时抓取；开机/错过后补跑（Persistent）
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target
