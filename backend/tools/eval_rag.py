@@ -34,7 +34,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # tools/（复用问题生成器的措辞映射）
 
-from gen_eval_questions import HINT_TO_ENERGY, HEAD_LABEL_TO_BODY, _PARAM_KEYS  # noqa: E402  # 措辞映射与生成器单一事实源
+from gen_eval_questions import (  # noqa: E402  # 措辞映射/约束判定与生成器单一事实源
+    HINT_TO_ENERGY,
+    HEAD_LABEL_TO_BODY,
+    _PARAM_KEYS,
+    series_satisfies as _series_satisfies,
+)
 
 from sqlalchemy import select  # noqa: E402
 
@@ -163,25 +168,7 @@ def _build_eval_context(db) -> dict:
     }
 
 
-def _series_satisfies(attr: dict | None, constraints: dict) -> bool:
-    """约束满足度判定：检回的车系满足问题约束即相关（一题多解合法）。"""
-    if not attr:
-        return False
-    budget = constraints.get("budget_max")
-    if budget is not None and (attr["min_price"] is None or attr["min_price"] > budget):
-        return False
-    energy = constraints.get("energy_type")
-    if energy and energy not in attr["energy_types"]:
-        return False
-    if constraints.get("new_energy") and not (attr["energy_types"] - {"ICE"}):
-        return False
-    body = constraints.get("body_type")
-    if body and attr["body_type"] != body:
-        return False
-    passengers = constraints.get("passengers")
-    if passengers and (attr["max_seats"] is None or attr["max_seats"] < int(passengers)):
-        return False
-    return True
+# _series_satisfies 自 gen_eval_questions 导入（出题与评测共用同一实现，见文件头 import）
 
 
 def _semantic_constraints(q: dict) -> dict:
