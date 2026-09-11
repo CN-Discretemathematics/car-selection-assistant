@@ -38,6 +38,7 @@
 | 层 | 技术 |
 |---|---|
 | 后端 | FastAPI · SQLAlchemy 2.0 · Alembic · Pydantic v2（SQLite 开发 / PostgreSQL 生产） |
+| 会话与限流 | Redis（compose 内置实例；未配置时回退进程内实现，接口一致） |
 | Agent | LLMClient 适配层（OpenAI 兼容 API；未配置 LLM 时自动降级为确定性回答） |
 | RAG | LangGraph StateGraph · 进程内 BM25 稀疏 / Milvus / Zilliz 稠密 · 可插拔重排 |
 | 前端 | Next.js 15 · React 19 · TypeScript · Tailwind CSS |
