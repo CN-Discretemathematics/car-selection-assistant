@@ -224,7 +224,7 @@ async def _run_one(
     async with sem:
         try:
             await asyncio.wait_for(
-                _run_one_inner(q, judge, factory, engine, variant_series, rng, out),
+                _run_one_inner(q, judge, factory, engine, variant_series, double_rate, rng, out),
                 timeout=240,
             )
         except asyncio.TimeoutError:
@@ -241,6 +241,7 @@ async def _run_one_inner(
     factory,
     engine: AgentEngine,
     variant_series: dict[int, int],
+    double_rate: float,
     rng: random.Random,
     out: list[dict],
 ) -> None:
