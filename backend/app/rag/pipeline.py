@@ -261,6 +261,11 @@ def _recall_sparse(state: RagState) -> RagState:
     优化⑥ A/B 修正：稀疏路用 **entity_query（不含同义扩展）**——BM25 是词面精确
     匹配，扩展词会把其他车系的同键切片拉进候选、稀释锚点匹配（实测 Hit@5
     0.6718→0.643）；扩展后的 search_query 只服务稠密路（语义召回受益于上下文）。
+
+    评测 v4.1（compare 双侧召回保障）：对比类查询对每个锚定车系**各补一路
+    series_id 过滤召回**——款型名表述（「2023款 470km 引领版」）的词面近邻会把
+    另一侧证据挤出候选池，导致 pair-coverage 只有 0.439；按侧保底后双侧证据
+    都能进入融合。
     """
     from app.rag.service import get_sparse_backend
 
@@ -269,9 +274,34 @@ def _recall_sparse(state: RagState) -> RagState:
     hits = backend.search(
         state["entity_query"], filters=state.get("filters"), top_k=state["recall_k"]
     )
+    per_side = 0
+    anchors = [sid for sid in (state.get("anchor_series_ids") or []) if sid is not None]
+    if state.get("query_type") == "compare" and len(anchors) >= 2:
+        seen = {h.chunk_id for h in hits}
+        side_lists: list[list] = []
+        for sid in anchors:
+            side_hits = backend.search(
+                state["entity_query"], filters={"series_id": sid}, top_k=10
+            )
+            fresh = [h for h in side_hits if h.chunk_id not in seen]
+            seen.update(h.chunk_id for h in fresh)
+            side_lists.append(fresh)
+        # round-robin 交错置前：s1[0], s2[0], s1[1], s2[1], ... 保证双侧证据都在
+        # top-5 内（对比场景需要两侧证据；此前单侧被词面近邻挤出候选池）
+        front: list[SearchResult] = []
+        i = 0
+        while any(i < len(l) for l in side_lists):
+            for l in side_lists:
+                if i < len(l):
+                    front.append(l[i])
+            i += 1
+        front_seen = {h.chunk_id for h in front}
+        hits = front + [h for h in hits if h.chunk_id not in front_seen]
+        per_side = sum(len(l) for l in side_lists)
     return {
         "sparse_hits": hits,
-        "stages": [make_stage("recall_sparse", 1, len(hits), started, {"backend": backend.name})],
+        "stages": [make_stage("recall_sparse", 1, len(hits), started,
+                              {"backend": backend.name, "per_side_added": per_side})],
     }
 
 
