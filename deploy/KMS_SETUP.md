@@ -14,8 +14,8 @@ ECS 实例 RAM 角色（KMSreadonly）→ 容器 entrypoint（deploy/fetch_secre
 
 | 步骤 | 状态 |
 | --- | --- |
-| 创建 RAM 角色 KMSreadonly + KMSReadOnlyAccess | ✅ 已完成（主账号） |
-| ECS 实例绑定 RAM 角色 | ⏳ 待主账号控制台 |
+| 创建 RAM 角色 KMSreadonly + KMSReadOnlyAccess | ✅ 已完成（信任策略待修正为 ECS 服务，见 §0） |
+| ECS 实例绑定 RAM 角色 | ⏳ 待主账号控制台（先做 §0 信任策略修正） |
 | 创建 KMS 凭据 carsel/prod/env | ⏳ 待主账号控制台（payload 已备好，见下） |
 | 应用侧（entrypoint/测试/文档） | ✅ 已完成 |
 
@@ -23,6 +23,28 @@ ECS 实例 RAM 角色（KMSreadonly）→ 容器 entrypoint（deploy/fetch_secre
 > 场景可用；更小权限可换自定义策略仅授 `kms:GetSecretValue`（限 carsel/prod/env）。
 
 ## 剩余两步（主账号控制台）
+
+### 0. 故障排查：角色无法绑定实例（2026-09-11 实测）
+
+`KMSreadonly` 创建时信任主体选成了 **RAM 账号**（`acs:ram::…:root`）而非 **ECS 服务**——
+ECS 实例只能 assume 信任 `ecs.aliyuncs.com` 的角色，因此控制台绑定不了。
+
+修复（RAM 控制台 → 身份管理 → 角色 → `KMSreadonly` → 信任策略 → 编辑，整体替换为）：
+
+```json
+{
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Effect": "Allow",
+      "Principal": {"Service": ["ecs.aliyuncs.com"]}
+    }
+  ],
+  "Version": "1"
+}
+```
+
+（子用户无 `ram:UpdateRole` 权限，须主账号操作；已验证 GetRole 可查当前错误策略。）
 
 ### 1. 绑定实例 RAM 角色
 
