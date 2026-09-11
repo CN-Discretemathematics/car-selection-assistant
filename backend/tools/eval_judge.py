@@ -324,7 +324,10 @@ async def _drive(args, questions: list[dict], judge: JudgeClient) -> list[dict]:
     ]
     done = 0
     for fut in asyncio.as_completed(tasks):
-        await fut
+        try:
+            await fut
+        except Exception as err:  # noqa: BLE001 - 单题异常不中断整体评测
+            rows.append({"error": f"{type(err).__name__}: {str(err)[:160]}"})
         done += 1
         if done % 10 == 0:
             print(f"  judge 进度 {done}/{len(tasks)}（完成 {len(rows)}）", flush=True)
