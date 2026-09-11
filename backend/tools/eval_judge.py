@@ -3,13 +3,15 @@
 与作答模型分离：作答走 AgentEngine（DeepSeek，生产同款路径），
 judge 走独立模型（默认 DashScope qwen-plus，可用 JUDGE_MODEL/--judge-model 覆盖）。
 
-流程（分层抽样 N 题，每题独立会话）：
+流程（分层抽样 N 题，每题独立会话 + 240s 硬超时）：
 1. 作答：AgentEngine（含 LLM）按生产路径生成回答；
 2. 证据：rag.search 取回 top-5 证据（与回答同一检索口径）；
 3. 判定：judge 按维度打分——
    - faithfulness：回答的事实性主张是否全部被证据支持（幻觉检测）；
    - completeness：问题问到的参数/诉求是否被回答覆盖（期望要点来自生成器结构化字段）；
    - refusal：不可回答题是否显式「官方资料未披露」（确定性字符串判定）；
+   - faithful_db（确定性，零 judge 成本）：回答中的数字必须能追溯到锚定车系的
+     DB 数据（事实值/单位/指导价元与万元/款型名/在售数）或问题本身，否则视为编造；
 4. 双评一致性：默认 30% 的题由 judge 二次独立评分，输出一致率（校准 judge 可靠性）。
 
 用法：
@@ -35,11 +37,22 @@ from app.agent.engine import AgentEngine  # noqa: E402
 from app.agent.session import SessionStore  # noqa: E402
 from app.common.database import get_session_factory  # noqa: E402
 from app.common.llm import LLMClient  # noqa: E402
-from app.common.models import OfficialPrice, SpecFact, VehicleVariant  # noqa: E402
+from app.common.models import MonthlySales, OfficialPrice, SpecFact, VehicleVariant  # noqa: E402
 from app.rag import service as rag  # noqa: E402
 
 _UNANSWERABLE_MARKERS = ("未披露", "未查到", "暂无", "没有")
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+
+FAITHFULNESS_SYSTEM = (
+    "你是严格的 RAG 事实性审核员。给定【回答】与【检索证据】，判断回答中的事实性主张"
+    "是否全部被证据直接支持。证据不足以支持的主张一律算不支持。"
+    '只输出 JSON：{"faithful": true|false, "unsupported_claims": ["..."]}'
+)
+COMPLETENESS_SYSTEM = (
+    "你是严格的 RAG 完整性审核员。给定【问题】【期望要点】【回答】，判断回答是否覆盖了"
+    "期望要点（有数据给值，无数据须明确说未披露）。"
+    '只输出 JSON：{"complete": true|false, "missing": ["..."]}'
+)
 
 
 def _numbers(text: str) -> set[float]:
@@ -50,8 +63,9 @@ def _numbers(text: str) -> set[float]:
 def _db_number_pool(db, series_ids: set[int]) -> set[float]:
     """相关车系的「可出现在回答里的数字」池（确定性 faithfulness 判定的基准）。
 
-    来源：在售款型展示名/事实值/单位、官方指导价（元与万元两种形态）、月销量与月份、
-    在售款型数——回答里的任何数字都应能追溯到其中之一，否则视为编造。
+    来源：在售款型展示名/事实值/单位（键名含数字如 L/100km 的 100 也入池）、
+    官方指导价（元与万元两种形态）、月销量与月份、在售款型数——回答里的任何数字
+    都应能追溯到其中之一，否则视为编造。
     """
     pool: set[float] = set()
     variants = db.scalars(
@@ -83,8 +97,6 @@ def _db_number_pool(db, series_ids: set[int]) -> set[float]:
             pool.update(_numbers(f"{price / 10000:g}"))
         pool.update(_numbers(str(len(variants))))
         # 月销量与月份也在回答中出现（车系画像切片的销量句），入池
-        from app.common.models import MonthlySales
-
         for month, count in db.execute(
             select(MonthlySales.month, MonthlySales.sales_count)
             .join(VehicleVariant, MonthlySales.series_id == VehicleVariant.series_id)
@@ -99,17 +111,6 @@ def _db_number_pool(db, series_ids: set[int]) -> set[float]:
             if count:
                 pool.update(_numbers(str(count)))
     return pool
-
-FAITHFULNESS_SYSTEM = (
-    "你是严格的 RAG 事实性审核员。给定【回答】与【检索证据】，判断回答中的事实性主张"
-    "是否全部被证据直接支持。证据不足以支持的主张一律算不支持。"
-    '只输出 JSON：{"faithful": true|false, "unsupported_claims": ["..."]}'
-)
-COMPLETENESS_SYSTEM = (
-    "你是严格的 RAG 完整性审核员。给定【问题】【期望要点】【回答】，判断回答是否覆盖了"
-    "期望要点（有数据给值，无数据须明确说未披露）。"
-    '只输出 JSON：{"complete": true|false, "missing": ["..."]}'
-)
 
 
 def _parse_judge_json(text: str) -> dict | None:
@@ -182,101 +183,6 @@ def _stratified_sample(questions: list[dict], sample: int, rng: random.Random) -
     return out[:sample]
 
 
-async def _run_one(
-    q: dict,
-    judge: JudgeClient,
-    factory,
-    engine: AgentEngine,
-    variant_series: dict[int, int],
-    sem: asyncio.Semaphore,
-    double_rate: float,
-    rng: random.Random,
-    out: list[dict],
-) -> None:
-    async with sem:
-        text = q.get("text") or ""
-        expect = q.get("expect") or {}
-        row: dict = {"id": q.get("id"), "bucket": q.get("bucket"), "question": text[:120]}
-        try:
-            with factory() as db:
-                store = engine._store  # noqa: SLF001 - 评测需要独立会话驱动同一引擎
-                out_obj = await engine.handle(db, store.create(), text)
-                answer = getattr(out_obj, "explanation", "") or ""
-                evidence = rag.search(db, text, top_k=5)
-                # 确定性 faithfulness（对照 DB 事实池，零 judge 成本）：
-                # 回答中的数字必须能追溯到锚定车系的 DB 数据或问题本身，否则视为编造
-                rel_series = set()
-                a = q.get("anchors") or {}
-                if a.get("series_id"):
-                    rel_series.add(int(a["series_id"]))
-                for vid in a.get("variant_ids") or []:
-                    sid = variant_series.get(int(vid))
-                    if sid:
-                        rel_series.add(int(sid))
-                if a.get("variant_id"):
-                    sid = variant_series.get(int(a["variant_id"]))
-                    if sid:
-                        rel_series.add(int(sid))
-                if rel_series:
-                    pool = _db_number_pool(db, rel_series)
-                    unsupported = _numbers(answer) - _numbers(text) - pool
-                    row["faithful_db"] = not unsupported
-                    if unsupported:
-                        row["unsupported_numbers"] = sorted(unsupported)[:8]
-        except Exception as err:  # noqa: BLE001 - 单题失败不中断整体
-            out.append({**row, "error": f"{type(err).__name__}: {str(err)[:160]}"})
-            return
-        row["answer_excerpt"] = answer[:160]
-        ev_text = "\n---\n".join(h.text for h in evidence) or "（无证据）"
-        # faithfulness（judge）
-        try:
-            j1 = await judge.chat_json(
-                FAITHFULNESS_SYSTEM,
-                f"【回答】：\n{answer}\n\n【检索证据】：\n{ev_text}",
-            )
-            row["faithful"] = j1.get("faithful") if j1 else None
-            row["unsupported_claims"] = (j1 or {}).get("unsupported_claims") or []
-        except Exception as err:  # noqa: BLE001
-            row["faithful"] = None
-            row["unsupported_claims"] = [f"judge-error: {type(err).__name__}"]
-        # completeness（judge；期望要点来自生成器结构化字段）
-        wanted: list[str] = []
-        if expect.get("fact_key"):
-            wanted.append(f"参数 {expect['fact_key']}")
-        if expect.get("body_type"):
-            wanted.append(f"车身形式 {expect['body_type']}")
-        if expect.get("energy_type"):
-            wanted.append(f"能源类型 {expect['energy_type']}")
-        if expect.get("unanswerable"):
-            wanted.append("明确说明该数据未披露")
-        if wanted:
-            try:
-                j2 = await judge.chat_json(
-                    COMPLETENESS_SYSTEM,
-                    f"【问题】：{text}\n【期望要点】：{'；'.join(wanted)}\n【回答】：\n{answer}",
-                )
-                row["complete"] = j2.get("complete") if j2 else None
-                row["missing"] = (j2 or {}).get("missing") or []
-            except Exception as err:  # noqa: BLE001
-                row["complete"] = None
-                row["missing"] = [f"judge-error: {type(err).__name__}"]
-        # 拒答诚实性（确定性字符串判定优先）
-        if expect.get("unanswerable"):
-            row["refusal_ok"] = any(marker in answer for marker in _UNANSWERABLE_MARKERS)
-        # 双评一致性抽样：faithful 再独立判一次
-        if row.get("faithful") is not None and rng.random() < double_rate:
-            try:
-                j3 = await judge.chat_json(
-                    FAITHFULNESS_SYSTEM,
-                    f"【回答】：\n{answer}\n\n【检索证据】：\n{ev_text}",
-                    temperature=0.7,
-                )
-                row["faithful_second"] = j3.get("faithful") if j3 else None
-            except Exception as err:  # noqa: BLE001 - 双评失败不影响主指标
-                row["faithful_second"] = None
-        out.append(row)
-
-
 def _summarize(rows: list[dict]) -> dict:
     n = len(rows)
     faith = [r["faithful"] for r in rows if r.get("faithful") is not None]
@@ -297,6 +203,123 @@ def _summarize(rows: list[dict]) -> dict:
         "double_judge_agreement": round(sum(agree) / len(double), 4) if double else None,
         "double_judge_n": len(double),
     }
+
+
+def _db_number_pool_error() -> None:  # pragma: no cover - 占位防误用
+    raise NotImplementedError
+
+
+async def _run_one(
+    q: dict,
+    judge: JudgeClient,
+    factory,
+    engine: AgentEngine,
+    variant_series: dict[int, int],
+    sem: asyncio.Semaphore,
+    double_rate: float,
+    rng: random.Random,
+    out: list[dict],
+) -> None:
+    """单题执行 + 240s 硬超时兜底：任何一题卡死不再拖垮整体评测。"""
+    async with sem:
+        try:
+            await asyncio.wait_for(
+                _run_one_inner(q, judge, factory, engine, variant_series, rng, out),
+                timeout=240,
+            )
+        except asyncio.TimeoutError:
+            out.append({"id": q.get("id"), "bucket": q.get("bucket"),
+                        "question": (q.get("text") or "")[:120], "error": "timeout 240s"})
+        except Exception as err:  # noqa: BLE001 - 单题失败不中断整体
+            out.append({**{"id": q.get("id"), "bucket": q.get("bucket")},
+                        "error": f"{type(err).__name__}: {str(err)[:160]}"})
+
+
+async def _run_one_inner(
+    q: dict,
+    judge: JudgeClient,
+    factory,
+    engine: AgentEngine,
+    variant_series: dict[int, int],
+    rng: random.Random,
+    out: list[dict],
+) -> None:
+    text = q.get("text") or ""
+    expect = q.get("expect") or {}
+    row: dict = {"id": q.get("id"), "bucket": q.get("bucket"), "question": text[:120]}
+    with factory() as db:
+        store = engine._store  # noqa: SLF001 - 评测需要独立会话驱动同一引擎
+        out_obj = await engine.handle(db, store.create(), text)
+        answer = getattr(out_obj, "explanation", "") or ""
+        evidence = rag.search(db, text, top_k=5)
+        # 确定性 faithfulness（对照 DB 事实池，零 judge 成本）
+        rel_series = set()
+        a = q.get("anchors") or {}
+        if a.get("series_id"):
+            rel_series.add(int(a["series_id"]))
+        for vid in a.get("variant_ids") or []:
+            sid = variant_series.get(int(vid))
+            if sid:
+                rel_series.add(int(sid))
+        if a.get("variant_id"):
+            sid = variant_series.get(int(a["variant_id"]))
+            if sid:
+                rel_series.add(int(sid))
+        if rel_series:
+            pool = _db_number_pool(db, rel_series)
+            unsupported = _numbers(answer) - _numbers(text) - pool
+            row["faithful_db"] = not unsupported
+            if unsupported:
+                row["unsupported_numbers"] = sorted(unsupported)[:8]
+    row["answer_excerpt"] = answer[:160]
+    ev_text = "\n---\n".join(h.text for h in evidence) or "（无证据）"
+    # faithfulness（judge）
+    try:
+        j1 = await judge.chat_json(
+            FAITHFULNESS_SYSTEM,
+            f"【回答】：\n{answer}\n\n【检索证据】：\n{ev_text}",
+        )
+        row["faithful"] = j1.get("faithful") if j1 else None
+        row["unsupported_claims"] = (j1 or {}).get("unsupported_claims") or []
+    except Exception as err:  # noqa: BLE001
+        row["faithful"] = None
+        row["unsupported_claims"] = [f"judge-error: {type(err).__name__}"]
+    # completeness（judge；期望要点来自生成器结构化字段）
+    wanted: list[str] = []
+    if expect.get("fact_key"):
+        wanted.append(f"参数 {expect['fact_key']}")
+    if expect.get("body_type"):
+        wanted.append(f"车身形式 {expect['body_type']}")
+    if expect.get("energy_type"):
+        wanted.append(f"能源类型 {expect['energy_type']}")
+    if expect.get("unanswerable"):
+        wanted.append("明确说明该数据未披露")
+    if wanted:
+        try:
+            j2 = await judge.chat_json(
+                COMPLETENESS_SYSTEM,
+                f"【问题】：{text}\n【期望要点】：{'；'.join(wanted)}\n【回答】：\n{answer}",
+            )
+            row["complete"] = j2.get("complete") if j2 else None
+            row["missing"] = (j2 or {}).get("missing") or []
+        except Exception as err:  # noqa: BLE001
+            row["complete"] = None
+            row["missing"] = [f"judge-error: {type(err).__name__}"]
+    # 拒答诚实性（确定性字符串判定优先）
+    if expect.get("unanswerable"):
+        row["refusal_ok"] = any(marker in answer for marker in _UNANSWERABLE_MARKERS)
+    # 双评一致性抽样：faithful 再独立判一次
+    if row.get("faithful") is not None and rng.random() < double_rate:
+        try:
+            j3 = await judge.chat_json(
+                FAITHFULNESS_SYSTEM,
+                f"【回答】：\n{answer}\n\n【检索证据】：\n{ev_text}",
+                temperature=0.7,
+            )
+            row["faithful_second"] = j3.get("faithful") if j3 else None
+        except Exception as err:  # noqa: BLE001 - 双评失败不影响主指标
+            row["faithful_second"] = None
+    out.append(row)
 
 
 def _build_judge(args) -> JudgeClient:
