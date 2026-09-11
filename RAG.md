@@ -373,9 +373,31 @@ v2 复测暴露的两个短板的检索侧闭环（`pipeline.py`）：
 **口径提示**：531 题口径含 80 道多约束推荐题（旧口径对其天然偏低），与 451 题历史
 数字不可直接相比；分桶对比才有效。
 
-compare pair-coverage 的复测明细见 `eval/eval-v4a.json`（本地）。
+#### v5 首跑（2026-09-11）：答案层 LLM-as-judge 结果与度量对象修正
 
-#### v5 答案层（LLM-as-judge，已实现工具、待 ECS 运行）
+judge 与作答模型分离（作答 DeepSeek、judge qwen-plus），100 题分层抽样，双评一致性
+抽样 25 对。答案层结果：
+
+| 答案层结果 | 数值 | 解读 |
+| --- | --- | --- |
+| 双评一致率 | **1.0**（25 对） | judge 输出稳定，可作为后续回归工具 |
+| semantic faithful | **1.0** | 语义桶回答完全被证据支撑 |
+| recommend faithful | 0.68 | 与检索 vhit 0.7744 匹配 |
+| 总体 faithful | 0.47 | 被参数/对比桶拉低（见下） |
+| completeness（参数桶） | **0.6** | 40% 参数题未覆盖期望参数——「键缺失但维度存在」的真短板（v6：按键提示未披露） |
+| 改写扩样 | 146/600（24.3%） | 受保护实体注入未提升成功率；瓶颈在 LLM 改写行为本身 |
+
+**重要发现：faithfulness 的度量对象需要修正**。judge 对照「RAG top-5 证据」时，
+参数/对比桶 faithful 仅 0.08/0.12——但这不是幻觉：本产品的参数/对比回答由确定性
+模板**直接从全量 DB 事实**生成（带引用），其事实来源本就不限于 RAG top-5。judge
+实际度量的是「RAG 证据对答案的支撑率」，该数字与检索指标交叉验证完全一致
+（semantic 证据支撑 1.0 ↔ v2 valid-hit 1.0；recommend 0.68 ↔ 0.7744；parameter
+0.08 ↔ 参数题走稀疏快路、证据本就不含全部 DB 事实）。
+
+**v6 待办**：faithfulness 改为对照「引用来源的 DB 事实」判定（确定性、零 judge 成本）；
+「键缺失但维度存在」的参数题按键提示未披露。
+
+答案层工具与运行方式：
 
 `tools/eval_judge.py`：作答走 AgentEngine（DeepSeek，生产同款路径），judge 走独立模型
 （默认 DashScope qwen-plus，`JUDGE_MODEL` 可覆盖）——judge 与作答模型分离。三维度：
@@ -391,13 +413,15 @@ python tools/eval_judge.py --questions eval/questions-v3.json --sample 100 \
     --report eval/eval-judge.json
 ```
 
-#### v4 待办（答案层与剩余项）
+#### 剩余待办
 
-- 答案层 LLM-as-judge（faithfulness / completeness），judge 与作答模型分离 + 双评一致性校准；
+- ~~答案层 LLM-as-judge~~（已落地 `tools/eval_judge.py`，首跑结果见 v5 首跑）；
 - 改写成功率提升：数字语义等价判定已落地（成功率 28% → 26%，未提升），剩余失败多为
   改写时丢失车系名/约束，需 prompt 与校验继续放宽后扩样（semantic 变体仅 4 条）；
 - compare 锚定缺席的根因复核：部分对比题款型名对应的变体为非在售/别名表述，
-  补召回也无法覆盖（与「31 车系索引覆盖缺口」待办同源）。
+  补召回也无法覆盖（与「31 车系索引覆盖缺口」待办同源）；
+- v6：faithfulness 对照「引用来源的 DB 事实」判定（确定性、零 judge 成本）、
+  「键缺失但维度存在」的参数题按键提示未披露。
 
 ## 5. 流程管理可视化
 
