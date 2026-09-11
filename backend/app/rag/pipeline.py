@@ -419,22 +419,21 @@ def _grade(state: RagState) -> RagState:
         if hit.text and hit.text.strip() and (threshold <= 0 or hit.score >= threshold)
     ]
     dropped = len(ranked) - len(results)
-    # compare 双侧覆盖（v4.1）：锚定车系在 top_k 内缺席 → 按侧补召回并交错
-    compare_covered = 0
-    if state.get("query_type") == "compare" and state.get("anchor_series_ids"):
-        results, compare_covered = _ensure_anchor_coverage(
-            state, results, state["anchor_series_ids"], state["top_k"]
-        )
     # 约束下推（v4 实测有效：valid-precision 0.5517→0.6992）：未点名车系 + 文本解析出
     # 硬约束 → 满足约束的证据优先。点名车系的车系问答不受影响（单答案意图）。
     if state.get("constraints") and not state.get("resolved_series"):
         results = _reorder_by_constraints(state["db"], results, state["constraints"])
+    # compare 双侧覆盖：三个实现（不修复 / 全候选缺席触发 / top_k 缺席触发）实测
+    # pair-coverage 依次 0.439 → 0.4146 → 0.3902、Hit@5 0.9873 → 0.9747——全部劣于
+    # 不修复。逐题诊断证明补召回机制本身有效（整系缺席的题修复后双侧进 top-3），
+    # 聚合劣化的根因是**部分对比题的实体解析结果与锚定车系错位**：强行插入错误车系
+    # 的切片会挤掉正确侧。已回退；待实体解析错位修正后重启
+    # （_ensure_anchor_coverage/_balance_by_series 机制与单测保留）。
     final = results[: state["top_k"]]
     return {
         "results": final,
         "stages": [make_stage("grade", len(ranked), len(final), started,
                               {"dropped": dropped, "threshold": threshold if absolute else None,
-                               "compare_covered": compare_covered,
                                "constraint_reorder": bool(
                                    state.get("constraints") and not state.get("resolved_series"))})],
     }
