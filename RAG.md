@@ -344,21 +344,22 @@ v2 在旧口径之上**并排**新增四类指标（全部由生成器写入的�
 报告存档：`eval/eval-v3a.json`（600 题全量）、`eval/eval-v3b.json`（改写体）、
 `eval/eval-v3c.json`（多约束专项）、`eval/eval-refusal.json`（拒答，本地不入库）。
 
-#### v4 落地（2026-09-11）：compare 双侧均衡 + recommend 约束下推
+#### v4 落地（2026-09-11）：recommend 约束下推（保留）+ compare 双侧均衡（尝试后回退）
 
 v2 复测暴露的两个短板的检索侧闭环（`pipeline.py`）：
 
-- **compare 双侧均衡**：grade 对对比类查询按锚定车系交错证据（`_balance_by_series`），
-  修复 top_k 被单侧挤占；诊断发现更深的根因——对比题以款型名表述（「2023款 470km
-  引领版」）时，BM25 候选常被词面近邻的其他车系占满、锚定车系整系缺席，故先
-  `_ensure_anchor_coverage` 按缺席侧 series_id 过滤补召回（top2）再交错；
-- **recommend 约束下推**：analyze 从文本解析硬约束（`_parse_constraints`：预算/能源/
-  车身/座位），未点名车系时 grade 把满足约束的证据排前（`_reorder_by_constraints`，
-  稳定重排、组内保持原名次）。点名车系的车系问答不受影响（单答案意图）；
+- **recommend 约束下推（已保留）**：analyze 从文本解析硬约束（`_parse_constraints`：
+  预算/能源/车身/座位），未点名车系时 grade 把满足约束的证据排前
+  （`_reorder_by_constraints`，稳定重排、组内保持原名次）。点名车系的车系问答
+  不受影响（单答案意图）；
+- **compare 双侧均衡（尝试后回退）**：两个实现（全量交错 / 缺席侧外科补召回）实测
+  pair-coverage 均未提升且 Hit@5 微降——逐题诊断证明补召回机制本身有效（整系缺席的
+  对比题修复后双侧进 top-3），聚合不升的根因是**部分对比题的实体解析结果与锚定车系
+  错位**，交错会放大错位。已回退到已验证状态；机制与单测保留，修正解析错位后再启用；
 - 约束判定与属性装载统一在 `app/catalog/series_constraints.py`（出题/评测/流水线三处
   单一事实源，属性带进程内缓存）。
 
-复测（531 题 · 真云 dense）：
+复测（531 题 · 真云 dense · 约束下推保留 + compare 回退后）：
 
 | 指标 | v4 前 | v4 后 |
 | --- | --- | --- |
@@ -366,9 +367,13 @@ v2 复测暴露的两个短板的检索侧闭环（`pipeline.py`）：
 | valid-precision@5 | 0.5517 | **0.6992**（+14.8pt） |
 | valid-MRR | 0.6604 | **0.7607**（+10.0pt） |
 | semantic 桶 valid-precision@5 | 0.9707 | **1.0** |
-| pipeline 总 Hit@5 / NDCG@10 | 0.5857 / 0.5244 | 0.5913 / **0.5304**（无回退） |
+| compare pair-coverage@5 | 0.439 | 0.4634（回退后恢复基线） |
+| pipeline 总 Hit@5 / MRR / NDCG@10（531 题口径） | 0.5857 / 0.5714 / 0.5244 | 0.5951 / 0.5787 / **0.5294** |
 
-compare pair-coverage 的补召回后复测明细见 `eval/eval-v4a.json`（本地）。
+**口径提示**：531 题口径含 80 道多约束推荐题（旧口径对其天然偏低），与 451 题历史
+数字不可直接相比；分桶对比才有效。
+
+compare pair-coverage 的复测明细见 `eval/eval-v4a.json`（本地）。
 
 #### v5 答案层（LLM-as-judge，已实现工具、待 ECS 运行）
 
