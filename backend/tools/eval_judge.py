@@ -33,6 +33,7 @@ from sqlalchemy import select  # noqa: E402
 
 from app.agent.engine import AgentEngine  # noqa: E402
 from app.agent.session import SessionStore  # noqa: E402
+from app.common.database import get_session_factory  # noqa: E402
 from app.common.llm import LLMClient  # noqa: E402
 from app.rag import service as rag  # noqa: E402
 
