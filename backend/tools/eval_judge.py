@@ -42,18 +42,18 @@ _UNANSWERABLE_MARKERS = ("未披露", "未查到", "暂无", "没有")
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
-def _numbers(text: str) -> set[str]:
-    """提取文本中的数字 token（去除千分位逗号后）。"""
-    return set(_NUM_RE.findall((text or "").replace(",", "")))
+def _numbers(text: str) -> set[float]:
+    """提取文本中的数字为 float 集合（去除千分位逗号；浮点语义比较，防 '17.60'≠'17.6'）。"""
+    return {float(x) for x in _NUM_RE.findall((text or "").replace(",", ""))}
 
 
-def _db_number_pool(db, series_ids: set[int]) -> set[str]:
+def _db_number_pool(db, series_ids: set[int]) -> set[float]:
     """相关车系的「可出现在回答里的数字」池（确定性 faithfulness 判定的基准）。
 
     来源：在售款型展示名/事实值/单位、官方指导价（元与万元两种形态）、月销量与月份、
     在售款型数——回答里的任何数字都应能追溯到其中之一，否则视为编造。
     """
-    pool: set[str] = set()
+    pool: set[float] = set()
     variants = db.scalars(
         select(VehicleVariant).where(
             VehicleVariant.status == "on_sale", VehicleVariant.series_id.in_(series_ids)
@@ -81,7 +81,23 @@ def _db_number_pool(db, series_ids: set[int]) -> set[str]:
             price = float(p.price_cny)
             pool.update(_numbers(f"{price:g}"))
             pool.update(_numbers(f"{price / 10000:g}"))
-        pool.update(str(len(variants)))
+        pool.update(_numbers(str(len(variants))))
+        # 月销量与月份也在回答中出现（车系画像切片的销量句），入池
+        from app.common.models import MonthlySales
+
+        for month, count in db.execute(
+            select(MonthlySales.month, MonthlySales.sales_count)
+            .join(VehicleVariant, MonthlySales.series_id == VehicleVariant.series_id)
+            .where(
+                VehicleVariant.status == "on_sale",
+                VehicleVariant.series_id.in_(series_ids),
+                MonthlySales.sales_type.in_(("retail", "portal")),
+            )
+            .distinct()
+        ).all():
+            pool.update(_numbers(month))
+            if count:
+                pool.update(_numbers(str(count)))
     return pool
 
 FAITHFULNESS_SYSTEM = (
