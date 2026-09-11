@@ -35,9 +35,51 @@ from app.agent.engine import AgentEngine  # noqa: E402
 from app.agent.session import SessionStore  # noqa: E402
 from app.common.database import get_session_factory  # noqa: E402
 from app.common.llm import LLMClient  # noqa: E402
+from app.common.models import OfficialPrice, SpecFact, VehicleVariant  # noqa: E402
 from app.rag import service as rag  # noqa: E402
 
 _UNANSWERABLE_MARKERS = ("未披露", "未查到", "暂无", "没有")
+_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _numbers(text: str) -> set[str]:
+    """提取文本中的数字 token（去除千分位逗号后）。"""
+    return set(_NUM_RE.findall((text or "").replace(",", "")))
+
+
+def _db_number_pool(db, series_ids: set[int]) -> set[str]:
+    """相关车系的「可出现在回答里的数字」池（确定性 faithfulness 判定的基准）。
+
+    来源：在售款型展示名/事实值/单位、官方指导价（元与万元两种形态）、月销量与月份、
+    在售款型数——回答里的任何数字都应能追溯到其中之一，否则视为编造。
+    """
+    pool: set[str] = set()
+    variants = db.scalars(
+        select(VehicleVariant).where(
+            VehicleVariant.status == "on_sale", VehicleVariant.series_id.in_(series_ids)
+        )
+    ).all()
+    vids = [v.id for v in variants]
+    for v in variants:
+        pool.update(_numbers(v.display_name or ""))
+    if vids:
+        for value, unit in db.execute(
+            select(SpecFact.fact_value, SpecFact.unit)
+            .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
+            .where(VehicleVariant.status == "on_sale", VehicleVariant.series_id.in_(series_ids))
+        ).all():
+            pool.update(_numbers(value or ""))
+            pool.update(_numbers(unit or ""))
+        for p in db.scalars(
+            select(OfficialPrice).where(
+                OfficialPrice.effective_to.is_(None), OfficialPrice.variant_id.in_(vids)
+            )
+        ).all():
+            price = float(p.price_cny)
+            pool.update(_numbers(f"{price:g}"))
+            pool.update(_numbers(f"{price / 10000:g}"))
+        pool.update(str(len(variants)))
+    return pool
 
 FAITHFULNESS_SYSTEM = (
     "你是严格的 RAG 事实性审核员。给定【回答】与【检索证据】，判断回答中的事实性主张"
@@ -126,6 +168,7 @@ async def _run_one(
     judge: JudgeClient,
     factory,
     engine: AgentEngine,
+    variant_series: dict[int, int],
     sem: asyncio.Semaphore,
     double_rate: float,
     rng: random.Random,
@@ -141,6 +184,26 @@ async def _run_one(
                 out_obj = await engine.handle(db, store.create(), text)
                 answer = getattr(out_obj, "explanation", "") or ""
                 evidence = rag.search(db, text, top_k=5)
+                # 确定性 faithfulness（对照 DB 事实池，零 judge 成本）：
+                # 回答中的数字必须能追溯到锚定车系的 DB 数据或问题本身，否则视为编造
+                rel_series = set()
+                a = q.get("anchors") or {}
+                if a.get("series_id"):
+                    rel_series.add(int(a["series_id"]))
+                for vid in a.get("variant_ids") or []:
+                    sid = variant_series.get(int(vid))
+                    if sid:
+                        rel_series.add(int(sid))
+                if a.get("variant_id"):
+                    sid = variant_series.get(int(a["variant_id"]))
+                    if sid:
+                        rel_series.add(int(sid))
+                if rel_series:
+                    pool = _db_number_pool(db, rel_series)
+                    unsupported = _numbers(answer) - _numbers(text) - pool
+                    row["faithful_db"] = not unsupported
+                    if unsupported:
+                        row["unsupported_numbers"] = sorted(unsupported)[:8]
         except Exception as err:  # noqa: BLE001 - 单题失败不中断整体
             out.append({**row, "error": f"{type(err).__name__}: {str(err)[:160]}"})
             return
@@ -197,12 +260,15 @@ def _summarize(rows: list[dict]) -> dict:
     faith = [r["faithful"] for r in rows if r.get("faithful") is not None]
     comp = [r["complete"] for r in rows if r.get("complete") is not None]
     refu = [r["refusal_ok"] for r in rows if r.get("refusal_ok") is not None]
+    fdb = [r["faithful_db"] for r in rows if r.get("faithful_db") is not None]
     double = [r for r in rows if r.get("faithful_second") is not None]
     agree = [1.0 for r in double if r.get("faithful") == r.get("faithful_second")]
     return {
         "questions": n,
         "faithful_rate": round(sum(faith) / len(faith), 4) if faith else None,
         "faithful_judged": len(faith),
+        "faithful_db_rate": round(sum(fdb) / len(fdb), 4) if fdb else None,
+        "faithful_db_judged": len(fdb),
         "complete_rate": round(sum(comp) / len(comp), 4) if comp else None,
         "complete_judged": len(comp),
         "refusal_ok_rate": round(sum(refu) / len(refu), 4) if refu else None,
@@ -224,8 +290,17 @@ async def _drive(args, questions: list[dict], judge: JudgeClient) -> list[dict]:
     sem = asyncio.Semaphore(args.concurrency)
     rng = random.Random(20260911)
     rows: list[dict] = []
+    with factory() as db:
+        variant_series = {
+            v.id: v.series_id
+            for v in db.scalars(
+                select(VehicleVariant).where(VehicleVariant.status == "on_sale")
+            ).all()
+        }
     tasks = [
-        asyncio.create_task(_run_one(q, judge, factory, engine, sem, args.double_rate, rng, rows))
+        asyncio.create_task(
+            _run_one(q, judge, factory, engine, variant_series, sem, args.double_rate, rng, rows)
+        )
         for q in questions
     ]
     done = 0

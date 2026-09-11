@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.catalog import services as catalog
+from app.catalog.series_constraints import PARAM_KEYS
 from app.catalog.series_index import (
     HEADLINE_ORDER,
     unit_from_key,
@@ -132,6 +133,44 @@ def missing_param_labels(
         if label and label not in labels:
             labels.append(label)
     return labels
+
+
+def asked_missing_param_note(
+    facts: list[tuple[str, str, str | None, str | None]],
+    message: str,
+    missing_dims: list[str] | None = None,
+) -> str | None:
+    """按键级未披露提示（v6）：消息点名了具体参数键、但该车系在售款型均无该键。
+
+    与 missing_param_labels（维度级）互补：维度有数据（如 WLTC 油耗）但问的是
+    另一个键（如 CLTC 纯电续航）时，probe_facts 会答兄弟键、用户问的键被静默
+    跳过——诚实性原则要求显式标注「官方资料未披露」。
+    只匹配 PARAM_KEYS 的用户可读问法（生成器/前端同源），避免误伤泛问（「续航是多少」）；
+    维度整体缺失的键由 missing_param_labels 兜底，此处跳过避免重复。
+    """
+    known_keys = {row[0] for row in facts}
+    missing_dims = set(missing_dims or [])
+    missing: list[str] = []
+    for key, phrase in PARAM_KEYS:
+        if phrase not in message and key not in message:
+            continue
+        if key in known_keys:
+            continue
+        dim = _key_dimension(key)
+        if dim and dim in missing_dims:
+            continue  # 维度级兜底已覆盖
+        if phrase in missing:
+            continue
+        missing.append(phrase)
+    return f"{'、'.join(missing)}：官方资料未披露。" if missing else None
+
+
+def _key_dimension(key: str) -> str | None:
+    """事实键所属的探针维度可读名（按 _PARAM_PROBES 的 key_re 顺序首个命中）。"""
+    for query_re, key_re in _PARAM_PROBES:
+        if re.search(key_re, key):
+            return _PARAM_DIM_LABELS.get(query_re)
+    return None
 
 # 亮点配置（用户可感知的进阶项；按顺序最多取 5 个实际存在的）
 _FEATURE_HIGHLIGHTS: list[tuple[str, str]] = [
@@ -298,11 +337,14 @@ def build_series_qa_answer(
         probed = probe_facts(facts, message)
         if probed:
             parts.append("你问到的相关参数：" + "；".join(probed) + "。")
-        missing = missing_param_labels(facts, message)
-        if missing:
+        missing_dims = missing_param_labels(facts, message)
+        if missing_dims:
             # 诚实性兜底（评测 v3）：问到的维度 DB 完全没有 → 显式「官方资料未披露」，
             # 绝不沉默跳过，也绝不编造
-            parts.append("你问到的" + "、".join(missing) + "：官方资料未披露。")
+            parts.append("你问到的" + "、".join(missing_dims) + "：官方资料未披露。")
+        key_note = asked_missing_param_note(facts, message, missing_dims)
+        if key_note:
+            parts.append("你问到的" + key_note)
         parts.append(footer)
         return "\n".join(parts)
 

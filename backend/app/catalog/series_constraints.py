@@ -2,7 +2,8 @@
 
 - series_satisfies(attr, constraints)：检回车系满足问题约束即相关（一题多解合法）；
 - load_series_attrs(db, series_ids)：车系约束属性（min_price/能源/车身/最大座位），
-  带进程内缓存——流水线 grade 节点按候选车系批量取用，评测一次性全量取用。
+  带进程内缓存——流水线 grade 节点按候选车系批量取用，评测一次性全量取用；
+- PARAM_KEYS：参数问答键表（键名与数据库 fact_key 对齐），出题/评测/问答兜底三处共用。
 """
 from __future__ import annotations
 
@@ -11,6 +12,20 @@ from sqlalchemy import select
 from app.common.models import OfficialPrice, SpecFact, VehicleSeries, VehicleVariant
 
 _ATTR_CACHE: dict[int, dict] = {}
+
+# 参数问答键表（键名与数据库 fact_key 对齐；phrase 为用户可读问法）。
+# 出题（tools/gen_eval_questions）、评测（tools/eval_rag 的 fact-coverage needle）、
+# 问答兜底（app/agent/series_qa 的按键未披露提示）三处共用，单一事实源。
+PARAM_KEYS: tuple[tuple[str, str], ...] = (
+    ("CLTC纯电续航里程(km)", "CLTC 纯电续航"),
+    ("WLTC纯电续航里程(km)", "WLTC 纯电续航"),
+    ("WLTC综合油耗(L/100km)", "WLTC 油耗"),
+    ("轴距(mm)", "轴距"),
+    ("座位数(个)", "座位数"),
+    ("最大马力(Ps)", "最大马力"),
+    ("电动机总功率(kW)", "电机功率"),
+    ("电池能量(kWh)", "电池容量"),
+)
 
 
 def series_satisfies(attr: dict | None, constraints: dict) -> bool:

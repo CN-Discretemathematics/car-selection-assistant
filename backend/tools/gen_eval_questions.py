@@ -24,7 +24,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import select  # noqa: E402
 
-from app.catalog.series_constraints import load_series_attrs, series_satisfies  # noqa: E402
+from app.catalog.series_constraints import (  # noqa: E402
+    PARAM_KEYS as _PARAM_KEYS,
+    load_series_attrs,
+    series_satisfies,
+)
 from app.common.database import get_session_factory  # noqa: E402
 from app.common.models import Brand, VehicleSeries, VehicleVariant  # noqa: E402
 
@@ -59,17 +63,7 @@ INTENT_TEMPLATES = [
     "compare_two", "variant_diff",
 ]
 
-# 参数问答用的（事实键, 问法）——键名与数据库 fact_key 对齐（取样自 _PRIORITY_KEY_GROUPS）
-_PARAM_KEYS: tuple[tuple[str, str], ...] = (
-    ("CLTC纯电续航里程(km)", "CLTC 纯电续航"),
-    ("WLTC纯电续航里程(km)", "WLTC 纯电续航"),
-    ("WLTC综合油耗(L/100km)", "WLTC 油耗"),
-    ("轴距(mm)", "轴距"),
-    ("座位数(个)", "座位数"),
-    ("最大马力(Ps)", "最大马力"),
-    ("电动机总功率(kW)", "电机功率"),
-    ("电池能量(kWh)", "电池容量"),
-)
+# 参数问答键表统一在 app/catalog/series_constraints.PARAM_KEYS（出题/评测/问答三处共用）
 
 # 语义题的能源/车身措辞映射（module 级：eval_rag 的约束满足度判定复用同一张表，
 # 从问题文本反解结构化约束，避免两处口径漂移）

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.agent.series_qa import (
+    asked_missing_param_note,
     asks_variant_diff,
     build_series_qa_answer,
     build_variant_diff_answer,
@@ -94,6 +95,20 @@ def test_missing_param_labels_unit():
     facts = [("CLTC综合续航(km)", "710", "km", "CLTC")]
     assert missing_param_labels(facts, "电池容量是多少") == ["电池与充电"]
     assert missing_param_labels(facts, "续航是多少") == []  # 该维度有数据：不标缺失
+
+
+def test_asked_missing_param_note_key_level():
+    """v6 按键级未披露：维度有数据（油耗）但问的是缺失的键（CLTC 续航）→ 显式提示。"""
+    facts = [("WLTC综合油耗(L/100km)", "4.56", "L/100km", "WLTC")]
+    note = asked_missing_param_note(facts, "卡罗拉锐放 的CLTC 纯电续航是多少")
+    assert note == "CLTC 纯电续航：官方资料未披露。"
+    # 泛问（不含具体键问法）不触发
+    assert asked_missing_param_note(facts, "卡罗拉锐放 的油耗是多少") is None
+    # 键存在：不提示
+    facts2 = facts + [("CLTC纯电续航里程(km)", "610", "km", None)]
+    assert asked_missing_param_note(facts2, "卡罗拉锐放 的CLTC 纯电续航是多少") is None
+    # 键与问法同现两次只提示一次
+    assert asked_missing_param_note(facts, "CLTC 纯电续航和 CLTC 纯电续航") == "CLTC 纯电续航：官方资料未披露。"
 
 
 def test_resolve_and_dedupe_longest_wins(db_session: Session):
