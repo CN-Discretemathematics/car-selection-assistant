@@ -151,7 +151,7 @@ graph TD;
 | valid-hit@5（recommend+semantic，257 题） | 0.4167 | **0.7885** |
 | valid-precision@5 | 0.1731 | **0.6992** |
 | valid-MRR | 0.2674 | **0.7027** |
-| pair-coverage@5（compare，79 题） | 0.439 | **0.7073**（v6.1 解析修复+双侧召回保障） |
+| pair-coverage@5（compare，79 题） | 0.439 | **0.5854**（款型名解析修复 + 双侧召回保障 + 撞名修复后诚实口径） |
 
 > 旧口径三处失真：① semantic/recommend 单锚点判定（一题多解说成不相关）→ 约束满足度判定；
 > ② Recall@5 分母 = 相关车系全部切片（均值 15 条，结构上限 0.4773）→ fact-coverage 补充；
