@@ -90,7 +90,7 @@ def _number_semantics(text: str) -> list[int]:
         parts.append(text[pos:m.start()])
         value = _cn_to_int(m.group())
         keep = value is not None and (
-            m.group().endswith("万") or text[m.end():m.end() + 1] == "座" or value >= 10
+            m.group().endswith("万") or text[m.end():m.end() + 1] in ("座", "口", "人") or value >= 10
         )
         parts.append(str(value) if (value is not None and keep) else m.group())
         pos = m.end()
@@ -147,16 +147,15 @@ def _validate(
         from tools.gen_eval_questions import HEAD_LABEL_TO_BODY as _HL, HINT_TO_ENERGY as _HE
 
         def _derive(text: str) -> dict:
+            # 评审 R4#6：与 eval_rag._semantic_constraints 同口径——收集全部命中，
+            # 冲突（多种能源并存）时放弃，保证「改写可判定 ⟺ 评测可判定」
             got: dict = {}
-            for hint, energy in _HE.items():
-                stem = hint.rstrip("的")  # 措辞去「的」取词干（纯电的→纯电），与 eval_rag 一致
-                if stem and stem in text:
-                    got["energy_type"] = energy
-                    break
-            for label, body in _HL.items():
-                if label in text:
-                    got["body_type"] = body
-                    break
+            energies = {energy for hint, energy in _HE.items() if hint.rstrip("的") in text}
+            if len(energies) == 1:
+                got["energy_type"] = next(iter(energies))
+            bodies = {body for label, body in _HL.items() if label in text}
+            if len(bodies) == 1:
+                got["body_type"] = next(iter(bodies))
             return got
 
         if _derive(original) and _derive(variant) != _derive(original):
@@ -197,13 +196,16 @@ async def _rewrite(
                 resolved_ids = {s.id for s, _ in resolve_series(db, text)}
             resolve_ok = int(q["anchors"]["series_id"]) in resolved_ids
             resolver_verdict = True
+            # 评审 R4#7：分母 = 每次实际判定（含「解析通过但被其他原因拒绝」），
+            # 鲁棒率不再偏向高估
+            rejects["_resolver_verdicts"] = rejects.get("_resolver_verdicts", 0) + 1
+            if resolve_ok:
+                rejects["_resolver_ok"] = rejects.get("_resolver_ok", 0) + 1
         ok, reason = _validate(q["text"], text, q, resolve_ok, [n for n in (brand_name, series_name) if n])
         if not ok:
             rejects[reason] = rejects.get(reason, 0) + 1
             return
         out.append({**q, "id": f"v{q['id'][1:]}", "parent_id": q["id"], "text": text, "paraphrased": True})
-        if resolver_verdict:
-            rejects["_resolver_ok"] = rejects.get("_resolver_ok", 0) + 1
 
 
 async def _run(args, questions: list[dict], series_names: dict) -> tuple[list[dict], dict]:
@@ -254,15 +256,15 @@ def main(argv: list[str] | None = None) -> int:
         series_names = {s.id: s.name for s in db.scalars(select(VehicleSeries)).all()}
 
     out, rejects = asyncio.run(_run(args, questions, series_names))
-    # 评审 E5：解析鲁棒率分母 = 实际得到解析判定的题（LLM 失败/未锚定题不计入），
-    # 且各拒绝原因独立计数（多因失败的题不会被误记为解析通过）
-    resolver_verdicts = rejects.get("_resolver_ok", 0) + rejects.get("resolver", 0)
-    print(f"改写变体 {len(out)} 条（原题 {len(questions)} 条）→ {args.output}")
+    # 评审 E5/R4#7：解析鲁棒率分母 = 每次实际解析判定（含「解析通过但被其他原因
+    # 拒绝」与「解析失败」）；下划线键为内部计数，不进入拒绝分布
+    resolver_ok = rejects.pop("_resolver_ok", 0)
+    resolver_verdicts = rejects.pop("_resolver_verdicts", 0)
     stats = {k: v for k, v in rejects.items() if not k.startswith("_")}
+    print(f"改写变体 {len(out)} 条（原题 {len(questions)} 条）→ {args.output}")
     print(f"拒绝原因：{json.dumps(stats, ensure_ascii=False)}")
     if resolver_verdicts:
-        rate = rejects.get("_resolver_ok", 0) / resolver_verdicts
-        print(f"解析鲁棒率 {rejects.get('_resolver_ok', 0)}/{resolver_verdicts}（{rate:.1%}）")
+        print(f"解析鲁棒率 {resolver_ok}/{resolver_verdicts}（{resolver_ok / resolver_verdicts:.1%}）")
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     payload = {
         "generated_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"),

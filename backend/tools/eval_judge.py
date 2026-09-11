@@ -40,7 +40,8 @@ from app.common.llm import LLMClient  # noqa: E402
 from app.common.models import MonthlySales, OfficialPrice, SpecFact, VehicleVariant  # noqa: E402
 from app.rag import service as rag  # noqa: E402
 
-_UNANSWERABLE_MARKERS = ("未披露", "未查到", "暂无")  # 评审 E9：裸「没有」误放行编造回答
+_UNANSWERABLE_MARKERS = ("未披露", "未查到", "暂无", "没有披露", "没有查到", "没有公布")
+# 评审 R4#10：保留「没有」的诚实复合短语，仅剔除裸「没有」（会误放行编造回答）  # 评审 E9：裸「没有」误放行编造回答
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 
 FAITHFULNESS_SYSTEM = (

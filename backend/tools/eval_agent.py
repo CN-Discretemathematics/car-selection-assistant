@@ -40,7 +40,8 @@ CLARIFY_INTENTS = {"open_clarify"}
 UNANSWERABLE_INTENTS = {"unanswerable_param"}
 # 评审 E9：裸「没有」会把含「市面上没有对手」的编造回答误判为诚实拒答——
 # 只保留拒答语义的标记词
-_HONEST_MARKERS = ("未披露", "未查到", "暂无")
+# 评审 R4#10：保留「没有」的诚实复合短语（没有披露/没有查到），仅剔除裸「没有」
+_HONEST_MARKERS = ("未披露", "未查到", "暂无", "没有披露", "没有查到", "没有公布")
 
 
 def _check_recommendation(q: dict, out) -> tuple[bool, str]:

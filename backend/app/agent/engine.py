@@ -38,6 +38,9 @@ from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, Vehic
 
 # 预算/座位正则唯一定义在 series_constraints（评审 C2：流水线约束解析复用同一实现），
 # 此处按原内部名导入，行为不变。
+# 注（评审 R4#11 观察项）：extract_hints 的解析链与 series_constraints.parse_budget_and_seats
+# 语义仍有差异（本函数无裸「N万」预算语境门控、_parse_count 不支持「十二」组合数）——
+# 推荐引擎的历史行为保持不变，后续回合可统一收敛到共享解析器。
 from app.catalog.series_constraints import (  # noqa: E402
     BUDGET_BARE_RE as _BUDGET_BARE_RE,
     BUDGET_MAX_RE as _BUDGET_MAX_RE,

@@ -10,8 +10,10 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    # 会话/限流数据无持久化需求（TTL 短期数据），纯内存即可；不暴露宿主机端口
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    # 会话/限流/认证令牌均带 TTL（令牌 TTL 最长 30 天）：
+    # - 无持久化：redis 重启 = 全量登出 + 限流计数清零（可接受，重启罕见）
+    # - volatile-lru：只淘汰带 TTL 的键（所有键均带 TTL），优先最旧
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "volatile-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -28,6 +30,8 @@ services:
     environment:
       # 默认单 worker：Redis 不可用时认证/会话回退进程内，多 worker 会分裂脑（评审 M8）
       UVICORN_WORKERS: ${API_WORKERS:-1}
+      # 评审 R4#9：显式接线（默认指向 compose 内 redis，.env 同名变量可覆盖）
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     volumes:
       # embedding 向量缓存 / dense 构建水位标记持久化：容器重建不丢（2026-09-10）
       - ../backend/.tmp:/srv/carsel/backend/.tmp

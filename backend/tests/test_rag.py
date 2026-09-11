@@ -619,6 +619,13 @@ def test_parse_constraints():
     assert parsed_min.get("budget_min") == 200000
     assert _parse_constraints("销量30万的轿车有哪些") == {"body_type": "sedan"}, "裸「N万」非预算语境不得误判"
     assert _parse_constraints("10座以上的MPV")["passengers"] == 10, "座位数须取完整数字（旧正则「10座」会取成 0）"
+    # 评审 R4#3：预算语境窗口放宽（「预算在/预算大概」+数字 也算）
+    assert _parse_constraints("预算在15万左右的轿车")["budget_max"] == 150000
+    assert _parse_constraints("预算大概15万的SUV")["budget_max"] == 150000
+    # 评审 R4#1：「非常」不是否定（「非常想要SUV」仍解析出 SUV）
+    assert _parse_constraints("非常想要SUV")["body_type"] == "suv"
+    # 评审 R4#1：对比句不被 4 字窗口跨词吞掉
+    assert _parse_constraints("不要轿车要看SUV")["body_type"] == "suv"
 
 
 def test_balance_by_series_interleaves():

@@ -120,6 +120,9 @@ def _ensure_anchor_coverage(
     from app.rag.service import get_sparse_backend
 
     backend = get_sparse_backend()
+    # 评审 R4#4：与 _recall_sparse 相同的调用方过滤合并——补召回证据不得绕过
+    # 管理台试运行设置的过滤条件
+    base_filters = {k: v for k, v in (state.get("filters") or {}).items() if k != "series_id"}
     firsts: list[SearchResult] = []
     rest: list[SearchResult] = []
     seen = {h.chunk_id for h in results}
@@ -127,7 +130,7 @@ def _ensure_anchor_coverage(
         try:
             hits = backend.search(
                 state.get("entity_query") or state.get("query") or "",
-                filters={"series_id": sid}, top_k=2,
+                filters={**base_filters, "series_id": sid}, top_k=2,
             )
         except Exception:  # noqa: BLE001 - 补召回失败不阻断检索
             continue

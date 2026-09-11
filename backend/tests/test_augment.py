@@ -28,6 +28,18 @@ def test_digit_drift_rejected():
     assert not ok and reason == "digits"
 
 
+def test_measure_word_numerals_ignored():
+    """评审 R4#5：量词数字（一台）不构成约束；但 座/口/人 邻接的数字是真实约束——
+    「家里5口人」→「家里五口人」等价（示例原生形态不误拒），「5口→3口」座位漂移拒绝。"""
+    q = {"bucket": "recommend", "expect": {"passengers": 5}, "anchors": {}}
+    ok, _ = _validate("家里5口人，预算15万买SUV", "家里五口人，预算15万以内买个SUV", q, True)
+    assert ok, "口/人量词数字等价"
+    ok2, reason2 = _validate("家里5口人，预算15万买SUV", "家里三口人，预算15万以内买个SUV", q, True)
+    assert not ok2 and reason2 == "digits", "座位数漂移（5口→3口）必须拒绝"
+    ok3, reason3 = _validate("家里5口人，预算15万买SUV", "家里5口人，预算18万以内买个SUV", q, True)
+    assert not ok3 and reason3 == "digits"
+
+
 def test_resolver_failure_rejected():
     """实体可解析校验：解析不到原锚定车系的改写体拒绝（真值不可恢复）。"""
     q = {"bucket": "parameter", "text": "腾势Z9GT续航多少", "anchors": {"series_id": 1}}

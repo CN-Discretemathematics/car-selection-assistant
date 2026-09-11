@@ -4,11 +4,13 @@
 - parse_budget_and_seats(text) / parse_energy_body(text)：从文本反解结构化约束
   （正则与 engine.extract_hints 同源——本模块为正则的唯一定义处，engine 导入复用）；
 - load_series_attrs(db, series_ids)：车系约束属性（min_price/能源/车身/最大座位），
-  指纹化进程内缓存（评审 C3/C4：旧实现每冷启动车系做全表扫描且永不失效）；
+  指纹化进程内缓存（评审 C3/C4：旧实现每冷启动车系做全表扫描且永不失效；
+  指纹覆盖车系/款型/价格/座位数据变化，pytest 下禁用缓存防跨测试污染）；
 - PARAM_KEYS：参数问答键表（键名与数据库 fact_key 对齐），出题/评测/问答兜底三处共用。
 """
 from __future__ import annotations
 
+import os
 import re
 
 from sqlalchemy import func, select
@@ -73,12 +75,10 @@ def parse_budget_and_seats(text: str) -> dict:
                     if m:
                         lo = float(m.group(1)) * 10000
                     else:
-                        # 裸「N万」：必须紧跟预算语境词（预算15万 ✓ / 销量30万 ✗）
+                        # 裸「N万」：必须紧跟预算语境词（预算15万 ✓ / 销量30万 ✗）。
+                        # 评审 R4#3：窗口放宽到 6 字（「预算在/预算大概15万」也算语境）
                         for m in BUDGET_BARE_RE.finditer(text):
-                            prefix = text[max(0, m.start() - 2):m.start()]
-                            if BUDGET_CONTEXT_RE.search(prefix) or (
-                                BUDGET_CONTEXT_RE.search(text) and BUDGET_CONTEXT_RE.search(prefix)
-                            ):
+                            if BUDGET_CONTEXT_RE.search(text[max(0, m.start() - 6):m.start()]):
                                 out["budget_max"] = int(float(m.group(1)) * 10000)
                                 break
     if lo is not None:
@@ -99,12 +99,16 @@ _ENERGY_KEYWORDS: tuple[tuple[str, str], ...] = (
 _BODY_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("SUV", "suv"), ("MpV", "mpv"), ("MPV", "mpv"), ("轿车", "sedan"), ("皮卡", "pickup"),
 )
-_NEGATION_CUE_RE = re.compile(r"(不要|不想|不买|不选|不看|排除|除了|别买|非)[^，。,；；]{0,4}$")
+_NEGATION_CUE_RE = re.compile(r"(不要|不想|不买|不选|不看|排除|除了|别买)[^，。,；；]{0,2}$")
 
 
 def _negated(text: str, start: int) -> bool:
-    """关键词命中位置之前紧邻否定语（如「不要SUV」）→ 该处不构成约束。"""
-    return bool(_NEGATION_CUE_RE.search(text[max(0, start - 6):start]))
+    """关键词命中位置之前紧邻否定语（如「不要SUV」）→ 该处不构成约束。
+
+    评审 R4#1：否定词不含单字「非」（「非常想要SUV」误伤）；间隙收紧到 2 字
+    （「不要轿车要看SUV」的对比句不被跨句吞掉）。
+    """
+    return bool(_NEGATION_CUE_RE.search(text[max(0, start - 2):start]))
 
 
 def parse_energy_body(text: str) -> dict:
@@ -132,10 +136,16 @@ _ATTR_CACHE: dict = {"fingerprint": None, "attrs": {}}
 
 
 def _attrs_fingerprint(db) -> tuple:
-    """与 series_index 的名称索引指纹同源（车系 + 在售款型数量/改名），属性随数据失效。"""
+    """与 series_index 的名称索引指纹同源，并纳入价格/事实表最大 id——
+    评审 R4#8：min_price/max_seats 随价格与座位数据变化失效。
+    pytest 下每个测试都是新建内存库、指纹可能碰撞，直接禁用缓存（同 _resolve_cache）。"""
     from app.catalog.series_index import _series_fingerprint
 
-    return _series_fingerprint(db)
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return (os.environ["PYTEST_CURRENT_TEST"],)
+    price_max = db.execute(select(func.max(OfficialPrice.id))).scalar()
+    fact_max = db.execute(select(func.max(SpecFact.id))).scalar()
+    return _series_fingerprint(db) + (price_max, fact_max)
 
 
 def load_series_attrs(db, series_ids: set[int] | None = None) -> dict[int, dict]:
@@ -222,7 +232,9 @@ def series_satisfies(attr: dict | None, constraints: dict) -> bool:
     if budget is not None and (attr["min_price"] is None or attr["min_price"] > budget):
         return False
     budget_min = constraints.get("budget_min")
-    if budget_min is not None and attr["min_price"] is not None and attr["min_price"] < budget_min:
+    # 评审 R4#2：min_price 与 budget_max 同向——无在售价的车系不得因缺数据而
+    # 空洞满足「20万以上」
+    if budget_min is not None and (attr["min_price"] is None or attr["min_price"] < budget_min):
         return False
     energy = constraints.get("energy_type")
     if energy and energy not in attr["energy_types"]:
