@@ -5,8 +5,19 @@
 #   2) docker compose -f deploy/docker-compose.yml up -d --build
 #   3) nginx 用 deploy/nginx.conf 反代 80/443 → 前端 3000（/api 已由前端容器内部转回后端）
 #
-# 注：数据库/Redis/Milvus/OSS 均为云托管，不在此 compose 内启动
+# 注：数据库/Milvus/OSS 为云托管；Redis 为本机容器（会话/限流/验证码存储）
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # 会话/限流数据无持久化需求（TTL 短期数据），纯内存即可；不暴露宿主机端口
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   api:
     build:
       context: ..
@@ -22,6 +33,9 @@ services:
       - ../backend/.tmp:/srv/carsel/backend/.tmp
     ports:
       - "127.0.0.1:8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
       interval: 30s

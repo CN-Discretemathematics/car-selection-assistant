@@ -3,104 +3,63 @@
 ## 架构
 
 ```
-阿里云 KMS 凭据管家（carsel/prod/env）
+阿里云 KMS 凭据管家（carsel/prod/env，text 型通用凭据）
         ↑ GetSecretValue（STS 临时凭证，自动轮换）
-ECS 实例 RAM 角色（carsel-ecs-role）→ 容器 entrypoint（deploy/fetch_secrets.py）
-        ↓ 注入 os.environ（不落盘、不写文件）
+ECS 实例 RAM 角色（KMSreadonly）→ 容器 entrypoint（deploy/fetch_secrets.py）
+        ↓ 注入 os.environ（不进镜像/仓库，运行时仅存在于进程内存）
 应用进程（pydantic-settings：环境变量优先于 .env ✓ 已就绪）
 ```
 
-## 一次性云资源操作（主账号控制台或 CLI）
+## 当前状态（2026-09-11）
 
-### 1. 创建 RAM 角色并授权（仅限该凭据的 GetSecretValue）
+| 步骤 | 状态 |
+| --- | --- |
+| 创建 RAM 角色 KMSreadonly + KMSReadOnlyAccess | ✅ 已完成（主账号） |
+| ECS 实例绑定 RAM 角色 | ⏳ 待主账号控制台 |
+| 创建 KMS 凭据 carsel/prod/env | ⏳ 待主账号控制台（payload 已备好，见下） |
+| 应用侧（entrypoint/测试/文档） | ✅ 已完成 |
 
-```bash
-aliyun ram CreateRole \
-  --RoleName carsel-ecs-role \
-  --AssumeRolePolicyDocument '{"Statement":[{"Action":"sts:AssumeRole","Effect":"Allow","Principal":{"Service":["ecs.aliyuncs.com"]}}],"Version":"1"}'
+> 权限说明：`KMSReadOnlyAccess` 为托管策略，授予**所有**凭据的读权限——单凭据
+> 场景可用；更小权限可换自定义策略仅授 `kms:GetSecretValue`（限 carsel/prod/env）。
 
-aliyun ram CreatePolicy \
-  --PolicyName carsel-kms-read \
-  --PolicyDocument '{"Statement":[{"Action":["kms:GetSecretValue","kms:Decrypt"],"Effect":"Allow","Resource":["acs:kms:cn-hangzhou:1788486296964680:secret/carsel/prod/env"]}],"Version":"1"}'
+## 剩余两步（主账号控制台）
 
-aliyun ram AttachPolicyToRole --PolicyType Custom --PolicyName carsel-kms-read --RoleName carsel-ecs-role
-```
+### 1. 绑定实例 RAM 角色
 
-### 2. 创建 KMS 凭据（text 型通用凭据，值为生产密钥 JSON 平铺键值）
+ECS 控制台 → 实例 `i-bp14zlrr7sq0upv8xv5s` → 操作「授予/收回 RAM 角色」→ 选择
+`KMSreadonly`。（CLI `aliyun ecs AttachInstanceRamRole` 需要 RAM 子用户具备
+`ecs:AttachInstanceRamRole` 权限，当前子用户被拒。）
 
-> 凭据用默认 `SecretDataType=text` 创建：GetSecretValue 返回的 SecretData 即为
-> 存入的原文 JSON（不做 base64 解码），fetch_secrets 按此处理。
+### 2. 创建 KMS 凭据
 
-```bash
-aliyun kms CreateSecret \
-  --RegionId cn-hangzhou \
-  --SecretName carsel/prod/env \
-  --SecretData "$(python -c '
-import json
-keys = ["DATABASE_URL","DEEPSEEK_API_KEY","MILVUS_URI","MILVUS_TOKEN",
-        "EMBEDDING_API_KEY","RERANK_API_KEY","REDIS_URL","OSS_ACCESS_KEY_ID",
-        "OSS_ACCESS_KEY_SECRET","SMTP_PASSWORD","ADMIN_API_TOKEN"]
-env = {}
-for line in open("backend/.env", encoding="utf-8"):
-    line = line.strip()
-    if line and not line.startswith("#") and "=" in line:
-        k, _, v = line.partition("=")
-        if k.strip() in keys:
-            env[k.strip()] = v.strip()
-print(json.dumps(env))
-')" \
-  --VersionId v1
-```
+KMS 控制台 → 凭据管家 → 创建凭据：
+- 凭据名称：`carsel/prod/env`
+- 凭据值：服务器 `/srv/carsel/backend/.tmp/kms-payload.json` 的内容
+  （已从生产 .env 生成，权限 600；**粘贴后删除该文件**）
+- 类型：通用凭据（默认 text）
 
-### 3. ECS 实例绑定 RAM 角色
+### 3. 启用（服务器，凭据与绑定完成后）
 
 ```bash
-aliyun ecs AttachInstanceRamRole \
-  --RegionId cn-hangzhou \
-  --InstanceIds '["i-bp14zlrr7sq0upv8xv5s"]' \
-  --RamRoleName carsel-ecs-role
+sed -i 's/^# \(KMS_ROLE\|KMS_SECRET_NAME\|KMS_REGION\|KMS_SECRET_FORMAT\|KMS_FAIL_OPEN\)=/\1=/' /srv/carsel/backend/.env
+grep -n "^KMS_" /srv/carsel/backend/.env
+cd /srv/carsel/deploy && docker compose up -d api   # 重启即走 KMS 注入
 ```
 
-### 4. 服务器 .env：写入 KMS 配置并清理明文残留
-
-> 密钥已入 KMS；宿主机 .env 里的原明文值应清空（只保留非敏感配置与 KMS_*），
-> 否则「密钥不进宿主机明文」的目标不成立。清理后容器环境变量由 KMS 注入补全
-> （entrypoint 在应用启动前注入，alembic/uvicorn 拿到的是完整值）。
-
-```bash
-cat >> /srv/carsel/backend/.env <<'EOF'
-KMS_ROLE=carsel-ecs-role
-KMS_SECRET_NAME=carsel/prod/env
-KMS_REGION=cn-hangzhou
-KMS_SECRET_FORMAT=json
-KMS_FAIL_OPEN=0
-EOF
-
-# 清空已上云的密钥值（保留键名与注释，KMS 注入会在启动时补全）
-python3 - <<'EOF'
-keys = {"DATABASE_URL","DEEPSEEK_API_KEY","MILVUS_URI","MILVUS_TOKEN",
-        "EMBEDDING_API_KEY","RERANK_API_KEY","REDIS_URL","OSS_ACCESS_KEY_ID",
-        "OSS_ACCESS_KEY_SECRET","SMTP_PASSWORD","ADMIN_API_TOKEN"}
-out = []
-for line in open("/srv/carsel/backend/.env", encoding="utf-8"):
-    stripped = line.rstrip("\n")
-    k = stripped.split("=", 1)[0].strip() if "=" in stripped and not stripped.lstrip().startswith("#") else ""
-    out.append(f"{k}=" if k in keys else stripped)
-open("/srv/carsel/backend/.env", "w", encoding="utf-8").write("\n".join(out) + "\n")
-EOF
-cd /srv/carsel/deploy && docker compose up -d api
-```
+验证：`docker logs deploy-api-1 2>&1 | grep fetch-secrets`（应看到「已注入 N 个密钥」），
+随后跑一轮完整回归。
 
 ## 应用侧实现（已完成）
 
-- `deploy/fetch_secrets.py`：容器 ENTRYPOINT——从实例元数据（100.100.100.200）获取
-  STS 临时凭证 → RPC 签名调 KMS GetSecretValue → 注入 os.environ → `os.execvp` exec
-  应用。密钥不进镜像/仓库；按 §4 清理后宿主机不留明文，运行时仅存在于进程内存。
-拉取失败默认阻断启动（KMS_FAIL_OPEN=1 可降级）。
+- `deploy/fetch_secrets.py`：容器 ENTRYPOINT——实例元数据 STS → RPC 签名调
+  KMS GetSecretValue（text 按原文 / binary 解 base64）→ 注入 os.environ → exec 应用；
+  拉取失败默认阻断启动（KMS_FAIL_OPEN=1 可降级）；部分配置（只设其一）响亮失败。
 - 应用零改动：pydantic-settings 环境变量优先于 .env（标准行为）✓。
+- 测试：deploy 路径 13 项（签名/解码/main 调度/fail-closed/部分配置）。
 
 ## 轮换与回滚
 
-- 轮换：KMS 凭据管家放入新版本（VersionId v2）→ 重启容器生效。
-- 回滚：KMS 控制台恢复上一版本 → 重启。
-- 封禁排查：SSH 被断时检查 安全中心 → 防暴力破解 IP 封禁列表。
+- 轮换：KMS 凭据管家放入新版本 → 重启容器生效。
+- 回滚：控制台恢复上一版本 → 重启。
+- 注意：宿主机 .env 的密钥明文在启用 KMS 后应清空（§3 前），
+  compose `env_file` 注入的空值由 KMS 注入在启动时补全。
