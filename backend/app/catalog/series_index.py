@@ -36,9 +36,13 @@ def normalize_name(text: str) -> str:
 
 
 # 车系名 → series_id 索引缓存（评审 P2：此前每条消息全量加载 908 车系行）。
-# 指纹 = (活跃车系数, max(id), max(车系名), max(校验时间), max(品牌名))；
+# 指纹 = (活跃车系数, max(id), max(车系名), max(校验时间), max(品牌名),
+#          在售款型数, max(款型 id))；
 # pytest 下每个测试都是新建内存库、指纹可能碰撞，直接禁用缓存。
 _resolve_cache: dict = {"fingerprint": None, "entries": ()}
+
+# 款型显示名入索引的最短归一化长度（过短如「m5」「pro」跨车系撞名，误配风险大）
+_MIN_VARIANT_NAME_LEN = 6
 
 
 def _load_name_entries(db: Session) -> tuple[tuple[str, int], ...]:
@@ -62,6 +66,20 @@ def _load_name_entries(db: Session) -> tuple[tuple[str, int], ...]:
             if len(norm) >= 2 and norm not in seen:
                 seen.add(norm)
                 entries.append((norm, series.id))
+    # 在售款型显示名 → 车系（v6.1）：对比/参数题常以款型名表述（「2023款 470km
+    # 引领版」「sDrive25Li X设计套装」），名称索引此前只含车系名/别名，解析器
+    # 只能词面模糊误配——compare 题解析准确率仅 34%（27/79）的根因。
+    variant_rows = db.execute(
+        select(VehicleVariant.display_name, VehicleVariant.series_id)
+        .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
+        .where(VehicleVariant.status == "on_sale", VehicleSeries.active_status == "active")
+    ).all()
+    seen_variants: set[str] = set()
+    for display, sid in variant_rows:
+        norm = normalize_name(display or "")
+        if len(norm) >= _MIN_VARIANT_NAME_LEN and norm not in seen_variants:
+            seen_variants.add(norm)
+            entries.append((norm, sid))
     return tuple(entries)
 
 
@@ -77,7 +95,12 @@ def _series_fingerprint(db: Session) -> tuple:
         .join(Brand, VehicleSeries.brand_id == Brand.id)
         .where(VehicleSeries.active_status == "active")
     ).one()
-    return tuple(row)
+    variant_row = db.execute(
+        select(func.count(VehicleVariant.id), func.max(VehicleVariant.id))
+        .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
+        .where(VehicleVariant.status == "on_sale", VehicleSeries.active_status == "active")
+    ).one()
+    return tuple(row) + tuple(variant_row)
 
 
 def resolve_series(db: Session, message: str) -> list[tuple[VehicleSeries, Brand | None]]:
@@ -107,7 +130,9 @@ def resolve_series(db: Session, message: str) -> list[tuple[VehicleSeries, Brand
             continue  # 与已选更长名字重叠（腾势Z9 ⊂ 腾势Z9GT）
         chosen.append((start, end, sid, norm))
     chosen.sort(key=lambda c: c[0])
-    ids = [c[2] for c in chosen[:4]]
+    # 去重保序：车系名与其款型名同句出现（「比亚迪e2 的 2023款 出行版」）解析出同一
+    # 车系两次会让 analyze 误判为多实体对比——只保留首次命中
+    ids = list(dict.fromkeys(c[2] for c in chosen[:6]))[:4]
     if not ids:
         return []
     rows = db.execute(

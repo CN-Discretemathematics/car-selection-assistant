@@ -1,6 +1,8 @@
 """具体车系问答测试（app/agent/series_qa.py 解析/判定/回答 + 引擎接入）。"""
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -119,6 +121,56 @@ def test_resolve_and_dedupe_longest_wins(db_session: Session):
     assert [s.id for s, _ in resolve_series(db_session, "Z9GT怎么样")] == [ids["z9"]]
     assert [s.id for s, _ in resolve_series(db_session, "丰田卡罗拉锐放怎么样")] == [ids["raf"]]
     assert resolve_series(db_session, "帮我推荐20万以内的SUV") == []
+
+
+def _seed_production_style_variant(db_session: Session, series_id: int, display_name: str) -> VehicleVariant:
+    """按生产风格种一个款型（display_name 不含车系名，如「2023款 470km 引领版」）。"""
+    series = db_session.get(VehicleSeries, series_id)
+    year = make_year(db_session, series, year_name="2023款")
+    variant = VehicleVariant(
+        series_id=series_id,
+        model_year_id=year.id,
+        display_name=display_name,
+        config_version=display_name,
+        powertrain="纯电",
+        drivetrain="两驱",
+        energy_type="BEV",
+        body_type=series.body_type,
+        status="on_sale",
+        effective_from=date(2025, 1, 1),
+    )
+    db_session.add(variant)
+    db_session.commit()
+    return variant
+
+
+def test_resolve_variant_display_name(db_session: Session):
+    """v6.1：对比/参数题以款型名表述（不含车系名）也能解析——compare 解析准确率
+    34%（27/79）的根因修复：名称索引扩展在售款型显示名 → 车系。"""
+    ids = _seed_two_series(db_session)
+    _seed_production_style_variant(db_session, ids["z9"], "2023款 470km 引领版")
+    resolved = resolve_series(
+        db_session, "帮我对比 2023款 470km 引领版 和 丰田卡罗拉锐放 的配置差异"
+    )
+    got = [s.id for s, _ in resolved]
+    assert ids["z9"] in got and ids["raf"] in got, got
+
+
+def test_resolve_short_variant_name_ignored(db_session: Session):
+    """归一化后过短（<6）的款型名不入索引：防「M5」「Pro」这类跨车系撞名误配。"""
+    ids = _seed_two_series(db_session)
+    _seed_production_style_variant(db_session, ids["z9"], "M5")
+    assert resolve_series(db_session, "M5 怎么样") == []
+    # 车系名仍正常解析（不受过短款型名影响）
+    assert [s.id for s, _ in resolve_series(db_session, "腾势Z9GT 怎么样")] == [ids["z9"]]
+
+
+def test_resolve_series_and_variant_dedup(db_session: Session):
+    """车系名与该车系款型名同句出现：去重保序，不解析成两个实体（避免误判为对比题）。"""
+    ids = _seed_two_series(db_session)
+    _seed_production_style_variant(db_session, ids["z9"], "2025款 四驱版")
+    resolved = resolve_series(db_session, "腾势Z9GT 的 2025款 四驱版 怎么样")
+    assert [s.id for s, _ in resolved] == [ids["z9"]]
 
 
 def test_should_answer_rules(db_session: Session):
