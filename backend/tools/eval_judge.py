@@ -244,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--double-rate", type=float, default=0.3, help="双评一致性抽样比例")
     parser.add_argument("--judge-base-url", default="", help="judge 端点（默认取 EMBEDDING_BASE_URL）")
+    parser.add_argument("--judge-api-key", default="", help="judge 密钥（默认取 EMBEDDING_API_KEY）")
     parser.add_argument("--judge-model", default="", help="judge 模型（默认 qwen-plus，可用 JUDGE_MODEL 覆盖）")
     parser.add_argument("--report", default=os.path.join("eval", "eval-judge.json"))
     args = parser.parse_args(argv)
