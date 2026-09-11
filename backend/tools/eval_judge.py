@@ -150,7 +150,7 @@ class JudgeClient:
             "temperature": temperature,
             "response_format": {"type": "json_object"},
         }
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 f"{self._base}/chat/completions",
                 headers={"Authorization": f"Bearer {self._api_key}"},
@@ -265,12 +265,15 @@ async def _run_one(
             row["refusal_ok"] = any(marker in answer for marker in _UNANSWERABLE_MARKERS)
         # 双评一致性抽样：faithful 再独立判一次
         if row.get("faithful") is not None and rng.random() < double_rate:
-            j3 = await judge.chat_json(
-                FAITHFULNESS_SYSTEM,
-                f"【回答】：\n{answer}\n\n【检索证据】：\n{ev_text}",
-                temperature=0.7,
-            )
-            row["faithful_second"] = j3.get("faithful") if j3 else None
+            try:
+                j3 = await judge.chat_json(
+                    FAITHFULNESS_SYSTEM,
+                    f"【回答】：\n{answer}\n\n【检索证据】：\n{ev_text}",
+                    temperature=0.7,
+                )
+                row["faithful_second"] = j3.get("faithful") if j3 else None
+            except Exception as err:  # noqa: BLE001 - 双评失败不影响主指标
+                row["faithful_second"] = None
         out.append(row)
 
 
@@ -303,12 +306,11 @@ def _build_judge(args) -> JudgeClient:
     return JudgeClient(base, key, model)
 
 
-async def _drive(args, questions: list[dict], judge: JudgeClient) -> list[dict]:
+async def _drive(args, questions: list[dict], judge: JudgeClient, rows: list[dict]) -> None:
     factory = get_session_factory()
     engine = AgentEngine(llm=LLMClient(), store=SessionStore())
     sem = asyncio.Semaphore(args.concurrency)
     rng = random.Random(20260911)
-    rows: list[dict] = []
     with factory() as db:
         variant_series = {
             v.id: v.series_id
@@ -332,7 +334,6 @@ async def _drive(args, questions: list[dict], judge: JudgeClient) -> list[dict]:
         if done % 10 == 0:
             print(f"  judge 进度 {done}/{len(tasks)}（完成 {len(rows)}）", flush=True)
     await asyncio.gather(*tasks, return_exceptions=True)
-    return rows
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -353,7 +354,12 @@ def main(argv: list[str] | None = None) -> int:
     sample = _stratified_sample(questions, args.sample, random.Random(20260911))
 
     judge = _build_judge(args)
-    rows = asyncio.run(_drive(args, sample, judge))
+    # rows 由 _drive 增量填充：中途崩溃/超时也保留已完成部分（报告降级输出）
+    rows: list[dict] = []
+    try:
+        asyncio.run(_drive(args, sample, judge, rows))
+    except Exception as err:  # noqa: BLE001 - 部分结果仍写入报告
+        print(f"评测中断（保留部分结果）：{type(err).__name__}: {str(err)[:200]}", file=sys.stderr)
 
     summary = _summarize(rows)
     by_bucket = {
