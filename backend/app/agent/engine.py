@@ -36,14 +36,17 @@ from app.common.enums import NEW_ENERGY_TYPES
 from app.common.llm import LLMClient, LLMError, get_llm_client
 from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, VehicleVariant
 
-_BUDGET_RANGE_BOTH_RE = re.compile(r"(\d+(?:\.\d+)?)\s*万\s*[-~到至]\s*(\d+(?:\.\d+)?)\s*万")  # 20万到30万
-_BUDGET_RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[-~到至]\s*(\d+(?:\.\d+)?)\s*万")  # 20-30万 / 20到30万
-_BUDGET_MAX_RE = re.compile(r"(\d+(?:\.\d+)?)\s*万\s*(?:以内|以下|之内|内)")
-_BUDGET_MIN_RE = re.compile(r"(\d+(?:\.\d+)?)\s*万\s*(?:以上|起步|起)")
-# 「20多万」「30万出头」「将近30万」→ 下限口径（约 N 万起，不给上限）
-_BUDGET_MIN_LOOSE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*万?\s*(?:多万|出头|大几万|往上)")
-_BUDGET_BARE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*万")
-_PASSENGERS_RE = re.compile(r"([一二两三四五六七八九十\d]+)\s*(?:个|口)?人|([一二两三四五六七八九十\d]+)\s*座")
+# 预算/座位正则唯一定义在 series_constraints（评审 C2：流水线约束解析复用同一实现），
+# 此处按原内部名导入，行为不变。
+from app.catalog.series_constraints import (  # noqa: E402
+    BUDGET_BARE_RE as _BUDGET_BARE_RE,
+    BUDGET_MAX_RE as _BUDGET_MAX_RE,
+    BUDGET_MIN_LOOSE_RE as _BUDGET_MIN_LOOSE_RE,
+    BUDGET_MIN_RE as _BUDGET_MIN_RE,
+    BUDGET_RANGE_BOTH_RE as _BUDGET_RANGE_BOTH_RE,
+    BUDGET_RANGE_RE as _BUDGET_RANGE_RE,
+    PASSENGERS_RE as _PASSENGERS_RE,
+)
 _CN_DIGITS = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
 # ── 意图路由（确定性，不依赖模型）──────────────────────────────────────────

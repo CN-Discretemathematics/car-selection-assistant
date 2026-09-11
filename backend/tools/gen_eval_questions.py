@@ -101,7 +101,6 @@ def _build_unanswerable(
     """
     from app.agent.series_qa import _PARAM_PROBES  # 探针口径与线上一致
 
-    key_to_phrase = dict(_PARAM_KEYS)
     # 只保留「问法能触发探针、键名能归入该探针维度」的参数键
     usable_keys: dict[str, tuple[str, str]] = {}
     for key, phrase in _PARAM_KEYS:
@@ -112,10 +111,13 @@ def _build_unanswerable(
     brands_by_id = {b.id: b for b in brands}
     usable = [s for s in series_list if variants_by_series.get(s.id)]
     out: list[dict] = []
+    used_series: set[int] = set()  # 评审 E4：同一车系重复抽中会产出逐字重复题（换 id 不换文）
     attempts = 0
     while len(out) < count and attempts < count * 60:
         attempts += 1
         s = rng.choice(usable)
+        if s.id in used_series:
+            continue
         brand = brands_by_id.get(s.brand_id)
         if not brand:
             continue
@@ -130,6 +132,7 @@ def _build_unanswerable(
                     "anchors": {"brand_name": brand.name, "series_id": s.id},
                     "expect": {"series_id": s.id, "fact_key": key, "unanswerable": True},
                 })
+                used_series.add(s.id)
                 break  # 每个车系最多出 1 题
         if len(out) >= count:
             break

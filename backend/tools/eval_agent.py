@@ -38,7 +38,9 @@ COMPARE_INTENTS = {"compare_two"}
 CLARIFY_INTENTS = {"open_clarify"}
 # v3 不可回答题（诚实性）：锚定车系的在售款型均无该参数，期望答案明确标注「官方资料未披露」
 UNANSWERABLE_INTENTS = {"unanswerable_param"}
-_HONEST_MARKERS = ("未披露", "未查到", "暂无", "没有")
+# 评审 E9：裸「没有」会把含「市面上没有对手」的编造回答误判为诚实拒答——
+# 只保留拒答语义的标记词
+_HONEST_MARKERS = ("未披露", "未查到", "暂无")
 
 
 def _check_recommendation(q: dict, out) -> tuple[bool, str]:
@@ -137,9 +139,16 @@ def main(argv: list[str] | None = None) -> int:
                     out = asyncio.run(_run_engine(db, engine, q["text"]))
                     answer = getattr(out, "explanation", "") or ""
                     honest = any(marker in answer for marker in _HONEST_MARKERS)
+                    # 评审 E8：hit 统计与 RETRIEVAL_INTENTS 同口径——锚定车系命中才算
                     retrieval_total += 1
                     res = retrieval_search(db, q["text"], top_k=5)
-                    if res:
+                    anchor = (q.get("anchors") or {}).get("series_id")
+                    anchor_hits = [
+                        r for r in res
+                        if anchor and (r.get("series_id") == anchor
+                                       or r.get("variant_id") == (q.get("anchors") or {}).get("variant_id"))
+                    ] if anchor else []
+                    if anchor_hits:
                         retrieval_hits += 1
                     ok = ok and honest
                     notes.append(

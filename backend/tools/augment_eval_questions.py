@@ -78,14 +78,21 @@ def _cn_to_int(cn: str) -> int | None:
 
 
 def _number_semantics(text: str) -> list[int]:
-    """把「15万」「十五万」统一成语义整数，返回排序后的数字多集（口径：语义等价）。"""
+    """把「15万」「十五万」统一成语义整数，返回排序后的数字多集（口径：语义等价）。
+
+    量词数字（「一台」「两款」）与非数字语义的 CN 数词（「四驱/两驱」的「两」）不
+    构成约束，从多集中剔除——否则口语化改写增删量词会被误判为数字漂移。
+    """
     text = re.sub(r"(\d+(?:\.\d+)?)\s*万", lambda m: str(int(float(m.group(1)) * 10000)), text)
     parts: list[str] = []
     pos = 0
     for m in _CN_NUM_RE.finditer(text):
         parts.append(text[pos:m.start()])
         value = _cn_to_int(m.group())
-        parts.append(str(value) if value is not None else m.group())
+        keep = value is not None and (
+            m.group().endswith("万") or text[m.end():m.end() + 1] == "座" or value >= 10
+        )
+        parts.append(str(value) if (value is not None and keep) else m.group())
         pos = m.end()
     parts.append(text[pos:])
     return sorted(int(x) for x in re.findall(r"\d+", "".join(parts)))
@@ -96,32 +103,63 @@ def _validate(
     variant: str,
     q: dict,
     resolve_ok: bool,
+    strip_names: list[str] | None = None,
 ) -> tuple[bool, str]:
     """语义结构校验：返回 (是否有效, 拒绝原因)。
 
     与旧版的差异：车系名逐字保留 → 实体可解析（生产解析器判定）；
     新增约束结构保持（能源/车身约束必须能从改写体用评测同源映射反解）。
+    strip_names：锚定名（车系/品牌）——其内嵌数字（Z9GT 的 9、470km 的 470）属于
+    实体而非约束，数字比对前剥离，名字丢弃类改写归 resolver 检查。
     """
     if not variant or not (6 <= len(variant) <= 120):
         return False, "length"
     if variant == original:
         return False, "identical"
+    for name in strip_names or []:
+        if name:
+            original = original.replace(name, "")
+            variant = variant.replace(name, "")
     if _number_semantics(variant) != _number_semantics(original):
         return False, "digits"
     anchors = q.get("anchors") or {}
     expect = q.get("expect") or {}
     if anchors.get("series_id") and not resolve_ok:
         return False, "resolver"
-    # 约束结构保持（与评测同源的措辞映射；v6.2 新增——防止改写丢约束后被原题约束误判）
+    # 约束结构保持（与评测同源的措辞映射；v6.2 新增——防止改写丢约束后被原题约束误判）。
+    # 评审 E2：接受完整措辞与生成器短标签两种写法（PHEV：完整 hint 或「插混」）。
     from tools.gen_eval_questions import ENERGY_TO_HINT, HEAD_LABEL_TO_BODY
 
     if expect.get("energy_type"):
-        hint = (ENERGY_TO_HINT.get(expect["energy_type"]) or "").rstrip("的")
-        if hint and hint not in variant:
+        et = expect["energy_type"]
+        hint = (ENERGY_TO_HINT.get(et) or "").rstrip("的")
+        short = {"BEV": "纯电", "PHEV": "插混", "EREV": "增程", "HEV": "混动", "ICE": "燃油"}.get(et, "")
+        if hint not in variant and short not in variant:
             return False, "constraint"
     if expect.get("body_type"):
-        label = HEAD_LABEL_TO_BODY.get(expect["body_type"]) or ""
-        if label and label not in variant:
+        label = (HEAD_LABEL_TO_BODY.get(expect["body_type"]) or "").upper()
+        if label and label not in variant.upper():
+            return False, "constraint"
+    # 评审 E1：semantic 桶的约束只存在于原文（expect 无结构化约束），评测用与生成器
+    # 同源的映射从文本反解——改写体必须仍能反解出同样的约束，否则会在 v2 约束
+    # 指标中静默消失（问题漂移污染「原题 vs 改写体」对比）
+    if q.get("bucket") == "semantic":
+        from tools.gen_eval_questions import HEAD_LABEL_TO_BODY as _HL, HINT_TO_ENERGY as _HE
+
+        def _derive(text: str) -> dict:
+            got: dict = {}
+            for hint, energy in _HE.items():
+                stem = hint.rstrip("的")  # 措辞去「的」取词干（纯电的→纯电），与 eval_rag 一致
+                if stem and stem in text:
+                    got["energy_type"] = energy
+                    break
+            for label, body in _HL.items():
+                if label in text:
+                    got["body_type"] = body
+                    break
+            return got
+
+        if _derive(original) and _derive(variant) != _derive(original):
             return False, "constraint"
     return True, ""
 
@@ -133,7 +171,7 @@ async def _rewrite(
     out: list,
     series_names: dict,
     resolve_series,
-    db,
+    factory,
     rejects: dict,
 ) -> None:
     async with sem:
@@ -147,17 +185,25 @@ async def _rewrite(
                 temperature=0.9,
             )
             text = str(resp["choices"][0]["message"]["content"] or "").strip().strip("\"“”")
-        except Exception:  # noqa: BLE001 - 单条失败直接跳过（改写体不足不影响其余）
+        except Exception:  # noqa: BLE001 - LLM 失败计入拒绝原因（评审 E5：不再静默）
+            rejects["llm_error"] = rejects.get("llm_error", 0) + 1
             return
+        # 评审 E13：每任务独立会话（resolve_series 为同步调用，独立会话消除
+        # 「未来改 to_thread 即并发共用 Session」的隐患）
         resolve_ok = False
+        resolver_verdict = False
         if (q.get("anchors") or {}).get("series_id"):
-            resolved_ids = {s.id for s, _ in resolve_series(db, text)}
+            with factory() as db:
+                resolved_ids = {s.id for s, _ in resolve_series(db, text)}
             resolve_ok = int(q["anchors"]["series_id"]) in resolved_ids
-        ok, reason = _validate(q["text"], text, q, resolve_ok)
+            resolver_verdict = True
+        ok, reason = _validate(q["text"], text, q, resolve_ok, [n for n in (brand_name, series_name) if n])
         if not ok:
             rejects[reason] = rejects.get(reason, 0) + 1
             return
         out.append({**q, "id": f"v{q['id'][1:]}", "parent_id": q["id"], "text": text, "paraphrased": True})
+        if resolver_verdict:
+            rejects["_resolver_ok"] = rejects.get("_resolver_ok", 0) + 1
 
 
 async def _run(args, questions: list[dict], series_names: dict) -> tuple[list[dict], dict]:
@@ -169,24 +215,23 @@ async def _run(args, questions: list[dict], series_names: dict) -> tuple[list[di
     from app.common.database import get_session_factory
 
     factory = get_session_factory()
-    sem = asyncio.Semaphore(args.concurrency)
+    sem = asyncio.Semaphore(max(1, args.concurrency))  # 评审 E14：0 会使所有任务永久阻塞
     out: list[dict] = []
     rejects: dict = {}
-    with factory() as db:
-        tasks = [
-            asyncio.create_task(
-                _rewrite(llm, sem, q, out, series_names, resolve_series, db, rejects)
-            )
-            for q in questions
-            if q.get("bucket") != "unanswerable"  # 不可回答题走答案层拒答评测，不改写
-        ]
-        done = 0
-        for chunk in asyncio.as_completed(tasks):
-            await chunk
-            done += 1
-            if done % 100 == 0:
-                print(f"  改写进度 {done}/{len(tasks)}（成功 {len(out)}）", flush=True)
-        await asyncio.gather(*tasks, return_exceptions=True)
+    tasks = [
+        asyncio.create_task(
+            _rewrite(llm, sem, q, out, series_names, resolve_series, factory, rejects)
+        )
+        for q in questions
+        if q.get("bucket") != "unanswerable"  # 不可回答题走答案层拒答评测，不改写
+    ]
+    done = 0
+    for chunk in asyncio.as_completed(tasks):
+        await chunk
+        done += 1
+        if done % 100 == 0:
+            print(f"  改写进度 {done}/{len(tasks)}（成功 {len(out)}）", flush=True)
+    await asyncio.gather(*tasks, return_exceptions=True)
     return out, rejects
 
 
@@ -209,14 +254,15 @@ def main(argv: list[str] | None = None) -> int:
         series_names = {s.id: s.name for s in db.scalars(select(VehicleSeries)).all()}
 
     out, rejects = asyncio.run(_run(args, questions, series_names))
-    anchored = sum(1 for q in questions if (q.get("anchors") or {}).get("series_id"))
-    resolver_pass = anchored - rejects.get("resolver", 0)
+    # 评审 E5：解析鲁棒率分母 = 实际得到解析判定的题（LLM 失败/未锚定题不计入），
+    # 且各拒绝原因独立计数（多因失败的题不会被误记为解析通过）
+    resolver_verdicts = rejects.get("_resolver_ok", 0) + rejects.get("resolver", 0)
     print(f"改写变体 {len(out)} 条（原题 {len(questions)} 条）→ {args.output}")
-    print(
-        f"拒绝原因：{json.dumps(rejects, ensure_ascii=False)}；"
-        f"解析鲁棒率 {resolver_pass}/{anchored}"
-        f"（{resolver_pass / anchored:.1%}）" if anchored else "解析鲁棒率 n/a"
-    )
+    stats = {k: v for k, v in rejects.items() if not k.startswith("_")}
+    print(f"拒绝原因：{json.dumps(stats, ensure_ascii=False)}")
+    if resolver_verdicts:
+        rate = rejects.get("_resolver_ok", 0) / resolver_verdicts
+        print(f"解析鲁棒率 {rejects.get('_resolver_ok', 0)}/{resolver_verdicts}（{rate:.1%}）")
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     payload = {
         "generated_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"),

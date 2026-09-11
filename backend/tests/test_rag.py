@@ -610,6 +610,15 @@ def test_parse_constraints():
     assert _parse_constraints("想要增程式的车") == {"energy_type": "EREV"}
     assert _parse_constraints("新能源轿车有哪些") == {"new_energy": True, "body_type": "sedan"}
     assert _parse_constraints("看看车") == {}  # 无约束不触发重排
+    # 评审 C2：否定门控与预算方向语义（此前「不要SUV」被判成 SUV、「以上」被判成上限）
+    assert _parse_constraints("不要SUV了，看看15万以内的轿车") == {
+        "budget_max": 150000, "body_type": "sedan",
+    }
+    parsed_min = _parse_constraints("20万以上的MPV有哪些")
+    assert "budget_max" not in parsed_min, "「以上」是下限，不得产生预算上限"
+    assert parsed_min.get("budget_min") == 200000
+    assert _parse_constraints("销量30万的轿车有哪些") == {"body_type": "sedan"}, "裸「N万」非预算语境不得误判"
+    assert _parse_constraints("10座以上的MPV")["passengers"] == 10, "座位数须取完整数字（旧正则「10座」会取成 0）"
 
 
 def test_balance_by_series_interleaves():

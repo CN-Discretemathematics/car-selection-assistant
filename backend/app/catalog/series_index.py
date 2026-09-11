@@ -69,17 +69,27 @@ def _load_name_entries(db: Session) -> tuple[tuple[str, int], ...]:
     # 在售款型显示名 → 车系（v6.1）：对比/参数题常以款型名表述（「2023款 470km
     # 引领版」「sDrive25Li X设计套装」），名称索引此前只含车系名/别名，解析器
     # 只能词面模糊误配——compare 题解析准确率仅 34%（27/79）的根因。
+    # v6.2（评审 B1）：跨车系撞名的款型名不入索引——生产库实测 103 个归一化款型名
+    # 被多车系共享（「2026款 Ultra」→ 理想L6/L8/L9+岚图泰山+智界V9，年份前缀使
+    # 长度门槛失效），first-wins 会制造幽灵第二实体把单车系问答误判成对比。
+    # 歧义名不携带任何消歧信息，跳过；确定性 ORDER BY 保证可复现。
     variant_rows = db.execute(
         select(VehicleVariant.display_name, VehicleVariant.series_id)
         .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
         .where(VehicleVariant.status == "on_sale", VehicleSeries.active_status == "active")
+        .order_by(VehicleVariant.series_id)
     ).all()
-    seen_variants: set[str] = set()
+    names_to_series: dict[str, set[int]] = {}
     for display, sid in variant_rows:
         norm = normalize_name(display or "")
-        if len(norm) >= _MIN_VARIANT_NAME_LEN and norm not in seen_variants:
-            seen_variants.add(norm)
-            entries.append((norm, sid))
+        if len(norm) >= _MIN_VARIANT_NAME_LEN:
+            names_to_series.setdefault(norm, set()).add(sid)
+    series_rows_by_id = {series.id: (series, brand) for series, brand in rows}
+    for norm, sids in names_to_series.items():
+        if len(sids) == 1:
+            sid = next(iter(sids))
+            if sid in series_rows_by_id:
+                entries.append((norm, sid))
     return tuple(entries)
 
 
@@ -96,7 +106,12 @@ def _series_fingerprint(db: Session) -> tuple:
         .where(VehicleSeries.active_status == "active")
     ).one()
     variant_row = db.execute(
-        select(func.count(VehicleVariant.id), func.max(VehicleVariant.id))
+        select(
+            func.count(VehicleVariant.id),
+            func.max(VehicleVariant.id),
+            # 评审 minor：改名不改 id/count 时指纹不变会一直服务旧索引
+            func.max(VehicleVariant.display_name),
+        )
         .join(VehicleSeries, VehicleVariant.series_id == VehicleSeries.id)
         .where(VehicleVariant.status == "on_sale", VehicleSeries.active_status == "active")
     ).one()

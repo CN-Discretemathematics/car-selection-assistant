@@ -1,6 +1,7 @@
 """具体车系问答测试（app/agent/series_qa.py 解析/判定/回答 + 引擎接入）。"""
 from __future__ import annotations
 
+import re
 from datetime import date
 
 from fastapi.testclient import TestClient
@@ -18,7 +19,7 @@ from app.agent.series_qa import (
 from app.catalog.series_index import normalize_name, resolve_series, series_headline
 from app.catalog.services import latest_full_month
 from app.common.enums import MISSING_VALUE_LABEL
-from app.common.models import Brand, VehicleSeries, VehicleVariant
+from app.common.models import Brand, VehicleModelYear, VehicleSeries, VehicleVariant
 from tests.seed import make_brand, make_sales, make_series, make_source, make_variant, make_year
 
 
@@ -126,7 +127,11 @@ def test_resolve_and_dedupe_longest_wins(db_session: Session):
 def _seed_production_style_variant(db_session: Session, series_id: int, display_name: str) -> VehicleVariant:
     """按生产风格种一个款型（display_name 不含车系名，如「2023款 470km 引领版」）。"""
     series = db_session.get(VehicleSeries, series_id)
-    year = make_year(db_session, series, year_name="2023款")
+    m = re.match(r"(\d{4})款", display_name)
+    year_name = f"{m.group(1)}款" if m else "2023款"
+    year = db_session.query(VehicleModelYear).filter_by(series_id=series_id, year_name=year_name).first()
+    if year is None:
+        year = make_year(db_session, series, year_name=year_name)
     variant = VehicleVariant(
         series_id=series_id,
         model_year_id=year.id,
@@ -171,6 +176,22 @@ def test_resolve_series_and_variant_dedup(db_session: Session):
     _seed_production_style_variant(db_session, ids["z9"], "2025款 四驱版")
     resolved = resolve_series(db_session, "腾势Z9GT 的 2025款 四驱版 怎么样")
     assert [s.id for s, _ in resolved] == [ids["z9"]]
+
+
+def test_resolve_ambiguous_variant_name_skipped(db_session: Session):
+    """评审 B1 BLOCKER 回归：跨车系撞名的款型名不入索引——「车系名 + 通用款型名」
+    不得制造幽灵第二实体（生产库实测 103 个归一化款型名跨车系共享）。"""
+    ids = _seed_two_series(db_session)
+    _seed_production_style_variant(db_session, ids["z9"], "2026款 Ultra")
+    _seed_production_style_variant(db_session, ids["raf"], "2026款 Ultra")
+    # 车系名 + 撞名款型名：只解析到车系名对应的车系（款型名歧义被跳过）
+    resolved = resolve_series(db_session, "腾势Z9GT 的 2026款 Ultra 怎么样")
+    assert [s.id for s, _ in resolved] == [ids["z9"]]
+    # 撞名款型名单独出现：无法消歧 → 不解析（宁可不答也不错答）
+    assert resolve_series(db_session, "2026款 Ultra 怎么样") == []
+    # 唯一归属的款型名仍正常解析
+    _seed_production_style_variant(db_session, ids["raf"], "2024款 专属定制版")
+    assert [s.id for s, _ in resolve_series(db_session, "2024款 专属定制版 怎么样")] == [ids["raf"]]
 
 
 def test_should_answer_rules(db_session: Session):

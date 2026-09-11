@@ -152,17 +152,19 @@ def _build_eval_context(db) -> dict:
 
 
 def _semantic_constraints(q: dict) -> dict:
-    """从 semantic_fuzzy 问题文本反解结构化约束（措辞映射与生成器同源）。"""
+    """从 semantic_fuzzy 问题文本反解结构化约束（措辞映射与生成器同源）。
+
+    评审 E16：多处命中且互相冲突时放弃该约束（第一处命中可能来自车系档案自由
+    文本而非用户意图——宁可少判不可错判）。
+    """
     text = q.get("text") or ""
     out: dict = {}
-    for hint, energy in HINT_TO_ENERGY.items():
-        if hint in text:
-            out["energy_type"] = energy
-            break
-    for label, body in HEAD_LABEL_TO_BODY.items():
-        if label in text:
-            out["body_type"] = body
-            break
+    energies = {energy for hint, energy in HINT_TO_ENERGY.items() if hint.rstrip("的") in text}
+    if len(energies) == 1:
+        out["energy_type"] = next(iter(energies))
+    bodies = {body for label, body in HEAD_LABEL_TO_BODY.items() if label in text}
+    if len(bodies) == 1:
+        out["body_type"] = next(iter(bodies))
     return out
 
 
@@ -220,7 +222,7 @@ def _fact_coverage(q: dict, hits: list, ctx: dict, variant_series: dict[int, int
 def _constraint_metrics(q: dict, hits: list, ctx: dict, k: int) -> dict | None:
     """推荐/语义题：检回车系满足问题约束即相关。返回 valid-hit / valid-precision / valid-MRR。"""
     constraints = _semantic_constraints(q) if q.get("bucket") == "semantic" else (q.get("expect") or {})
-    if not any(c in constraints for c in ("budget_max", "energy_type", "body_type", "passengers")):
+    if not any(c in constraints for c in ("budget_max", "budget_min", "energy_type", "body_type", "passengers")):
         return None  # 只有软约束（用途/喜好）的问题不参与判定
     valid = [1.0 if _series_satisfies(ctx["series_attrs"].get(h.series_id), constraints) else 0.0 for h in hits[:k]]
     mrr = 0.0
@@ -228,10 +230,11 @@ def _constraint_metrics(q: dict, hits: list, ctx: dict, k: int) -> dict | None:
         if v:
             mrr = 1.0 / (i + 1)
             break
+    # 评审 E6：@K 标签随实际 k 参数化（--top-k ≠ 5 时不再错标 @5）
     return {
-        "valid_hit@5": 1.0 if any(valid) else 0.0,
-        "valid_precision@5": round(sum(valid) / k, 4),
-        "valid_mrr": round(mrr, 4),
+        f"valid_hit@{k}": 1.0 if any(valid) else 0.0,
+        f"valid_precision@{k}": round(sum(valid) / k, 4),
+        f"valid_mrr": round(mrr, 4),
     }
 
 
@@ -262,15 +265,15 @@ def _v2_metrics_for_question(q: dict, hits: list, ctx: dict, variant_series: dic
     mode = _judge_mode(q, ctx)
     if mode == "fact":
         cov = _fact_coverage(q, hits, ctx, variant_series, top_k)
-        return {} if cov is None else {"fact_coverage@5": cov}
+        return {} if cov is None else {f"fact_coverage@{top_k}": cov}
     if mode == "constraint":
         return _constraint_metrics(q, hits, ctx, top_k) or {}
     if mode == "pair":
         p = _pair_coverage(q, hits, variant_series, top_k)
-        return {} if p is None else {"pair_coverage@5": p}
+        return {} if p is None else {f"pair_coverage@{top_k}": p}
     if mode == "brand":
         b = _brand_hit(q, hits, ctx, top_k)
-        return {} if b is None else {"brand_hit@5": b}
+        return {} if b is None else {f"brand_hit@{top_k}": b}
     return {}
 
 
@@ -579,8 +582,11 @@ def _render_md(report: dict) -> str:
                 else:
                     cells.append(f"{bb[f'@{k}']['hit']} / {bb[f'@{k}']['mrr']}")
             lines.append(f"| {r['strategy']} | " + " | ".join(cells) + " |")
-    # 口径修正指标（v2）：信息需求对齐判定（2026-09-11）
-    v2_keys = ["fact_coverage@5", "valid_hit@5", "valid_precision@5", "valid_mrr", "pair_coverage@5", "brand_hit@5"]
+    # 口径修正指标（v2）：信息需求对齐判定（2026-09-11）；@K 标签随 top_k 参数化（评审 E6）
+    v2_keys = [
+        f"fact_coverage@{k}", f"valid_hit@{k}", f"valid_precision@{k}",
+        "valid_mrr", f"pair_coverage@{k}", f"brand_hit@{k}",
+    ]
     if any("v2" in r for r in report["strategies"]):
         lines += [
             "",
@@ -601,7 +607,7 @@ def _render_md(report: dict) -> str:
             lines.append(f"| {r['strategy']} | " + " | ".join(cells) + " |")
         if bucket_names:
             lines += ["", "### v2 分桶指标", ""]
-            header = "| 策略 | " + " | ".join(f"{b} {key}" for b in bucket_names for key in ("vhit@5", "vprec@5")) + " |"
+            header = "| 策略 | " + " | ".join(f"{b} {key}" for b in bucket_names for key in (f"vhit@{k}", f"vprec@{k}")) + " |"
             lines.append(header)
             lines.append("| --- | " + " | ".join(["---"] * (len(bucket_names) * 2)) + " |")
             for r in report["strategies"]:
@@ -610,8 +616,8 @@ def _render_md(report: dict) -> str:
                 cells = []
                 for b in bucket_names:
                     bb = (r.get("by_bucket") or {}).get(b, {}).get("v2") or {}
-                    cells.append(str(bb.get("valid_hit@5") if bb.get("valid_hit@5") is not None else "-"))
-                    cells.append(str(bb.get("valid_precision@5") if bb.get("valid_precision@5") is not None else "-"))
+                    cells.append(str(bb.get(f"valid_hit@{k}") if bb.get(f"valid_hit@{k}") is not None else "-"))
+                    cells.append(str(bb.get(f"valid_precision@{k}") if bb.get(f"valid_precision@{k}") is not None else "-"))
                 lines.append(f"| {r['strategy']} | " + " | ".join(cells) + " |")
     lines += [
         "",

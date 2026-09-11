@@ -19,6 +19,7 @@ from app.catalog import services as catalog
 from app.catalog.series_constraints import PARAM_KEYS
 from app.catalog.series_index import (
     HEADLINE_ORDER,
+    normalize_name,
     unit_from_key,
     display_name,
     rank_headlines,
@@ -148,11 +149,15 @@ def asked_missing_param_note(
     只匹配 PARAM_KEYS 的用户可读问法（生成器/前端同源），避免误伤泛问（「续航是多少」）；
     维度整体缺失的键由 missing_param_labels 兜底，此处跳过避免重复。
     """
-    known_keys = {row[0] for row in facts}
+    known_keys = {row[0] for row in facts if row[1] not in _PROBE_SKIP_VALUES}
     missing_dims = set(missing_dims or [])
     missing: list[str] = []
+    # 评审 C10(b)：归一化匹配——用户自然写法「CLTC纯电续航」（无空格）与问法
+    # 「CLTC 纯电续航」等价，逐字子串匹配会漏触发按键提示
+    norm_message = normalize_name(message)
     for key, phrase in PARAM_KEYS:
-        if phrase not in message and key not in message:
+        norm_phrase = normalize_name(phrase)
+        if norm_phrase not in norm_message and normalize_name(key) not in norm_message:
             continue
         if key in known_keys:
             continue
@@ -361,9 +366,18 @@ def build_series_qa_answer(
             order = [label for label in HEADLINE_ORDER if label in head]
             blocks.append("  核心参数：" + "；".join(f"{label} {head[label]}" for label in order))
         # 按需参数查找（评审 M-R10）：对比语境下同样回答问到的具体参数
-        probed = probe_facts(facts_by_series.get(series.id, []), message)
+        series_facts = facts_by_series.get(series.id, [])
+        probed = probe_facts(series_facts, message)
         if probed:
             blocks.append("  你问到的相关参数：" + "；".join(probed))
+        # 诚实性兜底对齐单车系路径（评审 C11）：某车系在问到的维度/按键上无数据时
+        # 显式标注，不沉默跳过
+        missing_dims = missing_param_labels(series_facts, message)
+        if missing_dims:
+            blocks.append("  你问到的" + "、".join(missing_dims) + "：官方资料未披露。")
+        key_note = asked_missing_param_note(series_facts, message, missing_dims)
+        if key_note:
+            blocks.append("  你问到的" + key_note)
         highlights = series_highlights(db, series)
         if highlights:
             blocks.append("  亮点配置：" + "、".join(highlights))

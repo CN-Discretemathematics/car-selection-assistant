@@ -46,9 +46,9 @@ _PARAM_HINT_RE = re.compile(
 _COMPARE_HINT_RE = re.compile(r"对比|差异|差别|区别|比较|哪个好|比一比|版本差异|款型差异")
 
 # 约束解析（评测规范 v4：recommend 约束下推）——从问题文本解析硬约束，
-# grade 据此把「满足约束」的证据排到前面（未点名车系时才生效）
-_BUDGET_RE = re.compile(r"(\d+(?:\.\d+)?)\s*万")
-_SEATS_RE = re.compile(r"(\d)\s*座")
+# grade 据此把「满足约束」的证据排到前面（未点名车系时才生效）。
+# 评审 C2：预算/座位正则与语义（以内=上限、以上=下限、区间、否定门控、裸万需预算语境）
+# 与 engine.extract_hints 同源，实现收敛在 series_constraints.parse_budget_and_seats。
 
 # 加权 RRF（优化⑤）：统一 0.6/0.4——权重网格消融（120 题五配置，2026-09）实测：
 # 0.6/0.4 MRR 0.7032 为最优平台期（0.5/0.5 等权 0.6948、纯稀疏 0.6898、0.4/0.6 有害）；
@@ -66,35 +66,15 @@ def _classify_query(query: str, resolved_count: int) -> str:
 
 
 def _parse_constraints(query: str) -> dict:
-    """从问题文本解析硬约束（预算/能源/车身/座位），供 grade 约束优先重排。"""
-    out: dict = {}
-    m = _BUDGET_RE.search(query)
-    if m:
-        out["budget_max"] = int(float(m.group(1)) * 10000)
-    if "纯电" in query:
-        out["energy_type"] = "BEV"
-    elif "插混" in query or "能加油" in query:
-        out["energy_type"] = "PHEV"
-    elif "增程" in query:
-        out["energy_type"] = "EREV"
-    elif "混动" in query:
-        out["energy_type"] = "HEV"
-    elif "燃油" in query:
-        out["energy_type"] = "ICE"
-    elif "新能源" in query:
-        out["new_energy"] = True
-    upper = query.upper()
-    if "SUV" in upper:
-        out["body_type"] = "suv"
-    elif "MPV" in upper:
-        out["body_type"] = "mpv"
-    elif "轿车" in query:
-        out["body_type"] = "sedan"
-    elif "皮卡" in query:
-        out["body_type"] = "pickup"
-    m = _SEATS_RE.search(query)
-    if m:
-        out["passengers"] = int(m.group(1))
+    """从问题文本解析硬约束（预算/能源/车身/座位），供 grade 约束优先重排。
+
+    评审 C2：预算语义与 engine.extract_hints 同源（以内=上限、以上=下限、区间、
+    否定门控、裸「N万」需预算语境）；能源/车身多处互斥命中时放弃（宁可少推不错推）。
+    """
+    from app.catalog.series_constraints import parse_budget_and_seats, parse_energy_body
+
+    out = parse_budget_and_seats(query or "")
+    out.update(parse_energy_body(query or ""))
     return out
 
 
@@ -142,6 +122,7 @@ def _ensure_anchor_coverage(
     backend = get_sparse_backend()
     firsts: list[SearchResult] = []
     rest: list[SearchResult] = []
+    seen = {h.chunk_id for h in results}
     for sid in missing:
         try:
             hits = backend.search(
@@ -150,9 +131,11 @@ def _ensure_anchor_coverage(
             )
         except Exception:  # noqa: BLE001 - 补召回失败不阻断检索
             continue
-        if hits:
-            firsts.append(hits[0])
-            rest.extend(hits[1:])
+        fresh = [h for h in hits if h.chunk_id not in seen]  # 评审 C6：与现有结果去重
+        seen.update(h.chunk_id for h in fresh)
+        if fresh:
+            firsts.append(fresh[0])
+            rest.extend(fresh[1:])
     if not firsts:
         return results, 0
     front: list[SearchResult] = []
@@ -160,14 +143,19 @@ def _ensure_anchor_coverage(
     ai = 0
     bi = 0
     toggle = True
-    while ai < len(firsts) and bi < len(base):
-        front.append(firsts[ai] if toggle else base[bi])
-        if toggle:
+    while ai < len(firsts) or bi < len(base):
+        # 交替取补召回证据与原结果；一侧耗尽后另一侧顺延（无丢弃，评审 C6）
+        if toggle and ai < len(firsts):
+            front.append(firsts[ai])
             ai += 1
-        else:
+        elif bi < len(base):
+            front.append(base[bi])
             bi += 1
+        else:
+            front.append(firsts[ai])
+            ai += 1
         toggle = not toggle
-    out = front + base[bi:] + rest
+    out = front + rest
     return out, len(firsts)
 
 
@@ -223,6 +211,7 @@ def _analyze(state: RagState) -> RagState:
     # 优化⑥：领域同义扩展（扩展串只服务稠密路与重排兜底，稀疏路用 entity_query）
     search_query, expanded = expand_query(entity_query)
 
+    constraints = _parse_constraints(query) if not resolved else {}  # 评审 C9：只解析一次
     return {
         "query": query,
         "filters": filters,
@@ -234,11 +223,11 @@ def _analyze(state: RagState) -> RagState:
         "resolved_series": resolved_names,
         # 评测 v4：锚定车系（compare 双侧均衡）+ 文本解析硬约束（未点名车系的约束下推）
         "anchor_series_ids": [s.id for s, _ in resolved],
-        "constraints": _parse_constraints(query) if not resolved else {},
+        "constraints": constraints,
         "stages": [make_stage("analyze", 1, len(resolved_names), started,
                               {"resolved_series": resolved_names, "filters": filters,
                                "recall_k": recall_k, "query_type": query_type,
-                               "constraints": _parse_constraints(query) if not resolved else {},
+                               "constraints": constraints,
                                "expanded_terms": expanded})],
         "warnings": warnings,
     }
@@ -274,14 +263,17 @@ def _recall_sparse(state: RagState) -> RagState:
     hits = backend.search(
         state["entity_query"], filters=state.get("filters"), top_k=state["recall_k"]
     )
-    per_side = 0
+    side_added = 0
     anchors = [sid for sid in (state.get("anchor_series_ids") or []) if sid is not None]
     if state.get("query_type") == "compare" and len(anchors) >= 2:
         seen = {h.chunk_id for h in hits}
+        # 评审 C7：侧路召回保留调用方的其他过滤条件（brand_id/energy_type 等），
+        # 只覆写 series_id——侧路证据不得违反管理台试运行设置的过滤
+        base_filters = {k: v for k, v in (state.get("filters") or {}).items() if k != "series_id"}
         side_lists: list[list] = []
         for sid in anchors:
             side_hits = backend.search(
-                state["entity_query"], filters={"series_id": sid}, top_k=10
+                state["entity_query"], filters={**base_filters, "series_id": sid}, top_k=10
             )
             fresh = [h for h in side_hits if h.chunk_id not in seen]
             seen.update(h.chunk_id for h in fresh)
@@ -297,11 +289,11 @@ def _recall_sparse(state: RagState) -> RagState:
             i += 1
         front_seen = {h.chunk_id for h in front}
         hits = front + [h for h in hits if h.chunk_id not in front_seen]
-        per_side = sum(len(l) for l in side_lists)
+        side_added = sum(len(l) for l in side_lists)
     return {
         "sparse_hits": hits,
         "stages": [make_stage("recall_sparse", 1, len(hits), started,
-                              {"backend": backend.name, "per_side_added": per_side})],
+                              {"backend": backend.name, "side_hits_added": side_added})],
     }
 
 

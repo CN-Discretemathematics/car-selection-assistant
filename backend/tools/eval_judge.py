@@ -15,7 +15,7 @@ judge 走独立模型（默认 DashScope qwen-plus，可用 JUDGE_MODEL/--judge-
 4. 双评一致性：默认 30% 的题由 judge 二次独立评分，输出一致率（校准 judge 可靠性）。
 
 用法：
-    python tools/eval_judge.py --questions eval/questions-v3.json --sample 100 \
+    python tools/eval_judge.py --questions eval/questions.json --sample 100 \
         --report eval/eval-judge.json
 """
 from __future__ import annotations
@@ -40,7 +40,7 @@ from app.common.llm import LLMClient  # noqa: E402
 from app.common.models import MonthlySales, OfficialPrice, SpecFact, VehicleVariant  # noqa: E402
 from app.rag import service as rag  # noqa: E402
 
-_UNANSWERABLE_MARKERS = ("未披露", "未查到", "暂无", "没有")
+_UNANSWERABLE_MARKERS = ("未披露", "未查到", "暂无")  # 评审 E9：裸「没有」误放行编造回答
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 
 FAITHFULNESS_SYSTEM = (
@@ -191,8 +191,10 @@ def _summarize(rows: list[dict]) -> dict:
     fdb = [r["faithful_db"] for r in rows if r.get("faithful_db") is not None]
     double = [r for r in rows if r.get("faithful_second") is not None]
     agree = [1.0 for r in double if r.get("faithful") == r.get("faithful_second")]
+    errors = [r for r in rows if r.get("error")]
     return {
         "questions": n,
+        "errors": len(errors),  # 评审 E11：错误/超时行单独计数，不混入样本量
         "faithful_rate": round(sum(faith) / len(faith), 4) if faith else None,
         "faithful_judged": len(faith),
         "faithful_db_rate": round(sum(fdb) / len(fdb), 4) if fdb else None,
@@ -205,10 +207,6 @@ def _summarize(rows: list[dict]) -> dict:
     }
 
 
-def _db_number_pool_error() -> None:  # pragma: no cover - 占位防误用
-    raise NotImplementedError
-
-
 async def _run_one(
     q: dict,
     judge: JudgeClient,
@@ -216,15 +214,19 @@ async def _run_one(
     engine: AgentEngine,
     variant_series: dict[int, int],
     sem: asyncio.Semaphore,
-    double_rate: float,
-    rng: random.Random,
+    double_judge: bool,
     out: list[dict],
 ) -> None:
-    """单题执行 + 240s 硬超时兜底：任何一题卡死不再拖垮整体评测。"""
+    """单题执行 + 240s 硬超时兜底：任何一题卡死不再拖垮整体评测。
+
+    已知限制（评审 E3）：超时取消可能落在 engine 内部线程池查询进行中——任务会话
+    的 close 与孤儿线程收尾存在竞争；错误被线程吞掉、会话按题独立不影响其他任务，
+    但该题连接可能异常回收。生产超时极少触发，暂不为评测工具引入线程级会话隔离。
+    """
     async with sem:
         try:
             await asyncio.wait_for(
-                _run_one_inner(q, judge, factory, engine, variant_series, double_rate, rng, out),
+                _run_one_inner(q, judge, factory, engine, variant_series, double_judge, out),
                 timeout=240,
             )
         except asyncio.TimeoutError:
@@ -241,8 +243,7 @@ async def _run_one_inner(
     factory,
     engine: AgentEngine,
     variant_series: dict[int, int],
-    double_rate: float,
-    rng: random.Random,
+    double_judge: bool,
     out: list[dict],
 ) -> None:
     text = q.get("text") or ""
@@ -252,6 +253,9 @@ async def _run_one_inner(
         store = engine._store  # noqa: SLF001 - 评测需要独立会话驱动同一引擎
         out_obj = await engine.handle(db, store.create(), text)
         answer = getattr(out_obj, "explanation", "") or ""
+        # 评审 E12 说明：evidence 为按原问题复检索的 top-5，不是 agent 实际引用的
+        # 全部来源——LLM faithful 度量「检索证据对回答的支撑率」；DB 直答类回答
+        # （参数/对比模板）的忠实度以 faithful_db（对照锚定车系全量 DB 数字池）为准
         evidence = rag.search(db, text, top_k=5)
         # 确定性 faithfulness（对照 DB 事实池，零 judge 成本）
         rel_series = set()
@@ -309,13 +313,13 @@ async def _run_one_inner(
     # 拒答诚实性（确定性字符串判定优先）
     if expect.get("unanswerable"):
         row["refusal_ok"] = any(marker in answer for marker in _UNANSWERABLE_MARKERS)
-    # 双评一致性抽样：faithful 再独立判一次
-    if row.get("faithful") is not None and rng.random() < double_rate:
+    # 双评一致性抽样（评审 E7）：子集由 _drive 预先按种子确定；两评均 temperature=0，
+    # 一致率度量 judge 稳定性而非采样噪声
+    if double_judge and row.get("faithful") is not None:
         try:
             j3 = await judge.chat_json(
                 FAITHFULNESS_SYSTEM,
                 f"【回答】：\n{answer}\n\n【检索证据】：\n{ev_text}",
-                temperature=0.7,
             )
             row["faithful_second"] = j3.get("faithful") if j3 else None
         except Exception as err:  # noqa: BLE001 - 双评失败不影响主指标
@@ -333,8 +337,12 @@ def _build_judge(args) -> JudgeClient:
 async def _drive(args, questions: list[dict], judge: JudgeClient, rows: list[dict]) -> None:
     factory = get_session_factory()
     engine = AgentEngine(llm=LLMClient(), store=SessionStore())
-    sem = asyncio.Semaphore(args.concurrency)
+    sem = asyncio.Semaphore(max(1, args.concurrency))  # 评审 E14：0 会使所有任务永久阻塞
+    # 评审 E7：双评子集在调度前按种子确定性选定（并发下共享 rng 的抽样顺序不可复现）
     rng = random.Random(20260911)
+    double_ids = {
+        q.get("id") for q in questions if rng.random() < args.double_rate
+    }
     with factory() as db:
         variant_series = {
             v.id: v.series_id
@@ -344,7 +352,8 @@ async def _drive(args, questions: list[dict], judge: JudgeClient, rows: list[dic
         }
     tasks = [
         asyncio.create_task(
-            _run_one(q, judge, factory, engine, variant_series, sem, args.double_rate, rng, rows)
+            _run_one(q, judge, factory, engine, variant_series, sem,
+                     q.get("id") in double_ids, rows)
         )
         for q in questions
     ]
@@ -362,7 +371,7 @@ async def _drive(args, questions: list[dict], judge: JudgeClient, rows: list[dic
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="答案层 LLM-as-judge 评测（faithfulness/completeness/refusal）")
-    parser.add_argument("--questions", default=os.path.join("eval", "questions-v3.json"))
+    parser.add_argument("--questions", default=os.path.join("eval", "questions.json"))
     parser.add_argument("--sample", type=int, default=100, help="分层抽样题数（0=全部）")
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--double-rate", type=float, default=0.3, help="双评一致性抽样比例")
@@ -372,17 +381,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", default=os.path.join("eval", "eval-judge.json"))
     args = parser.parse_args(argv)
 
+    if not os.path.exists(args.questions):  # 评审 E10：缺失文件友好报错
+        print(f"问题库不存在：{args.questions}（先用 tools/gen_eval_questions.py 生成）", file=sys.stderr)
+        return 2
     with open(args.questions, encoding="utf-8") as fh:
         questions = json.load(fh)["questions"]
     questions = [q for q in questions if (q.get("text") or "").strip()]
     sample = _stratified_sample(questions, args.sample, random.Random(20260911))
 
     judge = _build_judge(args)
-    # rows 由 _drive 增量填充：中途崩溃/超时也保留已完成部分（报告降级输出）
+    # rows 由 _drive 增量填充：中途崩溃/超时也保留已完成部分（报告降级输出）。
+    # 评审 E15：捕获 BaseException（含 Ctrl-C），写完报告后再向上传播中断信号
     rows: list[dict] = []
+    interrupted: BaseException | None = None
     try:
         asyncio.run(_drive(args, sample, judge, rows))
-    except Exception as err:  # noqa: BLE001 - 部分结果仍写入报告
+    except BaseException as err:  # noqa: BLE001 - 部分结果仍写入报告
+        interrupted = err
         print(f"评测中断（保留部分结果）：{type(err).__name__}: {str(err)[:200]}", file=sys.stderr)
 
     summary = _summarize(rows)
@@ -403,6 +418,10 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(report, fh, ensure_ascii=False, indent=1)
     print(json.dumps({"summary": summary, "by_bucket": by_bucket}, ensure_ascii=False, indent=1))
     print(f"报告：{args.report}")
+    if interrupted is not None:
+        if isinstance(interrupted, KeyboardInterrupt):
+            return 130
+        return 1
     return 0
 
 
