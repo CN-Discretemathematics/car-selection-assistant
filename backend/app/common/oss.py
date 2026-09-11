@@ -2,7 +2,7 @@
 
 - OSS_* 未配置或连接失败时 available=False，调用方只做本地存档（原则 7）；
 - 连接失败不永久回退：每 60 秒重试一次（评审 M7）；
-- 凭据从 Settings（.env / KMS）读取，绝不写代码。
+- 凭据从 Settings（.env）读取，绝不写代码。
 """
 from __future__ import annotations
 

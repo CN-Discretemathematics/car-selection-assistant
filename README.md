@@ -29,8 +29,8 @@
   不编造、不沉默跳过
 - **真实数据接入工具**：汽车之家销量榜、车系、SKU（参数配置/价格）三阶段抓取，断点续传，
   导入前 dry-run 校验、失败整体回滚
-- **生产安全**：KMS 凭据管家密钥注入（ECS 实例 RAM 角色 STS 临时凭证，无长期 AK、
-  密钥不进镜像/仓库、宿主机明文可清理、拉取失败阻断启动）
+- **生产安全**：生产密钥经服务器 `.env` 注入（不入仓库、不入镜像，文件权限 600）；
+  应用启动前运行 Alembic 迁移（幂等）
 - **管理后台**：数据导入审计、数据质量冲突处理、RAG 运维
 
 ## 技术栈
@@ -199,14 +199,13 @@ python tools/import_data.py payload.json --dry-run
 | `RETRIEVAL_TOKENIZER` | 稀疏分词器：`bigram`（默认）/ `jieba` / `hybrid` |
 | `RERANK_PROVIDER` | 重排器：空（默认，保持融合序）/ `lexical` / `api` |
 | `ADMIN_API_TOKEN` | 管理后台独立凭据（≥16 位随机值；留空 = 管理接口禁用） |
-| `KMS_ROLE` / `KMS_SECRET_NAME` / `KMS_REGION` / `KMS_FAIL_OPEN` | 生产密钥注入（见 `deploy/KMS_SETUP.md`；本地开发无需配置） |
 | `OSS_*` | 网页快照 / 图片原始文件存储（可选） |
 
 ## 测试
 
 ```powershell
 cd backend
-python -m pytest -q                   # 233 用例
+python -m pytest -q                   # 235 用例
 cd ..\web
 npx tsc --noEmit                      # 前端类型检查
 ```

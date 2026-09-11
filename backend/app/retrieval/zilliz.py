@@ -4,7 +4,7 @@
 REST v2 完成建集合/写入/检索，免装 pymilvus、无需手动管理连接；首次写入自动建集合。Embedding 走 OpenAI 兼容接口（`{base}/v1/embeddings`），
 可由 Zilliz 官方接口或硅基流动等提供，统一在 app/retrieval/config.py 配置。
 
-生产安全：Token / API Key 只经 .env 或云 KMS 注入，绝不写入代码或仓库（审查红线）。
+生产安全：Token / API Key 只经 .env 注入，绝不写入代码或仓库（审查红线）。
 """
 from __future__ import annotations
 

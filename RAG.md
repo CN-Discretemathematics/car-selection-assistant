@@ -221,7 +221,7 @@ graph TD;
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `RETRIEVAL_BACKEND` | `inmemory` | `milvus` 时启用稠密召回路 |
-| `MILVUS_URI` / `MILVUS_TOKEN` / `MILVUS_COLLECTION` / `MILVUS_DIM` | - | Zilliz Cloud（生产经 KMS 注入） |
+| `MILVUS_URI` / `MILVUS_TOKEN` / `MILVUS_COLLECTION` / `MILVUS_DIM` | - | Zilliz Cloud（密钥经 .env 注入，不入仓库） |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_API_KEY` / `EMBEDDING_DIMENSIONS` | - | OpenAI 兼容 `/v1/embeddings` |
 | `RETRIEVAL_EMBED_CACHE` | 空（关） | 稠密灌库流式 JSONL 向量缓存（断点续跑、低内存） |
 | `RETRIEVAL_CHUNK_SIZE` / `RETRIEVAL_CHUNK_OVERLAP` | 500 / 64 | 递归切分参数（字符） |
@@ -234,7 +234,6 @@ graph TD;
 | `RETRIEVAL_RELEVANCE_THRESHOLD` | 0（关） | >0 时仅对 Cross-Encoder 绝对分生效 |
 | `RETRIEVAL_LEXICAL_BOOST` / `RETRIEVAL_LEXICAL_CAP` | 0.05 / 0.25 | lexical 重排加分步长/封顶 |
 | `RAG_RUN_LOG_SIZE` | 50 | 运行轨迹环形缓冲长度 |
-| `KMS_ROLE` / `KMS_SECRET_NAME` / `KMS_REGION` / `KMS_SECRET_FORMAT` / `KMS_FAIL_OPEN` | - | KMS 凭据管家注入（见 deploy/KMS_SETUP.md） |
 
 ## 7. 运维手册（速查）
 
@@ -272,4 +271,4 @@ python tools/eval_rag.py --with-dense                             # 策略评测
 | embedding 服务限流/超时 | 灌库自动指数退避重试；查询路 dense 失败降级同上 |
 | 重排 API 故障 | 回退 lexical 重排，warning 入轨迹 |
 | LLM 未配置 | Agent 确定性模式（不影响检索层） |
-| KMS 凭据拉取失败 | 容器启动阻断（fail-closed）；KMS_FAIL_OPEN=1 可降级 |
+| Redis 不可用 | 会话/限流/验证码回退进程内实现（原则 7），60s 周期重连 |

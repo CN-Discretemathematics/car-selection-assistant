@@ -2,7 +2,7 @@
 
 - REDIS_URL 未配置或连接失败时返回 None，调用方回退进程内存储（原则 7）；
 - 连接失败不永久回退：每 60 秒重试一次（评审 M7——短暂抖动后自动恢复）；
-- 连接参数从 Settings（.env / KMS）读取，密钥绝不写代码。
+- 连接参数从 Settings（.env）读取，密钥绝不写代码。
 """
 from __future__ import annotations
 

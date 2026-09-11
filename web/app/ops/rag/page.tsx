@@ -92,7 +92,7 @@ export default function OpsRagPage() {
           <div className="mx-auto mt-10 max-w-md rounded-2xl border border-gray-200/80 bg-white p-6 shadow-sm">
             <p className="text-sm font-semibold text-gray-900">输入管理凭据</p>
             <p className="mt-1 text-xs text-gray-500">
-              即后端 ADMIN_API_TOKEN（经 KMS 注入的独立凭据，不开放注册）。
+              即后端 ADMIN_API_TOKEN（运维经环境变量注入的独立凭据，不开放注册）。
             </p>
             <div className="mt-4 flex gap-2">
               <input

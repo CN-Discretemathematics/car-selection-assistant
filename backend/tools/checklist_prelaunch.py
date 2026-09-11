@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
 
     admin_token = settings.admin_api_token or ""
     if not args.dev and not admin_token:
-        add("FAIL", "ADMIN_API_TOKEN", "生产必须设置管理后台凭据（≥16 位随机值，经 KMS 注入）")
+        add("FAIL", "ADMIN_API_TOKEN", "生产必须设置管理后台凭据（≥16 位随机值，经环境变量注入）")
     elif not admin_token:
         add("WARN", "ADMIN_API_TOKEN", "未设置（管理接口将禁用；开发模式允许）")
     elif len(admin_token) < 16:
