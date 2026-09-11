@@ -640,10 +640,26 @@ def test_ensure_anchor_coverage_adds_missing_side(monkeypatch):
     monkeypatch.setattr(rag_service, "get_sparse_backend", lambda: FakeBackend())
     state = {"entity_query": "对比 A 和 B", "query": "对比 A 和 B"}
     present = SearchResult(chunk_id="p1", score=0.9, text="A侧证据", kind="variant_spec", series_id=1)
-    out = _ensure_anchor_coverage(state, [present], [1, 2])
+    out, added = _ensure_anchor_coverage(state, [present], [1, 2])
+    assert added == 1, "缺席侧数量"
     got = {h.series_id for h in out}
     assert got == {1, 2}, "缺席侧必须补召回"
-    assert out[0].series_id == 2, "补召回的证据排在最前，先于均衡交错"
+    assert out[0].series_id == 2, "补召回的证据插在前部，先于原有结果"
+
+
+def test_ensure_anchor_coverage_noop_when_both_present(monkeypatch):
+    """双侧本就在场：零扰动（外科手术式——只修缺席，不重排其余）。"""
+    import app.rag.service as rag_service
+    from app.rag.pipeline import _ensure_anchor_coverage
+
+    def _boom(*a, **k):
+        raise AssertionError("双侧在场时不应触发补召回")
+
+    monkeypatch.setattr(rag_service, "get_sparse_backend", _boom)
+    h1 = SearchResult(chunk_id="1a", score=0.9, text="A侧", kind="variant_spec", series_id=1)
+    h2 = SearchResult(chunk_id="2a", score=0.8, text="B侧", kind="variant_spec", series_id=2)
+    out, added = _ensure_anchor_coverage({"query": "q"}, [h1, h2], [1, 2])
+    assert added == 0 and out == [h1, h2]
 
 
 def test_reorder_by_constraints_puts_valid_first(monkeypatch):

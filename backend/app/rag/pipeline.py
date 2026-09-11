@@ -122,30 +122,50 @@ def _balance_by_series(results: list[SearchResult], anchor_ids: list[int]) -> li
     return ordered + rest
 
 
-def _ensure_anchor_coverage(state: RagState, results: list[SearchResult], anchor_ids: list[int]) -> list[SearchResult]:
+def _ensure_anchor_coverage(state: RagState, results: list[SearchResult], anchor_ids: list[int]) -> tuple[list[SearchResult], int]:
     """对比类兜底：某锚定车系在候选中完全缺席时，按 series_id 过滤补召回。
 
     评测 v4 诊断：对比题以款型名表述（「2023款 470km 引领版」），BM25 候选常被
-    词面近邻的其他车系占满，锚定车系切片整系缺席——均衡无从交错。先按侧补召回
-    再交错，pair-coverage 才能真正闭环。
+    词面近邻的其他车系占满，锚定车系切片整系缺席。只对**缺席侧**做头部插入
+    （与原前部交错），双侧本就在场的题保持原序不动（外科手术式，零扰动）。
+    返回 (新结果列表, 补召回的侧数)。
     """
     present = {h.series_id for h in results}
     missing = [sid for sid in anchor_ids if sid is not None and sid not in present]
     if not missing:
-        return results
+        return results, 0
     from app.rag.service import get_sparse_backend
 
     backend = get_sparse_backend()
-    added: list[SearchResult] = []
+    firsts: list[SearchResult] = []
+    rest: list[SearchResult] = []
     for sid in missing:
         try:
-            added.extend(backend.search(
+            hits = backend.search(
                 state.get("entity_query") or state.get("query") or "",
                 filters={"series_id": sid}, top_k=2,
-            ))
+            )
         except Exception:  # noqa: BLE001 - 补召回失败不阻断检索
             continue
-    return added + results
+        if hits:
+            firsts.append(hits[0])
+            rest.extend(hits[1:])
+    if not firsts:
+        return results, 0
+    front: list[SearchResult] = []
+    base = list(results)
+    ai = 0
+    bi = 0
+    toggle = True
+    while ai < len(firsts) and bi < len(base):
+        front.append(firsts[ai] if toggle else base[bi])
+        if toggle:
+            ai += 1
+        else:
+            bi += 1
+        toggle = not toggle
+    out = front + base[bi:] + rest
+    return out, len(firsts)
 
 
 def _reorder_by_constraints(
@@ -380,11 +400,9 @@ def _rerank(state: RagState) -> RagState:
 def _grade(state: RagState) -> RagState:
     """证据把关：丢弃空文本；重排分具备绝对语义时应用相关性阈值。
 
-    评测 v4 两项信息需求对齐的排序修正（意图互斥，只在明确条件下生效）：
-    - compare 双侧均衡：对比类查询两侧锚定车系的证据按名次交错，避免 top_k 被单侧
-      挤占（pair-coverage 0.439 的根因）；
-    - 约束下推：未点名车系 + 文本解析出硬约束（预算/能源/车身/座位）时，满足约束的
-      证据优先（valid-precision 0.445 的根因）。点名车系的车系问答不受影响。
+    评测 v4：未点名车系 + 文本解析出硬约束（预算/能源/车身/座位）时，满足约束的
+    证据优先（实测 valid-precision 0.5517→0.6992）。点名车系的车系问答不受影响。
+    compare 双侧均衡两个实现实测未达预期已回退（见函数内注释与 RAG.md §4.5）。
     """
     started = time.perf_counter()
     ranked = state.get("reranked") or []
@@ -395,22 +413,21 @@ def _grade(state: RagState) -> RagState:
         if hit.text and hit.text.strip() and (threshold <= 0 or hit.score >= threshold)
     ]
     dropped = len(ranked) - len(results)
-    reorder = None
-    if state.get("query_type") == "compare":
-        anchors = state.get("anchor_series_ids") or []
-        if len(anchors) >= 2:
-            results = _ensure_anchor_coverage(state, results, anchors)
-            results = _balance_by_series(results, anchors)
-            reorder = "compare_balance"
-    elif state.get("constraints") and not state.get("resolved_series"):
+    # 约束下推（v4 实测有效：valid-precision 0.5517→0.6992）：未点名车系 + 文本解析出
+    # 硬约束 → 满足约束的证据优先。点名车系的车系问答不受影响（单答案意图）。
+    if state.get("constraints") and not state.get("resolved_series"):
         results = _reorder_by_constraints(state["db"], results, state["constraints"])
-        reorder = "constraint_first"
+    # compare 双侧均衡/补召回：v4 两个实现实测均未提升 pair-coverage（0.439 →
+    # 0.4146/0.3659，Hit@5 还微降），根因是部分对比题的实体解析结果与锚定车系错位，
+    # 交错会放大错位——已回退，机制保留（_ensure_anchor_coverage/_balance_by_series）
+    # 供 v5 修正解析错位后再启用。
     final = results[: state["top_k"]]
     return {
         "results": final,
         "stages": [make_stage("grade", len(ranked), len(final), started,
                               {"dropped": dropped, "threshold": threshold if absolute else None,
-                               "reorder": reorder})],
+                               "constraint_reorder": bool(
+                                   state.get("constraints") and not state.get("resolved_series"))})],
     }
 
 
