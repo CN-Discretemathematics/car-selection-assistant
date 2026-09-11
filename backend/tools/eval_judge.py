@@ -63,11 +63,14 @@ def _db_number_pool(db, series_ids: set[int]) -> set[str]:
     for v in variants:
         pool.update(_numbers(v.display_name or ""))
     if vids:
-        for value, unit in db.execute(
-            select(SpecFact.fact_value, SpecFact.unit)
+        for key, value, unit in db.execute(
+            select(SpecFact.fact_key, SpecFact.fact_value, SpecFact.unit)
             .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
             .where(VehicleVariant.status == "on_sale", VehicleVariant.series_id.in_(series_ids))
         ).all():
+            # 事实键也入池：键名含数字（如「WLTC综合油耗(L/100km)」的 100），
+            # 回答按「键 = 值」引用时会带上键名 token（2026-09-11 假阳性复核）
+            pool.update(_numbers(key or ""))
             pool.update(_numbers(value or ""))
             pool.update(_numbers(unit or ""))
         for p in db.scalars(

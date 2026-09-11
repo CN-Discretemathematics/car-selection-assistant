@@ -627,7 +627,7 @@ def test_balance_by_series_interleaves():
 
 
 def test_ensure_anchor_coverage_adds_missing_side(monkeypatch):
-    """评测 v4：锚定车系整系缺席候选时按侧补召回（对比题 pair-coverage 的真正根因）。"""
+    """评测 v4.1：锚定车系在 top_k 内缺席时按侧补召回（对比题 pair-coverage 的真正根因）。"""
     import app.rag.service as rag_service
     from app.rag.pipeline import _ensure_anchor_coverage
 
@@ -640,15 +640,15 @@ def test_ensure_anchor_coverage_adds_missing_side(monkeypatch):
     monkeypatch.setattr(rag_service, "get_sparse_backend", lambda: FakeBackend())
     state = {"entity_query": "对比 A 和 B", "query": "对比 A 和 B"}
     present = SearchResult(chunk_id="p1", score=0.9, text="A侧证据", kind="variant_spec", series_id=1)
-    out, added = _ensure_anchor_coverage(state, [present], [1, 2])
-    assert added == 1, "缺席侧数量"
-    got = {h.series_id for h in out}
-    assert got == {1, 2}, "缺席侧必须补召回"
+    out, added = _ensure_anchor_coverage(state, [present], [1, 2], 5)
+    assert added == 1, "top_k 内缺席的侧数量"
+    got = {h.series_id for h in out[:5]}
+    assert got == {1, 2}, "缺席侧必须补召回进入 top_k"
     assert out[0].series_id == 2, "补召回的证据插在前部，先于原有结果"
 
 
-def test_ensure_anchor_coverage_noop_when_both_present(monkeypatch):
-    """双侧本就在场：零扰动（外科手术式——只修缺席，不重排其余）。"""
+def test_ensure_anchor_coverage_noop_when_both_in_topk(monkeypatch):
+    """双侧本就在 top_k 内：零扰动（不触发补召回）。"""
     import app.rag.service as rag_service
     from app.rag.pipeline import _ensure_anchor_coverage
 
@@ -658,7 +658,7 @@ def test_ensure_anchor_coverage_noop_when_both_present(monkeypatch):
     monkeypatch.setattr(rag_service, "get_sparse_backend", _boom)
     h1 = SearchResult(chunk_id="1a", score=0.9, text="A侧", kind="variant_spec", series_id=1)
     h2 = SearchResult(chunk_id="2a", score=0.8, text="B侧", kind="variant_spec", series_id=2)
-    out, added = _ensure_anchor_coverage({"query": "q"}, [h1, h2], [1, 2])
+    out, added = _ensure_anchor_coverage({"query": "q"}, [h1, h2], [1, 2], 5)
     assert added == 0 and out == [h1, h2]
 
 

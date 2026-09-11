@@ -122,16 +122,19 @@ def _balance_by_series(results: list[SearchResult], anchor_ids: list[int]) -> li
     return ordered + rest
 
 
-def _ensure_anchor_coverage(state: RagState, results: list[SearchResult], anchor_ids: list[int]) -> tuple[list[SearchResult], int]:
-    """对比类兜底：某锚定车系在候选中完全缺席时，按 series_id 过滤补召回。
+def _ensure_anchor_coverage(
+    state: RagState, results: list[SearchResult], anchor_ids: list[int], top_k: int
+) -> tuple[list[SearchResult], int]:
+    """对比类兜底：某锚定车系在 **top_k 内** 完全缺席时，按 series_id 过滤补召回。
 
     评测 v4 诊断：对比题以款型名表述（「2023款 470km 引领版」），BM25 候选常被
-    词面近邻的其他车系占满，锚定车系切片整系缺席。只对**缺席侧**做头部插入
-    （与原前部交错），双侧本就在场的题保持原序不动（外科手术式，零扰动）。
+    词面近邻的其他车系占满、锚定车系切片整系缺席。v4 首版只对「全候选缺席」触发
+    （rank 40 的碎片也算在场），pair-coverage 纹丝不动；v4.1 改为按 **top_k 缺席**
+    触发——缺席侧的头部证据插入前部与原结果交错，双侧进 top_k。
     返回 (新结果列表, 补召回的侧数)。
     """
-    present = {h.series_id for h in results}
-    missing = [sid for sid in anchor_ids if sid is not None and sid not in present]
+    present_topk = {h.series_id for h in results[:top_k] if h.series_id is not None}
+    missing = [sid for sid in anchor_ids if sid is not None and sid not in present_topk]
     if not missing:
         return results, 0
     from app.rag.service import get_sparse_backend
@@ -400,9 +403,12 @@ def _rerank(state: RagState) -> RagState:
 def _grade(state: RagState) -> RagState:
     """证据把关：丢弃空文本；重排分具备绝对语义时应用相关性阈值。
 
-    评测 v4：未点名车系 + 文本解析出硬约束（预算/能源/车身/座位）时，满足约束的
-    证据优先（实测 valid-precision 0.5517→0.6992）。点名车系的车系问答不受影响。
-    compare 双侧均衡两个实现实测未达预期已回退（见函数内注释与 RAG.md §4.5）。
+    评测 v4 两项信息需求对齐的排序修正：
+    - compare 双侧覆盖（v4.1）：对比类查询锚定车系在 top_k 内缺席时，按侧补召回并
+      交错——首版「全候选缺席才触发」实测 pair-coverage 纹丝不动（0.439），v4.1 按
+      top_k 缺席触发；
+    - 约束下推（实测 valid-precision 0.5517→0.6992）：未点名车系 + 硬约束时，满足
+      约束的证据优先。点名车系的车系问答不受影响（单答案意图）。
     """
     started = time.perf_counter()
     ranked = state.get("reranked") or []
@@ -413,19 +419,22 @@ def _grade(state: RagState) -> RagState:
         if hit.text and hit.text.strip() and (threshold <= 0 or hit.score >= threshold)
     ]
     dropped = len(ranked) - len(results)
+    # compare 双侧覆盖（v4.1）：锚定车系在 top_k 内缺席 → 按侧补召回并交错
+    compare_covered = 0
+    if state.get("query_type") == "compare" and state.get("anchor_series_ids"):
+        results, compare_covered = _ensure_anchor_coverage(
+            state, results, state["anchor_series_ids"], state["top_k"]
+        )
     # 约束下推（v4 实测有效：valid-precision 0.5517→0.6992）：未点名车系 + 文本解析出
     # 硬约束 → 满足约束的证据优先。点名车系的车系问答不受影响（单答案意图）。
     if state.get("constraints") and not state.get("resolved_series"):
         results = _reorder_by_constraints(state["db"], results, state["constraints"])
-    # compare 双侧均衡/补召回：v4 两个实现实测均未提升 pair-coverage（0.439 →
-    # 0.4146/0.3659，Hit@5 还微降），根因是部分对比题的实体解析结果与锚定车系错位，
-    # 交错会放大错位——已回退，机制保留（_ensure_anchor_coverage/_balance_by_series）
-    # 供 v5 修正解析错位后再启用。
     final = results[: state["top_k"]]
     return {
         "results": final,
         "stages": [make_stage("grade", len(ranked), len(final), started,
                               {"dropped": dropped, "threshold": threshold if absolute else None,
+                               "compare_covered": compare_covered,
                                "constraint_reorder": bool(
                                    state.get("constraints") and not state.get("resolved_series"))})],
     }
