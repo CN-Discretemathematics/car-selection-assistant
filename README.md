@@ -230,7 +230,7 @@ backend/
 web/
   app/            # Next.js 页面（选车 / 对比 / 详情 / 管理后台 / ops）
   lib/            # API 客户端与触发词
-skills/           # 开发工作流沉淀（数据校验 / 参数归一化 / 端到端验证）
+skills/           # 开发工作流沉淀（数据校验 / 参数归一化 / 端到端验证 / 分支同步）
 deploy/           # Docker Compose、前后端 Dockerfile、Nginx 反向代理配置
 reviewer/         # 独立代码审查 Agent（密钥扫描器 + 审查规范）
 docs/             # 运维手册（凭据轮换等）
