@@ -4,15 +4,18 @@
 #       因此容器内同时跑 nginx（静态/代理）与 next start；也可以只用 node + nginx 主机反代。
 FROM node:22-slim AS build
 WORKDIR /srv/carsel/web
-# 国内镜像源：npmmirror（pnpm 锁文件按 integrity 校验，registry 切换不影响 --frozen-lockfile）
-ENV npm_config_registry=https://registry.npmmirror.com \
-    COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+# 国内镜像源：npmmirror。注意（2026-09-13 实测）：新版 pnpm 不认 npm_config_registry
+# 环境变量——只设 ENV 时 174 次请求仍走 registry.npmjs.org（大陆节点不可达）导致构建
+# 超时失败，必须把 registry 落到 .npmrc；COREPACK_NPM_REGISTRY 供 corepack 取 pnpm 本体。
+ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
 # 构建期注入后端地址（评审 N1）：next.config 的 /api/v1 rewrite 在 build 阶段固化，
 # 容器内浏览器端必须指向 api 服务；SSR 的 BACKEND_URL 在运行时仍可覆盖
 ARG BACKEND_URL=http://api:8000
 ENV BACKEND_URL=${BACKEND_URL}
 COPY web/package.json web/pnpm-lock.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile
+RUN corepack enable \
+ && printf 'registry=https://registry.npmmirror.com\n' > /root/.npmrc \
+ && pnpm install --frozen-lockfile
 COPY web/ ./
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm run build
@@ -25,4 +28,7 @@ COPY --from=build /srv/carsel/web/node_modules ./node_modules
 COPY --from=build /srv/carsel/web/package.json ./package.json
 COPY --from=build /srv/carsel/web/public ./public
 EXPOSE 3000
-CMD ["sh", "-c", "corepack enable && pnpm exec next start -p 3000"]
+# 运行时直接调用镜像内的 next 二进制（node_modules 已随镜像带入）：
+# 不用 corepack/pnpm——它们会在容器启动时联网下载 pnpm 本体，大陆节点不可达时
+# 表现为「容器 Up 但 3000 无响应、日志空白」（2026-09-13 实测）
+CMD ["node", "node_modules/next/dist/bin/next", "start", "-p", "3000"]
