@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     dev_echo_codes: bool = False  # 仅开发模式：注册/登录响应回显验证码；生产必须为 false
     auth_token_ttl_seconds: int = 30 * 86400
     auth_code_ttl_seconds: int = 300
-    # 管理后台：独立凭据由运维经 KMS 注入（Bearer token），不开放注册；
+    # 管理后台：独立凭据由运维经环境变量注入（Bearer token），不开放注册；
     # 为空时管理后台接口返回 503（未配置）
     admin_api_token: str = ""
     # 云 Redis（会话/限流/验证码/令牌的生产存储；为空时回退进程内存储）

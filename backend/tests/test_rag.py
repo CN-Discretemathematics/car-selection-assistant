@@ -599,3 +599,118 @@ def test_dense_watermark_fresh_when_months_match():
     assert status["dense"]["stale"] is False
     assert status["dense"]["stale_reason"] is None
 
+
+# ── 评测 v4：约束解析 / compare 双侧均衡 / 约束下推重排 ─────────────────────
+def test_parse_constraints():
+    from app.rag.pipeline import _parse_constraints
+
+    assert _parse_constraints("预算15万，要纯电SUV，6座以上，有推荐吗") == {
+        "budget_max": 150000, "energy_type": "BEV", "body_type": "suv", "passengers": 6,
+    }
+    assert _parse_constraints("想要增程式的车") == {"energy_type": "EREV"}
+    assert _parse_constraints("新能源轿车有哪些") == {"new_energy": True, "body_type": "sedan"}
+    assert _parse_constraints("看看车") == {}  # 无约束不触发重排
+    # 评审 C2：否定门控与预算方向语义（此前「不要SUV」被判成 SUV、「以上」被判成上限）
+    assert _parse_constraints("不要SUV了，看看15万以内的轿车") == {
+        "budget_max": 150000, "body_type": "sedan",
+    }
+    parsed_min = _parse_constraints("20万以上的MPV有哪些")
+    assert "budget_max" not in parsed_min, "「以上」是下限，不得产生预算上限"
+    assert parsed_min.get("budget_min") == 200000
+    assert _parse_constraints("销量30万的轿车有哪些") == {"body_type": "sedan"}, "裸「N万」非预算语境不得误判"
+    assert _parse_constraints("10座以上的MPV")["passengers"] == 10, "座位数须取完整数字（旧正则「10座」会取成 0）"
+    # 评审 R4#3：预算语境窗口放宽（「预算在/预算大概」+数字 也算）
+    assert _parse_constraints("预算在15万左右的轿车")["budget_max"] == 150000
+    assert _parse_constraints("预算大概15万的SUV")["budget_max"] == 150000
+    # 评审 R4#1：「非常」不是否定（「非常想要SUV」仍解析出 SUV）
+    assert _parse_constraints("非常想要SUV")["body_type"] == "suv"
+    # 评审 R4#1：对比句不被 4 字窗口跨词吞掉
+    assert _parse_constraints("不要轿车要看SUV")["body_type"] == "suv"
+
+
+def test_balance_by_series_interleaves():
+    from app.rag.pipeline import _balance_by_series
+
+    h1a = SearchResult(chunk_id="1a", score=0.9, text="a1", kind="variant_spec", series_id=1)
+    h1b = SearchResult(chunk_id="1b", score=0.8, text="a2", kind="variant_spec", series_id=1)
+    h2a = SearchResult(chunk_id="2a", score=0.7, text="b1", kind="variant_spec", series_id=2)
+    # 单侧挤占：交错后双侧都在前两名
+    balanced = _balance_by_series([h1a, h1b, h2a], [1, 2])
+    assert [h.chunk_id for h in balanced[:2]] == ["1a", "2a"]
+    assert [h.chunk_id for h in balanced] == ["1a", "2a", "1b"]
+    # 非对比场景 / 单锚点：原序不动
+    assert _balance_by_series([h1a, h1b], [1]) == [h1a, h1b]
+
+
+def test_ensure_anchor_coverage_adds_missing_side(monkeypatch):
+    """评测 v4.1：锚定车系在 top_k 内缺席时按侧补召回（对比题 pair-coverage 的真正根因）。"""
+    import app.rag.service as rag_service
+    from app.rag.pipeline import _ensure_anchor_coverage
+
+    class FakeBackend:
+        def search(self, query, filters=None, top_k=5):
+            sid = (filters or {}).get("series_id")
+            return [SearchResult(chunk_id=f"c{sid}", score=0.5, text=f"车系{sid}证据",
+                                 kind="variant_spec", series_id=sid)]
+
+    monkeypatch.setattr(rag_service, "get_sparse_backend", lambda: FakeBackend())
+    state = {"entity_query": "对比 A 和 B", "query": "对比 A 和 B"}
+    present = SearchResult(chunk_id="p1", score=0.9, text="A侧证据", kind="variant_spec", series_id=1)
+    out, added = _ensure_anchor_coverage(state, [present], [1, 2], 5)
+    assert added == 1, "top_k 内缺席的侧数量"
+    got = {h.series_id for h in out[:5]}
+    assert got == {1, 2}, "缺席侧必须补召回进入 top_k"
+    assert out[0].series_id == 2, "补召回的证据插在前部，先于原有结果"
+
+
+def test_ensure_anchor_coverage_noop_when_both_in_topk(monkeypatch):
+    """双侧本就在 top_k 内：零扰动（不触发补召回）。"""
+    import app.rag.service as rag_service
+    from app.rag.pipeline import _ensure_anchor_coverage
+
+    def _boom(*a, **k):
+        raise AssertionError("双侧在场时不应触发补召回")
+
+    monkeypatch.setattr(rag_service, "get_sparse_backend", _boom)
+    h1 = SearchResult(chunk_id="1a", score=0.9, text="A侧", kind="variant_spec", series_id=1)
+    h2 = SearchResult(chunk_id="2a", score=0.8, text="B侧", kind="variant_spec", series_id=2)
+    out, added = _ensure_anchor_coverage({"query": "q"}, [h1, h2], [1, 2], 5)
+    assert added == 0 and out == [h1, h2]
+
+
+def test_reorder_by_constraints_puts_valid_first(monkeypatch):
+    import app.catalog.series_constraints as sc
+    from app.rag.pipeline import _reorder_by_constraints
+
+    attrs = {
+        1: {"name": "纯电SUV", "brand_id": 1, "body_type": "suv", "energy_types": {"BEV"},
+            "min_price": 120000.0, "max_seats": 5},
+        2: {"name": "燃油轿车", "brand_id": 1, "body_type": "sedan", "energy_types": {"ICE"},
+            "min_price": 200000.0, "max_seats": 5},
+    }
+    monkeypatch.setattr(sc, "load_series_attrs", lambda db, sids=None: attrs)
+    invalid = SearchResult(chunk_id="2a", score=0.9, text="燃油车", kind="variant_spec", series_id=2)
+    valid = SearchResult(chunk_id="1a", score=0.8, text="纯电车", kind="variant_spec", series_id=1)
+    out = _reorder_by_constraints(db=None, results=[invalid, valid],
+                                  constraints={"budget_max": 150000, "energy_type": "BEV",
+                                               "body_type": "suv"})
+    assert [h.chunk_id for h in out] == ["1a", "2a"], "满足约束的证据应排到前面"
+
+
+def test_compare_query_covers_both_series(db_session: Session):
+    """评测 v4 端到端：对比类查询 top-2 必须双侧车系都在场（pair-coverage 修复）。"""
+    ids = _seed(db_session)
+    rag.reset_index()
+    results = rag.search(db_session, "对比 家用SUV标准版 和 通勤轿车舒适版 的配置差异", top_k=5)
+    top2 = {r.series_id for r in results[:2]}
+    assert top2 == {ids["suv"], ids["sedan"]}, f"双侧证据都应在 top-2：{top2}"
+
+
+def test_recommend_query_prefers_constraint_satisfying(db_session: Session):
+    """评测 v4 端到端：未点名车系 + 硬约束 → 满足约束的车系证据优先。"""
+    ids = _seed(db_session)
+    rag.reset_index()
+    results = rag.search(db_session, "预算15万，要纯电SUV，5座以上，有推荐吗", top_k=3)
+    assert results, "应命中证据"
+    assert results[0].series_id == ids["suv"], "燃油轿车证据不得排在纯电SUV之前（约束满足度优先）"
+

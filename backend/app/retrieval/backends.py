@@ -271,5 +271,5 @@ def build_backend(backend: str) -> RetrievalBackend:
 
         if MILVUS_URI and MILVUS_TOKEN:
             return ZillizRestRetriever()
-        raise RuntimeError("Milvus/Zilliz 后端需要 MILVUS_URI 与 MILVUS_TOKEN（生产经 KMS 注入）")
+        raise RuntimeError("Milvus/Zilliz 后端需要 MILVUS_URI 与 MILVUS_TOKEN（生产经环境变量注入）")
     return InMemoryRetriever()

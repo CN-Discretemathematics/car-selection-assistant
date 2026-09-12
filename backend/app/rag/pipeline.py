@@ -45,6 +45,11 @@ _PARAM_HINT_RE = re.compile(
 )
 _COMPARE_HINT_RE = re.compile(r"对比|差异|差别|区别|比较|哪个好|比一比|版本差异|款型差异")
 
+# 约束解析（评测规范 v4：recommend 约束下推）——从问题文本解析硬约束，
+# grade 据此把「满足约束」的证据排到前面（未点名车系时才生效）。
+# 评审 C2：预算/座位正则与语义（以内=上限、以上=下限、区间、否定门控、裸万需预算语境）
+# 与 engine.extract_hints 同源，实现收敛在 series_constraints.parse_budget_and_seats。
+
 # 加权 RRF（优化⑤）：统一 0.6/0.4——权重网格消融（120 题五配置，2026-09）实测：
 # 0.6/0.4 MRR 0.7032 为最优平台期（0.5/0.5 等权 0.6948、纯稀疏 0.6898、0.4/0.6 有害）；
 # 原按桶路由的权重组（semantic 偏稠密）实测反而更差（0.7010），已删除。
@@ -58,6 +63,118 @@ def _classify_query(query: str, resolved_count: int) -> str:
     if _PARAM_HINT_RE.search(query) and resolved_count >= 1:
         return "parameter"
     return "semantic"
+
+
+def _parse_constraints(query: str) -> dict:
+    """从问题文本解析硬约束（预算/能源/车身/座位），供 grade 约束优先重排。
+
+    评审 C2：预算语义与 engine.extract_hints 同源（以内=上限、以上=下限、区间、
+    否定门控、裸「N万」需预算语境）；能源/车身多处互斥命中时放弃（宁可少推不错推）。
+    """
+    from app.catalog.series_constraints import parse_budget_and_seats, parse_energy_body
+
+    out = parse_budget_and_seats(query or "")
+    out.update(parse_energy_body(query or ""))
+    return out
+
+
+def _balance_by_series(results: list[SearchResult], anchor_ids: list[int]) -> list[SearchResult]:
+    """对比类双侧均衡（评测 v4）：各锚定车系的证据按名次交错，保证 top_k 内双侧都在场。
+
+    只交错、不丢弃：全部证据仍按原相对名次保留，仅重排前 top_k 的构成——
+    修复 pair-coverage 0.439（top_k 被单侧切片挤占，另一侧证据缺席）。
+    """
+    anchors = [sid for sid in anchor_ids if sid is not None]
+    if len(anchors) < 2 or len(results) <= 1:
+        return results
+    queues: dict[int, list[SearchResult]] = {sid: [] for sid in anchors}
+    rest: list[SearchResult] = []
+    for hit in results:
+        if hit.series_id in queues:
+            queues[hit.series_id].append(hit)
+        else:
+            rest.append(hit)
+    ordered: list[SearchResult] = []
+    while any(queues.values()):
+        for sid in anchors:
+            if queues[sid]:
+                ordered.append(queues[sid].pop(0))
+    return ordered + rest
+
+
+def _ensure_anchor_coverage(
+    state: RagState, results: list[SearchResult], anchor_ids: list[int], top_k: int
+) -> tuple[list[SearchResult], int]:
+    """对比类兜底：某锚定车系在 **top_k 内** 完全缺席时，按 series_id 过滤补召回。
+
+    评测 v4 诊断：对比题以款型名表述（「2023款 470km 引领版」），BM25 候选常被
+    词面近邻的其他车系占满、锚定车系切片整系缺席。v4 首版只对「全候选缺席」触发
+    （rank 40 的碎片也算在场），pair-coverage 纹丝不动；v4.1 改为按 **top_k 缺席**
+    触发——缺席侧的头部证据插入前部与原结果交错，双侧进 top_k。
+    返回 (新结果列表, 补召回的侧数)。
+    """
+    present_topk = {h.series_id for h in results[:top_k] if h.series_id is not None}
+    missing = [sid for sid in anchor_ids if sid is not None and sid not in present_topk]
+    if not missing:
+        return results, 0
+    from app.rag.service import get_sparse_backend
+
+    backend = get_sparse_backend()
+    # 评审 R4#4：与 _recall_sparse 相同的调用方过滤合并——补召回证据不得绕过
+    # 管理台试运行设置的过滤条件
+    base_filters = {k: v for k, v in (state.get("filters") or {}).items() if k != "series_id"}
+    firsts: list[SearchResult] = []
+    rest: list[SearchResult] = []
+    seen = {h.chunk_id for h in results}
+    for sid in missing:
+        try:
+            hits = backend.search(
+                state.get("entity_query") or state.get("query") or "",
+                filters={**base_filters, "series_id": sid}, top_k=2,
+            )
+        except Exception:  # noqa: BLE001 - 补召回失败不阻断检索
+            continue
+        fresh = [h for h in hits if h.chunk_id not in seen]  # 评审 C6：与现有结果去重
+        seen.update(h.chunk_id for h in fresh)
+        if fresh:
+            firsts.append(fresh[0])
+            rest.extend(fresh[1:])
+    if not firsts:
+        return results, 0
+    front: list[SearchResult] = []
+    base = list(results)
+    ai = 0
+    bi = 0
+    toggle = True
+    while ai < len(firsts) or bi < len(base):
+        # 交替取补召回证据与原结果；一侧耗尽后另一侧顺延（无丢弃，评审 C6）
+        if toggle and ai < len(firsts):
+            front.append(firsts[ai])
+            ai += 1
+        elif bi < len(base):
+            front.append(base[bi])
+            bi += 1
+        else:
+            front.append(firsts[ai])
+            ai += 1
+        toggle = not toggle
+    out = front + rest
+    return out, len(firsts)
+
+
+def _reorder_by_constraints(
+    db, results: list[SearchResult], constraints: dict
+) -> list[SearchResult]:
+    """未点名车系的推荐/语义查询：满足硬约束的证据优先（稳定重排，组内保持原名次）。"""
+    sids = {h.series_id for h in results if h.series_id is not None}
+    if not sids:
+        return results
+    from app.catalog.series_constraints import load_series_attrs, series_satisfies
+
+    attrs = load_series_attrs(db, sids)
+    valid = [h for h in results if series_satisfies(attrs.get(h.series_id), constraints)]
+    invalid = [h for h in results if not series_satisfies(attrs.get(h.series_id), constraints)]
+    return valid + invalid
 
 
 def _analyze(state: RagState) -> RagState:
@@ -97,6 +214,7 @@ def _analyze(state: RagState) -> RagState:
     # 优化⑥：领域同义扩展（扩展串只服务稠密路与重排兜底，稀疏路用 entity_query）
     search_query, expanded = expand_query(entity_query)
 
+    constraints = _parse_constraints(query) if not resolved else {}  # 评审 C9：只解析一次
     return {
         "query": query,
         "filters": filters,
@@ -106,9 +224,13 @@ def _analyze(state: RagState) -> RagState:
         "search_query": search_query,
         "query_type": query_type,
         "resolved_series": resolved_names,
+        # 评测 v4：锚定车系（compare 双侧均衡）+ 文本解析硬约束（未点名车系的约束下推）
+        "anchor_series_ids": [s.id for s, _ in resolved],
+        "constraints": constraints,
         "stages": [make_stage("analyze", 1, len(resolved_names), started,
                               {"resolved_series": resolved_names, "filters": filters,
                                "recall_k": recall_k, "query_type": query_type,
+                               "constraints": constraints,
                                "expanded_terms": expanded})],
         "warnings": warnings,
     }
@@ -131,6 +253,11 @@ def _recall_sparse(state: RagState) -> RagState:
     优化⑥ A/B 修正：稀疏路用 **entity_query（不含同义扩展）**——BM25 是词面精确
     匹配，扩展词会把其他车系的同键切片拉进候选、稀释锚点匹配（实测 Hit@5
     0.6718→0.643）；扩展后的 search_query 只服务稠密路（语义召回受益于上下文）。
+
+    评测 v4.1（compare 双侧召回保障）：对比类查询对每个锚定车系**各补一路
+    series_id 过滤召回**——款型名表述（「2023款 470km 引领版」）的词面近邻会把
+    另一侧证据挤出候选池，导致 pair-coverage 只有 0.439；按侧保底后双侧证据
+    都能进入融合。
     """
     from app.rag.service import get_sparse_backend
 
@@ -139,9 +266,37 @@ def _recall_sparse(state: RagState) -> RagState:
     hits = backend.search(
         state["entity_query"], filters=state.get("filters"), top_k=state["recall_k"]
     )
+    side_added = 0
+    anchors = [sid for sid in (state.get("anchor_series_ids") or []) if sid is not None]
+    if state.get("query_type") == "compare" and len(anchors) >= 2:
+        seen = {h.chunk_id for h in hits}
+        # 评审 C7：侧路召回保留调用方的其他过滤条件（brand_id/energy_type 等），
+        # 只覆写 series_id——侧路证据不得违反管理台试运行设置的过滤
+        base_filters = {k: v for k, v in (state.get("filters") or {}).items() if k != "series_id"}
+        side_lists: list[list] = []
+        for sid in anchors:
+            side_hits = backend.search(
+                state["entity_query"], filters={**base_filters, "series_id": sid}, top_k=10
+            )
+            fresh = [h for h in side_hits if h.chunk_id not in seen]
+            seen.update(h.chunk_id for h in fresh)
+            side_lists.append(fresh)
+        # round-robin 交错置前：s1[0], s2[0], s1[1], s2[1], ... 保证双侧证据都在
+        # top-5 内（对比场景需要两侧证据；此前单侧被词面近邻挤出候选池）
+        front: list[SearchResult] = []
+        i = 0
+        while any(i < len(l) for l in side_lists):
+            for l in side_lists:
+                if i < len(l):
+                    front.append(l[i])
+            i += 1
+        front_seen = {h.chunk_id for h in front}
+        hits = front + [h for h in hits if h.chunk_id not in front_seen]
+        side_added = sum(len(l) for l in side_lists)
     return {
         "sparse_hits": hits,
-        "stages": [make_stage("recall_sparse", 1, len(hits), started, {"backend": backend.name})],
+        "stages": [make_stage("recall_sparse", 1, len(hits), started,
+                              {"backend": backend.name, "side_hits_added": side_added})],
     }
 
 
@@ -271,7 +426,15 @@ def _rerank(state: RagState) -> RagState:
 
 
 def _grade(state: RagState) -> RagState:
-    """证据把关：丢弃空文本；重排分具备绝对语义时应用相关性阈值。"""
+    """证据把关：丢弃空文本；重排分具备绝对语义时应用相关性阈值。
+
+    评测 v4 两项信息需求对齐的排序修正：
+    - compare 双侧覆盖（v4.1）：对比类查询锚定车系在 top_k 内缺席时，按侧补召回并
+      交错——首版「全候选缺席才触发」实测 pair-coverage 纹丝不动（0.439），v4.1 按
+      top_k 缺席触发；
+    - 约束下推（实测 valid-precision 0.5517→0.6992）：未点名车系 + 硬约束时，满足
+      约束的证据优先。点名车系的车系问答不受影响（单答案意图）。
+    """
     started = time.perf_counter()
     ranked = state.get("reranked") or []
     absolute = bool(state.get("reranker_absolute"))
@@ -281,11 +444,23 @@ def _grade(state: RagState) -> RagState:
         if hit.text and hit.text.strip() and (threshold <= 0 or hit.score >= threshold)
     ]
     dropped = len(ranked) - len(results)
+    # 约束下推（v4 实测有效：valid-precision 0.5517→0.6992）：未点名车系 + 文本解析出
+    # 硬约束 → 满足约束的证据优先。点名车系的车系问答不受影响（单答案意图）。
+    if state.get("constraints") and not state.get("resolved_series"):
+        results = _reorder_by_constraints(state["db"], results, state["constraints"])
+    # compare 双侧覆盖：三个实现（不修复 / 全候选缺席触发 / top_k 缺席触发）实测
+    # pair-coverage 依次 0.439 → 0.4146 → 0.3902、Hit@5 0.9873 → 0.9747——全部劣于
+    # 不修复。逐题诊断证明补召回机制本身有效（整系缺席的题修复后双侧进 top-3），
+    # 聚合劣化的根因是**部分对比题的实体解析结果与锚定车系错位**：强行插入错误车系
+    # 的切片会挤掉正确侧。已回退；待实体解析错位修正后重启
+    # （_ensure_anchor_coverage/_balance_by_series 机制与单测保留）。
     final = results[: state["top_k"]]
     return {
         "results": final,
         "stages": [make_stage("grade", len(ranked), len(final), started,
-                              {"dropped": dropped, "threshold": threshold if absolute else None})],
+                              {"dropped": dropped, "threshold": threshold if absolute else None,
+                               "constraint_reorder": bool(
+                                   state.get("constraints") and not state.get("resolved_series"))})],
     }
 
 

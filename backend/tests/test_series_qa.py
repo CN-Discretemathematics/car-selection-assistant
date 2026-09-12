@@ -1,20 +1,25 @@
 """具体车系问答测试（app/agent/series_qa.py 解析/判定/回答 + 引擎接入）。"""
 from __future__ import annotations
 
+import re
+from datetime import date
+
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.agent.series_qa import (
+    asked_missing_param_note,
     asks_variant_diff,
     build_series_qa_answer,
     build_variant_diff_answer,
+    missing_param_labels,
     negates_series,
     should_answer,
 )
 from app.catalog.series_index import normalize_name, resolve_series, series_headline
 from app.catalog.services import latest_full_month
 from app.common.enums import MISSING_VALUE_LABEL
-from app.common.models import Brand, VehicleSeries, VehicleVariant
+from app.common.models import Brand, VehicleModelYear, VehicleSeries, VehicleVariant
 from tests.seed import make_brand, make_sales, make_series, make_source, make_variant, make_year
 
 
@@ -64,6 +69,51 @@ def test_normalize_name():
     assert normalize_name("腾势·Z9GT") == "腾势z9gt"
 
 
+def test_unanswerable_param_marks_missing(db_session: Session):
+    """评测 v3 不可回答题（诚实性）：问到的维度 DB 完全没有 → 必须显式「官方资料未披露」。
+
+    修复前 probe_facts 对「DB 完全没有的维度」沉默跳过，回答是一份不回应问题的
+    车系画像（不可回答题拒答判定 0/60 通过）。
+    """
+    ids = _seed_two_series(db_session)
+    resolved = resolve_series(db_session, "卡罗拉锐放 的电池容量是多少")
+    assert [s.id for s, _ in resolved] == [ids["raf"]]
+    answer = build_series_qa_answer(db_session, resolved, "卡罗拉锐放 的电池容量是多少")
+    assert "电池与充电" in answer
+    assert "官方资料未披露" in answer
+
+    # 同维度在别的车系有数据，但锚定车系没有：仍按锚定车系判定
+    z9_answer = build_series_qa_answer(db_session, resolve_series(db_session, "腾势Z9GT 的电池容量是多少"),
+                                       "腾势Z9GT 的电池容量是多少")
+    assert "官方资料未披露" in z9_answer
+
+    # 车系有该维度数据：正常作答，不误标
+    ok_answer = build_series_qa_answer(db_session, resolve_series(db_session, "腾势Z9GT 的续航是多少"),
+                                       "腾势Z9GT 的续航是多少")
+    assert "官方资料未披露" not in ok_answer
+    assert "你问到的相关参数" in ok_answer
+
+
+def test_missing_param_labels_unit():
+    facts = [("CLTC综合续航(km)", "710", "km", "CLTC")]
+    assert missing_param_labels(facts, "电池容量是多少") == ["电池与充电"]
+    assert missing_param_labels(facts, "续航是多少") == []  # 该维度有数据：不标缺失
+
+
+def test_asked_missing_param_note_key_level():
+    """v6 按键级未披露：维度有数据（油耗）但问的是缺失的键（CLTC 续航）→ 显式提示。"""
+    facts = [("WLTC综合油耗(L/100km)", "4.56", "L/100km", "WLTC")]
+    note = asked_missing_param_note(facts, "卡罗拉锐放 的CLTC 纯电续航是多少")
+    assert note == "CLTC 纯电续航：官方资料未披露。"
+    # 泛问（不含具体键问法）不触发
+    assert asked_missing_param_note(facts, "卡罗拉锐放 的油耗是多少") is None
+    # 键存在：不提示
+    facts2 = facts + [("CLTC纯电续航里程(km)", "610", "km", None)]
+    assert asked_missing_param_note(facts2, "卡罗拉锐放 的CLTC 纯电续航是多少") is None
+    # 键与问法同现两次只提示一次
+    assert asked_missing_param_note(facts, "CLTC 纯电续航和 CLTC 纯电续航") == "CLTC 纯电续航：官方资料未披露。"
+
+
 def test_resolve_and_dedupe_longest_wins(db_session: Session):
     ids = _seed_two_series(db_session)
     resolved = resolve_series(db_session, "腾势z9GT和丰田卡罗拉锐放相比有什么优点？")
@@ -72,6 +122,76 @@ def test_resolve_and_dedupe_longest_wins(db_session: Session):
     assert [s.id for s, _ in resolve_series(db_session, "Z9GT怎么样")] == [ids["z9"]]
     assert [s.id for s, _ in resolve_series(db_session, "丰田卡罗拉锐放怎么样")] == [ids["raf"]]
     assert resolve_series(db_session, "帮我推荐20万以内的SUV") == []
+
+
+def _seed_production_style_variant(db_session: Session, series_id: int, display_name: str) -> VehicleVariant:
+    """按生产风格种一个款型（display_name 不含车系名，如「2023款 470km 引领版」）。"""
+    series = db_session.get(VehicleSeries, series_id)
+    m = re.match(r"(\d{4})款", display_name)
+    year_name = f"{m.group(1)}款" if m else "2023款"
+    year = db_session.query(VehicleModelYear).filter_by(series_id=series_id, year_name=year_name).first()
+    if year is None:
+        year = make_year(db_session, series, year_name=year_name)
+    variant = VehicleVariant(
+        series_id=series_id,
+        model_year_id=year.id,
+        display_name=display_name,
+        config_version=display_name,
+        powertrain="纯电",
+        drivetrain="两驱",
+        energy_type="BEV",
+        body_type=series.body_type,
+        status="on_sale",
+        effective_from=date(2025, 1, 1),
+    )
+    db_session.add(variant)
+    db_session.commit()
+    return variant
+
+
+def test_resolve_variant_display_name(db_session: Session):
+    """v6.1：对比/参数题以款型名表述（不含车系名）也能解析——compare 解析准确率
+    34%（27/79）的根因修复：名称索引扩展在售款型显示名 → 车系。"""
+    ids = _seed_two_series(db_session)
+    _seed_production_style_variant(db_session, ids["z9"], "2023款 470km 引领版")
+    resolved = resolve_series(
+        db_session, "帮我对比 2023款 470km 引领版 和 丰田卡罗拉锐放 的配置差异"
+    )
+    got = [s.id for s, _ in resolved]
+    assert ids["z9"] in got and ids["raf"] in got, got
+
+
+def test_resolve_short_variant_name_ignored(db_session: Session):
+    """归一化后过短（<6）的款型名不入索引：防「M5」「Pro」这类跨车系撞名误配。"""
+    ids = _seed_two_series(db_session)
+    _seed_production_style_variant(db_session, ids["z9"], "M5")
+    assert resolve_series(db_session, "M5 怎么样") == []
+    # 车系名仍正常解析（不受过短款型名影响）
+    assert [s.id for s, _ in resolve_series(db_session, "腾势Z9GT 怎么样")] == [ids["z9"]]
+
+
+def test_resolve_series_and_variant_dedup(db_session: Session):
+    """车系名与该车系款型名同句出现：去重保序，不解析成两个实体（避免误判为对比题）。"""
+    ids = _seed_two_series(db_session)
+    _seed_production_style_variant(db_session, ids["z9"], "2025款 四驱版")
+    resolved = resolve_series(db_session, "腾势Z9GT 的 2025款 四驱版 怎么样")
+    assert [s.id for s, _ in resolved] == [ids["z9"]]
+
+
+def test_resolve_ambiguous_variant_name_skipped(db_session: Session):
+    """评审 B1 BLOCKER 回归：跨车系撞名的款型名不入索引——「车系名 + 通用款型名」
+    不得制造幽灵第二实体（生产库实测 103 个归一化款型名跨车系共享）。"""
+    ids = _seed_two_series(db_session)
+    _seed_production_style_variant(db_session, ids["z9"], "2026款 Ultra")
+    _seed_production_style_variant(db_session, ids["raf"], "2026款 Ultra")
+    # 车系名 + 撞名款型名：只解析到车系名对应的车系（款型名歧义被跳过）
+    resolved = resolve_series(db_session, "腾势Z9GT 的 2026款 Ultra 怎么样")
+    assert [s.id for s, _ in resolved] == [ids["z9"]]
+    # 撞名款型名单独出现：无法消歧 → 不解析（宁可不答也不错答）
+    assert resolve_series(db_session, "2026款 Ultra 怎么样") == []
+    # 唯一归属的款型名仍正常解析
+    _seed_production_style_variant(db_session, ids["raf"], "2024款 专属定制版")
+    assert [s.id for s, _ in resolve_series(db_session, "2024款 专属定制版 怎么样")] == [ids["raf"]]
 
 
 def test_should_answer_rules(db_session: Session):

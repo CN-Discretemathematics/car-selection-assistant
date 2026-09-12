@@ -32,11 +32,19 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # tools/（复用问题生成器的措辞映射）
+
+from gen_eval_questions import (  # noqa: E402  # 措辞映射与生成器单一事实源
+    HINT_TO_ENERGY,
+    HEAD_LABEL_TO_BODY,
+    _PARAM_KEYS,
+)
+from app.catalog.series_constraints import load_series_attrs, series_satisfies as _series_satisfies  # noqa: E402
 
 from sqlalchemy import select  # noqa: E402
 
 from app.common.database import get_session_factory  # noqa: E402
-from app.common.models import SourceDocument, VehicleVariant  # noqa: E402
+from app.common.models import Brand, OfficialPrice, SourceDocument, SpecFact, VehicleSeries, VehicleVariant  # noqa: E402
 from app.rag.chunking import chunk_stats, split_text  # noqa: E402
 from app.rag.ingest import build_chunks  # noqa: E402
 from app.rag.rerank import PassThroughReranker, rrf_fuse  # noqa: E402
@@ -100,6 +108,179 @@ def _metrics(ranked_relevance: list[list[bool]], relevant_counts: list[int], k: 
     }
 
 
+# ── 口径修正指标（v2，2026-09）：信息需求对齐判定 ──────────────────────────────
+# 旧口径的三处失真（2026-09-11 复盘）：
+# 1) semantic/recommend 的「单锚点」判定把一题多解说成不相关 → 约束满足度判定；
+# 2) Recall@5 分母 = 相关车系全部切片（均值 15 条，结构上限仅 0.4773）→ 参数题改
+#    fact-coverage（实际信息需求是"那条事实"），并把结构上限写入报告供对照；
+# 3) compare 需要两侧证据都在场 → pair-coverage。
+# 旧指标全部保留并排输出，保证与历史报告可比。
+
+
+def _build_eval_context(db) -> dict:
+    """预载判定所需的车系属性 / 参数事实 / 款型映射（一次性，全部策略共用）。
+
+    车系属性装载走 app/catalog/series_constraints 的共享实现（与流水线 grade 同源）；
+    参数事实（含单位，供 fact-coverage 的 needle 构造）为本评测专属。
+    """
+    param_keys = {key for key, _phrase in _PARAM_KEYS}
+    series_attrs = load_series_attrs(db)
+    variants = db.scalars(
+        select(VehicleVariant).where(VehicleVariant.status == "on_sale")
+    ).all()
+    facts: dict[int, dict[str, tuple[str, str | None]]] = {}
+    for vid, key, value, unit in db.execute(
+        select(SpecFact.variant_id, SpecFact.fact_key, SpecFact.fact_value, SpecFact.unit)
+        .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
+        .where(VehicleVariant.status == "on_sale", SpecFact.fact_key.in_(param_keys))
+    ).all():
+        if value:
+            facts.setdefault(vid, {})[key] = (value, unit)
+    variants_by_series: dict[int, list[int]] = {}
+    for v in variants:
+        variants_by_series.setdefault(v.series_id, []).append(v.id)
+    brand_names = {b.id: b.name for b in db.scalars(select(Brand)).all()}
+    return {
+        "series_attrs": series_attrs,
+        "facts": facts,
+        "variants_by_series": variants_by_series,
+        "brand_names": brand_names,
+    }
+
+
+# _series_satisfies 自 gen_eval_questions 导入（出题与评测共用同一实现，见文件头 import）
+
+
+def _semantic_constraints(q: dict) -> dict:
+    """从 semantic_fuzzy 问题文本反解结构化约束（措辞映射与生成器同源）。
+
+    评审 E16：多处命中且互相冲突时放弃该约束（第一处命中可能来自车系档案自由
+    文本而非用户意图——宁可少判不可错判）。
+    """
+    text = q.get("text") or ""
+    out: dict = {}
+    energies = {energy for hint, energy in HINT_TO_ENERGY.items() if hint.rstrip("的") in text}
+    if len(energies) == 1:
+        out["energy_type"] = next(iter(energies))
+    bodies = {body for label, body in HEAD_LABEL_TO_BODY.items() if label in text}
+    if len(bodies) == 1:
+        out["body_type"] = next(iter(bodies))
+    return out
+
+
+def _judge_mode(q: dict, ctx: dict) -> str | None:
+    """每题的 v2 判定模式：parameter→fact；compare→pair；未点名车系的推荐/语义→constraint；
+    品牌开放题→brand；点名车系的车系问答沿用 series 级旧指标（单答案意图，口径本就正确）。"""
+    bucket = q.get("bucket")
+    expect = q.get("expect") or {}
+    anchors = q.get("anchors") or {}
+    sid = anchors.get("series_id")
+    text = q.get("text") or ""
+    if bucket == "parameter":
+        return "fact"
+    if bucket == "compare":
+        return "pair"
+    if bucket == "semantic":
+        return "constraint" if _semantic_constraints(q) else None
+    if expect.get("brand_name") and not sid:
+        return "brand"
+    name = ctx["series_attrs"].get(int(sid), {}).get("name") if sid else None
+    if sid and name and name in text:
+        return None
+    if any(k in expect for k in ("budget_max", "energy_type", "body_type", "passengers")):
+        return "constraint"
+    return None
+
+
+def _fact_needles(fact_key: str, value: str, unit: str | None) -> list[str]:
+    """事实在证据文本中的可能形态：款型切片「键 = 值」与摘要/文本「值 单位」。"""
+    needles = [f"{fact_key} = {value}"]
+    u = (unit or "").strip()
+    if u and not value.strip().endswith(u):
+        needles.append(f"{value} {u}")
+    return needles
+
+
+def _fact_coverage(q: dict, hits: list, ctx: dict, variant_series: dict[int, int], k: int) -> float | None:
+    """参数题的事实覆盖：相关车系（含锚定款型）的该参数值是否出现在 top-k 证据里。"""
+    key = (q.get("expect") or {}).get("fact_key")
+    if not key:
+        return None
+    rel_series = _relevant_ids(q, variant_series)
+    needles: list[str] = []
+    for sid in rel_series:
+        for vid in ctx["variants_by_series"].get(sid, []):
+            f = ctx["facts"].get(vid, {}).get(key)
+            if f:
+                needles.extend(_fact_needles(key, f[0], f[1]))
+    if not needles:
+        return None  # 数据里没有该参数：覆盖无从谈起（不可回答题另测）
+    text = "\n".join(h.text for h in hits[:k])
+    return 1.0 if any(n in text for n in needles) else 0.0
+
+
+def _constraint_metrics(q: dict, hits: list, ctx: dict, k: int) -> dict | None:
+    """推荐/语义题：检回车系满足问题约束即相关。返回 valid-hit / valid-precision / valid-MRR。"""
+    constraints = _semantic_constraints(q) if q.get("bucket") == "semantic" else (q.get("expect") or {})
+    if not any(c in constraints for c in ("budget_max", "budget_min", "energy_type", "body_type", "passengers")):
+        return None  # 只有软约束（用途/喜好）的问题不参与判定
+    valid = [1.0 if _series_satisfies(ctx["series_attrs"].get(h.series_id), constraints) else 0.0 for h in hits[:k]]
+    mrr = 0.0
+    for i, v in enumerate(valid):
+        if v:
+            mrr = 1.0 / (i + 1)
+            break
+    # 评审 E6：@K 标签随实际 k 参数化（--top-k ≠ 5 时不再错标 @5）
+    return {
+        f"valid_hit@{k}": 1.0 if any(valid) else 0.0,
+        f"valid_precision@{k}": round(sum(valid) / k, 4),
+        f"valid_mrr": round(mrr, 4),
+    }
+
+
+def _pair_coverage(q: dict, hits: list, variant_series: dict[int, int], k: int) -> float | None:
+    """对比题：两侧锚定车系的证据都必须在场（同车系款型对比不适用，series 级 Hit 已覆盖）。"""
+    anchor_vids = (q.get("expect") or {}).get("variant_ids") or (q.get("anchors") or {}).get("variant_ids") or []
+    need = {variant_series[int(v)] for v in anchor_vids if variant_series.get(int(v))}
+    if len(need) < 2:
+        return None
+    got = {h.series_id for h in hits[:k] if h.series_id is not None}
+    return 1.0 if need <= got else 0.0
+
+
+def _brand_hit(q: dict, hits: list, ctx: dict, k: int) -> float | None:
+    """品牌开放题：检回车系属于锚定品牌即相关（如「比亚迪有哪些在售新能源SUV」）。"""
+    brand_name = (q.get("expect") or {}).get("brand_name")
+    if not brand_name:
+        return None
+    want = {
+        sid for sid, a in ctx["series_attrs"].items()
+        if ctx["brand_names"].get(a.get("brand_id")) == brand_name
+    }
+    got = {h.series_id for h in hits[:k] if h.series_id is not None}
+    return 1.0 if want & got else 0.0
+
+
+def _v2_metrics_for_question(q: dict, hits: list, ctx: dict, variant_series: dict[int, int], top_k: int) -> dict:
+    mode = _judge_mode(q, ctx)
+    if mode == "fact":
+        cov = _fact_coverage(q, hits, ctx, variant_series, top_k)
+        return {} if cov is None else {f"fact_coverage@{top_k}": cov}
+    if mode == "constraint":
+        return _constraint_metrics(q, hits, ctx, top_k) or {}
+    if mode == "pair":
+        p = _pair_coverage(q, hits, variant_series, top_k)
+        return {} if p is None else {f"pair_coverage@{top_k}": p}
+    if mode == "brand":
+        b = _brand_hit(q, hits, ctx, top_k)
+        return {} if b is None else {f"brand_hit@{top_k}": b}
+    return {}
+
+
+def _mean(values: list) -> float | None:
+    return round(sum(values) / len(values), 4) if values else None
+
+
 def _run_strategy(
     name: str,
     search_fn,
@@ -107,12 +288,15 @@ def _run_strategy(
     variant_series: dict[int, int],
     chunks_by_series: dict[int, int],
     top_k: int,
+    ctx: dict | None = None,
 ) -> dict:
     ranked_flags: list[list[bool]] = []
     rel_counts: list[int] = []
     # 评审 ⑧：按查询类型分桶累积（parameter/recommend/semantic/compare）
     bucket_flags: dict[str, list[list[bool]]] = {}
     bucket_counts: dict[str, list[int]] = {}
+    v2_acc: dict[str, list] = {}
+    v2_by_bucket: dict[str, dict[str, list]] = {}
     started = time.perf_counter()
     for q in questions:
         rel_series = _relevant_ids(q, variant_series)
@@ -130,6 +314,11 @@ def _run_strategy(
         rel = sum(chunks_by_series.get(sid, 0) for sid in rel_series)
         rel_counts.append(rel)
         bucket_counts.setdefault(bucket, []).append(rel)
+        if ctx:
+            v2 = _v2_metrics_for_question(q, hits, ctx, variant_series, top_k)
+            for key, value in v2.items():
+                v2_acc.setdefault(key, []).append(value)
+                v2_by_bucket.setdefault(bucket, {}).setdefault(key, []).append(value)
     elapsed = round(time.perf_counter() - started, 1)
     out = {
         "strategy": name,
@@ -137,11 +326,20 @@ def _run_strategy(
         "elapsed_seconds": elapsed,
         f"@{top_k}": _metrics(ranked_flags, rel_counts, top_k),
         "@10": _metrics(ranked_flags, rel_counts, 10),
+        # 结构上限：Relate@k 的分母是相关车系全部切片，均值 15 条时上限远低于 1.0——
+        # 写入报告让 recall 永远能对着上限解读（2026-09-11 口径复盘）
+        "recall_ceiling": {
+            f"@{top_k}": _mean([min(top_k, rc) / rc for rc in rel_counts if rc]),
+            "@10": _mean([min(10, rc) / rc for rc in rel_counts if rc]),
+        },
+        "v2": {key: _mean(values) for key, values in sorted(v2_acc.items())},
+        "v2_questions": {key: len(values) for key, values in sorted(v2_acc.items())},
         "by_bucket": {
             bucket: {
                 "questions": len(flags),
                 f"@{top_k}": _metrics(flags, bucket_counts[bucket], top_k),
                 "@10": _metrics(flags, bucket_counts[bucket], 10),
+                "v2": {key: _mean(values) for key, values in sorted(v2_by_bucket.get(bucket, {}).items())},
             }
             for bucket, flags in sorted(bucket_flags.items())
         },
@@ -199,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
         variant_series = {
             v.id: v.series_id for v in db.scalars(select(VehicleVariant)).all()
         }
+        print("构建判定上下文（约束/事实预载）…")
+        eval_ctx = _build_eval_context(db)
         print("构建切片（load → chunk）…")
         chunks = build_chunks(db)
         need_noovl = (not args.only.strip()) or "sparse-nooverlap" in {
@@ -285,7 +485,7 @@ def main(argv: list[str] | None = None) -> int:
     for name, fn in strategies:
         print(f"评测策略 {name} …")
         try:
-            results.append(_run_strategy(name, fn, questions, variant_series, chunks_by_series, top_k))
+            results.append(_run_strategy(name, fn, questions, variant_series, chunks_by_series, top_k, eval_ctx))
         except Exception as err:  # noqa: BLE001 - 单策略失败不中断整体评测
             print(f"  失败：{type(err).__name__}: {str(err)[:200]}")
             results.append({"strategy": name, "error": f"{type(err).__name__}: {str(err)[:200]}"})
@@ -382,11 +582,50 @@ def _render_md(report: dict) -> str:
                 else:
                     cells.append(f"{bb[f'@{k}']['hit']} / {bb[f'@{k}']['mrr']}")
             lines.append(f"| {r['strategy']} | " + " | ".join(cells) + " |")
+    # 口径修正指标（v2）：信息需求对齐判定（2026-09-11）；@K 标签随 top_k 参数化（评审 E6）
+    v2_keys = [
+        f"fact_coverage@{k}", f"valid_hit@{k}", f"valid_precision@{k}",
+        "valid_mrr", f"pair_coverage@{k}", f"brand_hit@{k}",
+    ]
+    if any("v2" in r for r in report["strategies"]):
+        lines += [
+            "",
+            "## 口径修正指标（v2：信息需求对齐判定）",
+            "",
+            "> semantic/recommend 按约束满足度判定（一题多解合法），参数题按事实覆盖判定，",
+            "> compare 要求两侧证据在场；与旧口径并排，供历史回归对照。",
+            "",
+            "| 策略 | " + " | ".join(v2_keys) + " | Recall@5 结构上限 |",
+            "| --- | " + " | ".join(["---"] * (len(v2_keys) + 1)) + " |",
+        ]
+        for r in report["strategies"]:
+            if "error" in r or "v2" not in r:
+                continue
+            v2 = r.get("v2") or {}
+            cells = [str(v2.get(key)) if v2.get(key) is not None else "-" for key in v2_keys]
+            cells.append(str((r.get("recall_ceiling") or {}).get(f"@{k}")))
+            lines.append(f"| {r['strategy']} | " + " | ".join(cells) + " |")
+        if bucket_names:
+            lines += ["", "### v2 分桶指标", ""]
+            header = "| 策略 | " + " | ".join(f"{b} {key}" for b in bucket_names for key in (f"vhit@{k}", f"vprec@{k}")) + " |"
+            lines.append(header)
+            lines.append("| --- | " + " | ".join(["---"] * (len(bucket_names) * 2)) + " |")
+            for r in report["strategies"]:
+                if "error" in r or "v2" not in r:
+                    continue
+                cells = []
+                for b in bucket_names:
+                    bb = (r.get("by_bucket") or {}).get(b, {}).get("v2") or {}
+                    cells.append(str(bb.get(f"valid_hit@{k}") if bb.get(f"valid_hit@{k}") is not None else "-"))
+                    cells.append(str(bb.get(f"valid_precision@{k}") if bb.get(f"valid_precision@{k}") is not None else "-"))
+                lines.append(f"| {r['strategy']} | " + " | ".join(cells) + " |")
     lines += [
         "",
         "> 判定口径：相关 = 命中切片 series_id/variant_id 与问题 anchors 一致；",
         "> sparse-nooverlap 与 sparse 之差 = 重叠切分收益；hybrid − sparse = RRF 融合收益；",
         "> pipeline − hybrid = 实体解析/重排/把关的端到端收益；分桶用于验收查询路由与各桶弱点。",
+        "> v2 口径（2026-09-11）：semantic/recommend 一题多解按约束满足度判定；参数题按事实覆盖；",
+        "> compare 两侧证据需在场；Recall@5 的结构上限（相关车系切片数 >> 5）随报告输出。",
         "",
     ]
     return "\n".join(lines)

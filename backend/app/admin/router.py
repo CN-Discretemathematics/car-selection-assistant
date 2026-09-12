@@ -37,7 +37,7 @@ router = APIRouter(tags=["admin"])
 
 
 def require_admin(authorization: str | None = Header(default=None)) -> None:
-    """管理后台独立凭据鉴权（Bearer token，经 KMS 注入；不开放注册）。
+    """管理后台独立凭据鉴权（Bearer token，经环境变量注入；不开放注册）。
 
     未配置 → 503；缺凭据/凭据无效 → 401。
     """

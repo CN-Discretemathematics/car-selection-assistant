@@ -13,7 +13,7 @@ import os
 from dotenv import load_dotenv
 
 # 应用与工具都从这里读取检索配置：必须先加载 .env（override=False——
-# 已存在的真实环境变量优先，生产由 KMS/平台注入的环境变量不会被 .env 覆盖）。
+# 已存在的真实环境变量优先（生产由平台注入的环境变量不会被 .env 覆盖）。
 load_dotenv()
 
 
@@ -37,7 +37,7 @@ def _env_float(name: str, default: float) -> float:
 # ── 存储与召回后端 ────────────────────────────────────────────────────────────
 RETRIEVAL_BACKEND = os.environ.get("RETRIEVAL_BACKEND", "inmemory")  # inmemory | milvus(->Zilliz REST)
 MILVUS_URI = os.environ.get("MILVUS_URI", "")  # Zilliz Public Endpoint
-MILVUS_TOKEN = os.environ.get("MILVUS_TOKEN", "")  # Zilliz 集群 Token（生产经 KMS 注入，不写代码/仓库）
+MILVUS_TOKEN = os.environ.get("MILVUS_TOKEN", "")  # Zilliz 集群 Token（生产注入，不写代码/仓库）
 MILVUS_COLLECTION = os.environ.get("MILVUS_COLLECTION", "car_docs")
 MILVUS_DIM = _env_int("MILVUS_DIM", 1024)
 MAX_CHUNKS = _env_int("RETRIEVAL_MAX_CHUNKS", 60000)
