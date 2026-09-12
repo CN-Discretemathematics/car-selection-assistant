@@ -41,11 +41,21 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)"]
+      # 就绪探针（真实探测数据库）：与 /health 存活探针区分——数据库不可用时不报健康，
+      # 避免 web 在依赖已挂的情况下照常启动（安全评审 #24）
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=5)"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 30s
+    # 容器加固（安全评审 #22/#28）：禁提权、丢全部能力、限制内存与进程数
+    # （服务监听 8000 > 1024，无需任何 capability）
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1200m
+    pids_limit: 512
 
   web:
     build:
@@ -60,6 +70,13 @@ services:
       BACKEND_URL: http://api:8000
     ports:
       - "127.0.0.1:3000:3000"
+    # 容器加固（同 api）
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 900m
+    pids_limit: 512
     depends_on:
       api:
         condition: service_healthy

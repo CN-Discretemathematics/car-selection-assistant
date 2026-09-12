@@ -22,5 +22,8 @@ COPY backend/tools ./tools
 # 默认监听 8000；启动时先跑迁移（幂等）再起服务。
 # 注（评审 M8）：认证/会话在 Redis 不可用时回退进程内存储，多 worker 会分裂脑——
 # 默认单 worker；多 worker 部署必须保证 REDIS_URL 可用。
+# --proxy-headers + --forwarded-allow-ips=127.0.0.1（安全评审 2026-09-13）：让应用读到
+# nginx 传来的真实客户端 IP——否则限流中间件按 request.client.host 计数会退化成
+# 「所有请求同一个桶」，按 IP 限流形同虚设。只信任本机 nginx（不可用 * ，否则可伪造）。
 EXPOSE 8000
-CMD ["sh", "-c", "python -m alembic upgrade head && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-1}"]
+CMD ["sh", "-c", "python -m alembic upgrade head && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1 --workers ${UVICORN_WORKERS:-1}"]
