@@ -26,8 +26,19 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             购车助手内容由 AI 生成，仅供参考
           </p>
           <p className="mt-2 px-4 text-ash/80">本站不提供站内交易入口；价格与配置以品牌官网为准。</p>
-          {/* 备案号：备案通过后由环境变量注入 */}
-          {process.env.ICP_NUMBER && <p className="mt-2">{process.env.ICP_NUMBER}</p>}
+          {/* 备案号：备案通过后由环境变量注入；按规范须链接到工信部备案系统 */}
+          {process.env.ICP_NUMBER && (
+            <p className="mt-2">
+              <a
+                href="https://beian.miit.gov.cn/"
+                target="_blank"
+                rel="noreferrer"
+                className="underline-offset-4 transition hover:text-apple hover:underline"
+              >
+                {process.env.ICP_NUMBER}
+              </a>
+            </p>
+          )}
         </footer>
         <CompareBar />
         <AgentChat />
