@@ -1,0 +1,43 @@
+# Docker 构建上下文排除清单（构建上下文为仓库根目录）
+# 安全评审 2026-09-13：此前无 .dockerignore，根上下文含 backend/.env（生产密钥）——
+# 虽未被 COPY 进镜像，但会进入构建守护进程可读范围与构建缓存；且 frontend.Dockerfile
+# 的 `COPY web/ ./` 一旦目录内出现 web/.env 就会直接烧进镜像层。此处从源头排除。
+
+# 密钥与凭据
+.env
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.ppk
+.deploy/
+.tools/
+
+# 版本控制与本地数据
+.git
+.gitignore
+snapshots/
+**/snapshots/
+*.db
+*.sqlite3
+backend/eval/
+backend/.embed_cache.json*
+
+# 依赖与构建产物（镜像内会重新安装/构建）
+**/node_modules
+**/.next
+**/__pycache__
+**/*.py[cod]
+backend/vendor/
+backend/.venv/
+.venv/
+*.log
+.tmp/
+
+# 文档与开发辅助（镜像不需要）
+skills/
+reviewer/
+RAG.md
+README.md
+LICENSE

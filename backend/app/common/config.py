@@ -18,7 +18,11 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     database_url: str = "sqlite:///./dev.db"
     # 开发便利：启动时按模型建表；生产必须设为 false，统一走 Alembic 迁移
-    auto_create_tables: bool = True
+    # （安全评审 2026-09-13：生产 .env 曾误留 true，会对生产库执行 create_all）
+    auto_create_tables: bool = False
+    # 交互式 API 文档（/docs、/openapi.json）：默认关闭——它们会枚举全部管理端点
+    # （含 RAG 重建/试运行），开发与内网可显式开启
+    docs_enabled: bool = False
     cors_origins: list[str] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
