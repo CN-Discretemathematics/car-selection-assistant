@@ -4,6 +4,7 @@ import HeroGlow from "./components/HeroGlow";
 import HomeFilters from "./components/HomeFilters";
 import Reveal from "./components/Reveal";
 import RiseText from "./components/RiseText";
+import SearchBar from "./components/SearchBar";
 import SiteHeader from "./components/SiteHeader";
 import { fetchServerJson, SALES_TYPE_LABELS, type HomeCard } from "@/lib/api";
 
@@ -77,10 +78,17 @@ export default async function HomePage({
           >
             真实销量数据 · 官方指导价 · 全部带来源与更新时间。
             <br className="hidden sm:block" />
-            不知道从哪开始？点右下角「帮我选车」，AI 为你梳理需求。
+            不知道从哪开始？直接搜车系，或点右下角「帮我选车」让 AI 梳理需求。
           </p>
+          {/* 首页主入口：搜车系名/品牌名（与服务端同一套归一化匹配），回车进结果页 */}
           <div
-            className="animate-fade-up mt-7 flex flex-wrap items-center justify-center gap-2"
+            className="animate-fade-up mx-auto mt-7 max-w-xl"
+            style={{ animationDelay: "1000ms" }}
+          >
+            <SearchBar variant="hero" placeholder="搜品牌或车系，如「比亚迪」「Z9GT」「Model Y」" />
+          </div>
+          <div
+            className="animate-fade-up mt-5 flex flex-wrap items-center justify-center gap-2"
             style={{ animationDelay: "1050ms" }}
           >
             <span className="glass inline-flex items-center gap-1.5 rounded-full border border-black/[0.05] px-3.5 py-1.5 text-xs font-medium text-ink-soft">
