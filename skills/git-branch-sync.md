@@ -1,10 +1,12 @@
-# Skill：分支同步与叠放分支变基（交付前流程）
+# Skill：分支同步与交付命令卫生（开工 / 推送 / 提 PR）
 
 - 用途：让功能/运维分支始终基于最新 `main`，避免「Behind N」式分叉与后期集中冲突；
-  叠放分支（B 基于 A）被上游 rebase 后，只重放自己的提交。
+  叠放分支（B 基于 A）被上游 rebase 后，只重放自己的提交；并规避 Windows 侧命令解析
+  与凭据处理这两类「一犯就出事」的操作。
 - 来源：2026-09 分支拆分与同步实战沉淀（`release/security-ops` 与
-  `feature/search-and-agent-entry` 从旧基点 `04631b1` 同步到 `main` `68971d3`）。
-- 适用阶段：全阶段——开工拉分支、推送前、提 PR 前各一次。
+  `feature/search-and-agent-entry` 从旧基点 `04631b1` 同步到 `main` `68971d3`），
+  以及同期的 PowerShell 引号事故与 OSS AK 泄露事故复盘。
+- 适用阶段：全阶段——开工拉分支、推送前、提 PR 前各一次；涉及密钥的任何操作。
 - 最后验证：2026-09（两条分支 rebase 后 behind=0；运维分支 235 用例、功能分支 245 用例，
   `tsc --noEmit` 与 `next build` 全绿，compose 经 YAML 解析验证）。
 
@@ -61,5 +63,33 @@ git push --force-with-lease origin <branch>     # 历史被重写后用它，不
   写成 `git push -c ...` 会把 `-c` 当成 push 自己的参数而报错。
 - 提交前 `git status` 必须干净；`.env*`、`.deploy/`、`.tools/`、`vendor/`、
   `backend/eval/TODO-internal.md` 等本地文件均在 `.gitignore`，不要误加。
-- Windows 上用 PowerShell 时不要用管道改文件（会破坏 UTF-8 与行尾），需要改文件用编辑工具
-  或 scp 传 LF 文件。
+
+## PowerShell 引号陷阱（本次实测，代价最高的一类）
+
+三处都踩过，共同点是**命令在到达远端之前就被 PowerShell 解析过了**：
+
+1. `git commit -m "……"` 里含引号 / 反引号 / 中文标点会被拆成多个参数：
+   `error: pathspec 'docker' did not match any file(s) known to git`。
+   → **长提交信息写文件，用 `git commit -F <file>`**（本仓库的 `.tools/commit-msg.txt` 即为此用）。
+2. `ssh host "… $(cmd) …"`：`$(...)` 会在**本地**展开；且 PowerShell 的 `curl` 是
+   `Invoke-WebRequest` 别名，`-s` / `-o` 会被当成它自己的参数报
+   `Missing an argument for parameter 'SessionVariable'`。
+   → **远端复杂命令写成脚本 `scp` 过去再 `sh`/`python3` 执行**，不要内联。
+3. 嵌套引号（如 `python3 -c "… '…' …"`）几乎必坏，bash 侧报
+   `syntax error near unexpected token '('` 或 `unexpected EOF while looking for matching quote`。
+   → 同上：一律走脚本文件。
+4. 不要用 PowerShell 管道改文件（`Get-Content … | Set-Content`）：会破坏 UTF-8（中文变乱码）
+   与行尾。需要改文件用编辑工具，或改完用 `scp` 传 LF 文件过去。
+
+判断口诀：**命令里出现引号嵌套、`$()`、括号、反引号时，不要再拼字符串，直接落成脚本文件。**
+
+## 处理密钥时的硬规则（本次因违反付出代价）
+
+- **不要用 `sed`/`grep` 临场掩码**：写 `sed -E 's/^(OSS_ACCESS_KEY_ID=.{8}).*(.{4})$/\1****\2/'` 只掩码了
+  你显式写出的那一行，随后的 `grep OSS_ACCESS` 会把 `OSS_ACCESS_KEY_SECRET=…` 整行原样打印——
+  本次因此把一个**生产密钥**打进了对话记录，只能按轮换流程作废重来。
+- 核对密钥一律用**程序化指纹**：`sha256(值)[:12]` + 长度 + 掩码形状（字母数字→`x`、保留标点），
+  既能判断「两边是否一致」，又不会带出明文（可参照 `.tools/env_fingerprint.py`）。
+- 确实需要打印时，按键名逐行处理并只输出 `前 8 + **** + 后 4`；任何"顺手 grep 一下"的念头都要掐掉。
+- 密钥一旦出现在对话、日志、截图中，就**按已泄露处理**：立即轮换（先建新 → 切换 → 验证 → 废旧），
+  并在轮换记录里注明原因与时间。

@@ -15,7 +15,7 @@
 | DeepSeek API Key | `DEEPSEEK_API_KEY` | ✅ 已轮换并同步生产 |
 | 嵌入模型 Key | `EMBEDDING_API_KEY` | ✅ 已轮换并同步生产 |
 | 重排模型 Key | `RERANK_API_KEY` | ✅ 已轮换并同步生产（与嵌入同值） |
-| OSS RAM AK/SK | `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | ✅ 新 AK 已在生产生效；⬜ 旧 AK 待控制台禁用 |
+| OSS RAM AK/SK | `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | ⚠️ 生产在用的是 `power-application-user` 的新 AK；该 Secret 于 2026-09-13 因掩码失误泄露（见 §5-8），需按 §3 应急轮换；旧 `car-oss-worker` 的 AK 待禁用 |
 | Zilliz / Milvus Token | `MILVUS_TOKEN` | ⬜ 未轮换（现网有效，`car_docs` 集合可 describe） |
 | SMTP 授权码 | `SMTP_PASSWORD` | ⬜ 未轮换（现网有效，登录实测通过） |
 
@@ -130,13 +130,38 @@ curl -s -X POST localhost:8000/api/v1/auth/email-code -H 'Content-Type: applicat
 6. **先在本地验通新凭据再推生产**（本次本地六项全绿后才动服务器，避免把无效值推上去）。
 7. **切换即时生效**：模型类 Key 若已在控制台删除，旧值立刻 401——这正是发现「生产未同步」的信号；
    反之 OSS 旧 AK 未禁用时新旧都能用，**别忘了回控制台禁用旧 AK**（§1 表最后一项）。
+8. **不要在终端里"顺手掩码"**：`sed -E 's/^(OSS_ACCESS_KEY_ID=.{8}).*(.{4})$/\1****\2/' file | grep OSS_ACCESS`
+   只掩码了显式写出的那一行，`grep` 会把 `OSS_ACCESS_KEY_SECRET=…` 整行原样打印。本次据此泄露了一个
+   生产 OSS Secret，只能按 §3 应急轮换（先建新 → 切生产 → 验证 → 删除暴露的 AK）。
+   核对密钥一律走**程序化指纹**；确实要打印就按键名逐行处理，只输出 `前 8 + **** + 后 4`。
+9. **AK 的建/删必须人工在控制台做**：运维 CLI 使用的 RAM 用户是**只读**权限
+   （`ReadOnlyAccess` + 各服务 `*ReadOnlyAccess`），`CreateAccessKey` / `DeleteAccessKey` 都会
+   `NoPermission`。这既是安全设计，也意味着「轮换 OSS AK」这一步无法自动化，必须在 RAM 控制台完成。
 
-## 6. 轮换周期与后续改进
+## 6. OSS AK 归属与最小权限（2026-09-13 现状）
+
+| RAM 用户 | 创建时间 | 权限 | 用途 |
+|---|---|---|---|
+| `car-oss-worker` | 2026-08-29 | 自定义策略 `carselection-oss-bucket`（单桶最小权限） | 最初的 OSS 上传凭据 |
+| `power-application-user` | 2026-09-12 | `PowerUserAccess`（过宽） | 曾被用于 OSS；**不建议长期保留** |
+| `cloud_ali` | 2026-09-04 | `ReadOnlyAccess` 等只读策略 | 运维/巡检 CLI |
+
+- **轮换 OSS AK 的正确路径**：RAM 控制台 → 用户 → 认证管理 → 创建 AccessKey（每个用户最多 2 个）
+  → 新值写入本地 `.env` → 同步生产并验证 → 再禁用/删除旧 AK。
+- **权限收敛建议**：OSS 用途回到最小权限用户（`car-oss-worker` 或新建专用用户 + 单桶策略），
+  不要用 `PowerUserAccess` 的账号；确认无其他依赖后可删除过宽用户。
+- 控制台入口：<https://ram.console.aliyun.com/users> → 目标用户 → **认证管理** → AccessKey 的
+  禁用 / 删除（OSS 控制台本身**没有** AK 管理入口，这是常见误区）。
+
+## 7. 轮换周期与后续改进
 
 - **周期**：常规 90 天一轮；人员变动、疑似泄漏、凭据误提交时立即轮换。
-- **权限收敛（待办）**：OSS 换 RAM 子账号最小权限；RDS 拆「应用账号 / 运维账号」；
+- **权限收敛（待办）**：OSS 回到最小权限用户（见 §6）；RDS 拆「应用账号 / 运维账号」；
   管理 token 支持多凭据与过期时间；`.env` 逐步迁移到 KMS / 密钥托管（当前决策为暂缓）。
-- **配置待清理**：生产 `CORS_ORIGINS` 仍指向已释放的旧 ECS（`http://47.99.140.110:8080`）。
-  当前前端经 nginx 同源代理 `/api`，不走 CORS 所以无影响，但应在备案域名确定后更新为真实来源。
+- **已完成**：生产 `CORS_ORIGINS` 已由旧 ECS 来源改为正式域名集合
+  （`https://hp-car-selection-assistant.cn`、`https://www.…`、`http://…`、`http://121.41.4.12`），
+  预检验证通过：正式域名回 `access-control-allow-origin`，旧来源被拒。
+- **备案后待办**：域名解析就绪后配置 nginx `server_name` + HTTPS/HSTS，并按需收窄 `CORS_ORIGINS`
+  （只保留 https 来源）。
 - **自动化（可选）**：把 §3 的 ②③④ 固化成脚本（输入新值 → 写 `.env` → scp → 重建 → 跑 §4 验证），
   减少手工步骤；注意脚本本身不得回显凭据（`deploy/verify_credentials.py` 已是 §4 的验收侧）。
