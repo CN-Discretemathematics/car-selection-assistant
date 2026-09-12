@@ -31,6 +31,9 @@ export default function BrowseFilters() {
   function apply(next: typeof form, resetPage = true) {
     setForm(next);
     const qs = new URLSearchParams();
+    // 关键词来自搜索框（非本表单字段）：改筛选时必须保留，否则搜索结果被静默丢弃
+    const keyword = searchParams.get("q");
+    if (keyword) qs.set("q", keyword);
     for (const [k, v] of Object.entries(next)) {
       if (!v) continue;
       if ((k === "price_min" || k === "price_max") && Number(v) >= 0 && !Number.isNaN(Number(v))) {

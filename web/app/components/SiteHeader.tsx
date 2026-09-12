@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import SearchBar from "./SearchBar";
 
 const NAV = [
   { href: "/", label: "首页", match: (p: string) => p === "/" },
@@ -44,24 +45,27 @@ export default function SiteHeader() {
           </span>
         </Link>
 
-        <nav className="flex items-center gap-0.5 text-sm">
-          {NAV.map((item) => {
-            const active = item.match(pathname);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`press rounded-full px-3.5 py-1.5 duration-300 ${
-                  active
-                    ? "bg-apple/10 font-semibold text-apple"
-                    : "text-ink-soft hover:bg-black/[0.05] hover:text-ink"
-                }`}
-              >
-                {item.label}
-              </Link>
-            );
-          })}
-        </nav>
+        <div className="flex items-center gap-1.5">
+          <SearchBar />
+          <nav className="flex items-center gap-0.5 text-sm">
+            {NAV.map((item) => {
+              const active = item.match(pathname);
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={`press rounded-full px-3.5 py-1.5 duration-300 ${
+                    active
+                      ? "bg-apple/10 font-semibold text-apple"
+                      : "text-ink-soft hover:bg-black/[0.05] hover:text-ink"
+                  }`}
+                >
+                  {item.label}
+                </Link>
+              );
+            })}
+          </nav>
+        </div>
       </div>
     </header>
   );

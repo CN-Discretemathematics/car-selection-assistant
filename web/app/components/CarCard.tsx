@@ -62,7 +62,10 @@ export default function CarCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-2">
             <h3 className="truncate text-[17px] font-semibold tracking-tight text-ink transition-colors duration-300 group-hover:text-apple">
-              <span className="mr-1.5 text-sm font-normal text-ash">{card.brand_name}</span>
+              {/* 部分车系名自带品牌前缀（如「腾势Z9GT」），避免「腾势 腾势Z9GT」重复 */}
+              {!card.series_name.startsWith(card.brand_name) && (
+                <span className="mr-1.5 text-sm font-normal text-ash">{card.brand_name}</span>
+              )}
               {card.series_name}
             </h3>
             <span className="shrink-0 rounded-full bg-canvas px-2 py-0.5 text-[11px] text-ash">
