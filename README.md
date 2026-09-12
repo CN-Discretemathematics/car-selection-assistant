@@ -233,6 +233,7 @@ web/
 skills/           # 开发工作流沉淀（数据校验 / 参数归一化 / 端到端验证）
 deploy/           # Docker Compose、前后端 Dockerfile、Nginx 反向代理配置
 reviewer/         # 独立代码审查 Agent（密钥扫描器 + 审查规范）
+docs/             # 运维手册（凭据轮换等）
 RAG.md            # RAG 子系统设计与运维文档
 ```
 
@@ -264,6 +265,7 @@ nginx -t && systemctl reload nginx
 - 密钥只经服务器 `.env`（权限 600）或平台环境变量注入；仓库只保留 `.env.example` 占位模板
 - `.dockerignore` 从构建上下文排除 `.env` / 私钥 / 本地数据——密钥不进镜像层与构建缓存
 - 仓库自带密钥扫描器（`reviewer/scan_secrets.py`）；`.gitignore` 覆盖 `*.pem` / `*.key` 等私钥模式
+- 轮换流程见 [docs/credential-rotation.md](docs/credential-rotation.md)（先建新 → 再切换 → 最后废旧）
 
 **访问控制**
 - 管理后台独立 Bearer 凭据（≥32 位 CSPRNG，由运维注入），不开放注册；缺失返回 503、无效返回 401，
