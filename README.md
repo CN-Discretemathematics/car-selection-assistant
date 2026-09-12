@@ -231,8 +231,59 @@ web/
   app/            # Next.js 页面（选车 / 对比 / 详情 / 管理后台 / ops）
   lib/            # API 客户端与触发词
 skills/           # 开发工作流沉淀（数据校验 / 参数归一化 / 端到端验证）
+deploy/           # Docker Compose、前后端 Dockerfile、Nginx 反向代理配置
+reviewer/         # 独立代码审查 Agent（密钥扫描器 + 审查规范）
 RAG.md            # RAG 子系统设计与运维文档
 ```
+
+## 生产部署（Docker Compose + Nginx）
+
+```bash
+# 服务器（阿里云中国内地节点；容器内跑 redis / api / web 三服务）
+git clone <repo> /srv/carsel && cd /srv/carsel
+cp backend/.env.example backend/.env      # 填生产值（数据库 / LLM / 嵌入 / 管理凭据）
+cd deploy
+docker compose up -d --build              # 构建并启动
+cp nginx.conf /etc/nginx/conf.d/carsel.conf   # server_name 改为已备案域名
+nginx -t && systemctl reload nginx
+```
+
+部署要点（均为线上实证）：
+
+- **容器只绑定 `127.0.0.1`**，外部统一经宿主 nginx 进入；`/api` 由 nginx **直连后端**
+  （经 Next.js rewrite 转发会让 Agent 长请求挂死），SSE 端点关缓冲
+- **国内构建**：Docker 需配 `registry-mirrors`；前端 npm 走 npmmirror（`frontend.Dockerfile`
+  内固化为 `/root/.npmrc`），运行时直接调用镜像内 `next` 二进制，无运行期联网依赖
+- **数据库**：容器化部署与 RDS 不同 VPC 时须使用**外网 endpoint**，并把出口 IP 加入白名单
+- **定时任务**：看门狗（每 5 分钟自愈）+ 夜间 02:30 销量导入 → 条件触发稠密重建
+- **备案**：中国内地节点须完成 ICP 备案；页脚备案号由环境变量 `ICP_NUMBER` 注入并链接工信部
+
+## 安全实践
+
+**凭据与密钥**
+- 密钥只经服务器 `.env`（权限 600）或平台环境变量注入；仓库只保留 `.env.example` 占位模板
+- `.dockerignore` 从构建上下文排除 `.env` / 私钥 / 本地数据——密钥不进镜像层与构建缓存
+- 仓库自带密钥扫描器（`reviewer/scan_secrets.py`）；`.gitignore` 覆盖 `*.pem` / `*.key` 等私钥模式
+
+**访问控制**
+- 管理后台独立 Bearer 凭据（≥32 位 CSPRNG，由运维注入），不开放注册；缺失返回 503、无效返回 401，
+  比较使用 `secrets.compare_digest`（常量时间）
+- 交互式 API 文档（`/docs`、`/openapi.json`）**默认关闭**（`DOCS_ENABLED=true` 可开）——它们会枚举全部管理端点
+- 限流按**真实客户端 IP**：容器以 `--proxy-headers --forwarded-allow-ips=127.0.0.1` 启动，
+  只信任本机 nginx 传来的 `X-Forwarded-For`（不可用 `*`，否则可伪造）
+- 认证令牌与验证码：`token_urlsafe(32)`、6 位 CSPRNG、5 次尝试上限、登录/注册不区分邮箱是否已注册
+
+**容器与网络**
+- 容器端口只绑 `127.0.0.1`；Redis 不发布端口
+- 容器加固：`cap_drop: ALL`、`no-new-privileges`、内存与进程数上限
+- 健康检查用 `/api/v1/ready`（真实探测数据库），与 `/api/v1/health` 存活探针分离
+
+**数据面**
+- 车辆事实只来自数据库与工具返回值，回答附来源引用与缺失标注（LLM 无写权限、无执行工具）
+- 数据库访问全部参数化（无字符串拼接 SQL）；图片代理为域名白名单（拒绝内网/元数据地址）
+- 会话 ID 为 122 位随机值；CORS 非通配
+
+> 已知待办：HTTPS/HSTS（备案完成后配置）、容器非 root 运行、RAG 数据面的并发与优雅降级加固。
 
 ## 设计原则
 

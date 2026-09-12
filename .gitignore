@@ -18,6 +18,15 @@ vendor/
 snapshots/
 .zcode/
 
+# 私钥与凭据文件（安全网：私钥一律不入库）
+*.pem
+*.key
+*.ppk
+id_rsa*
+id_ed25519*
+*.crt
+*.p12
+
 # Node / Next.js
 node_modules/
 .pnpm-store/
