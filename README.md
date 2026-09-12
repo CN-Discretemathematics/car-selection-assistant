@@ -265,7 +265,8 @@ nginx -t && systemctl reload nginx
 - 密钥只经服务器 `.env`（权限 600）或平台环境变量注入；仓库只保留 `.env.example` 占位模板
 - `.dockerignore` 从构建上下文排除 `.env` / 私钥 / 本地数据——密钥不进镜像层与构建缓存
 - 仓库自带密钥扫描器（`reviewer/scan_secrets.py`）；`.gitignore` 覆盖 `*.pem` / `*.key` 等私钥模式
-- 轮换流程见 [docs/credential-rotation.md](docs/credential-rotation.md)（先建新 → 再切换 → 最后废旧）
+- 轮换流程见 [docs/credential-rotation.md](docs/credential-rotation.md)（先建新 → 再切换 → 最后废旧）；
+  轮换后用 `deploy/verify_credentials.py` 在容器内跑六类凭据的只读验收
 
 **访问控制**
 - 管理后台独立 Bearer 凭据（≥32 位 CSPRNG，由运维注入），不开放注册；缺失返回 503、无效返回 401，
