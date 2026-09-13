@@ -66,22 +66,19 @@ git push --force-with-lease origin <branch>     # 历史被重写后用它，不
 
 ## PowerShell 引号陷阱（本次实测，代价最高的一类）
 
-三处都踩过，共同点是**命令在到达远端之前就被 PowerShell 解析过了**：
+> **本条已提升为用户全局记忆 `~/.dsh/AGENTS.md` §1**（每次会话自动加载，不再依赖本 skill 被调用）。
+> 2026-09-14 教训：写进项目 skill 之后仍重犯两次（`ssh` 内联引号、PowerShell 改文本把中文 docstring 写坏），
+> 所以通用教训放全局，此处只保留本仓库的具体做法。
 
-1. `git commit -m "……"` 里含引号 / 反引号 / 中文标点会被拆成多个参数：
-   `error: pathspec 'docker' did not match any file(s) known to git`。
-   → **长提交信息写文件，用 `git commit -F <file>`**（本仓库的 `.tools/commit-msg.txt` 即为此用）。
-2. `ssh host "… $(cmd) …"`：`$(...)` 会在**本地**展开；且 PowerShell 的 `curl` 是
-   `Invoke-WebRequest` 别名，`-s` / `-o` 会被当成它自己的参数报
-   `Missing an argument for parameter 'SessionVariable'`。
-   → **远端复杂命令写成脚本 `scp` 过去再 `sh`/`python3` 执行**，不要内联。
-3. 嵌套引号（如 `python3 -c "… '…' …"`）几乎必坏，bash 侧报
-   `syntax error near unexpected token '('` 或 `unexpected EOF while looking for matching quote`。
-   → 同上：一律走脚本文件。
-4. **任何 PowerShell 文本改写都不要用**：`(Get-Content -Raw) -replace … | Set-Content -Encoding utf8`
-   本次真的把源码写坏了（JSX 语法错误、中文字符被替换），只能 `git checkout -- <file>` 回滚重做。
-   改文件一律用编辑工具；确需批量替换就写 Python 脚本（`encoding='utf-8'` + `newline='\n'`），
-   改完用 `git diff` 与解析器/编译器复核。
+要点回顾（细节见全局记忆）：
+
+1. 长提交信息写文件 → `git commit -F .tools/commit-msg.txt`（本仓库约定路径）；
+2. 远端命令写成脚本 `scp` 过去再 `sh`/`python3` 执行（本仓库 `.tools/*.sh` 即此用途），
+   不要内联 `ssh host "… $(…) …"`；PowerShell 的 `curl` 是 `Invoke-WebRequest` 别名，
+   需要 `curl.exe` 或 `-UseBasicParsing`；
+3. 嵌套引号几乎必坏（`unexpected EOF while looking for matching quote`）；
+4. 改文件用编辑工具；批量替换写 Python 脚本（`encoding='utf-8'` + `newline='\n'`，
+   每处替换断言"恰好命中一次"），改完用 `git diff` 与编译器复核。
 
 判断口诀：**命令里出现引号嵌套、`$()`、括号、反引号时，不要再拼字符串，直接落成脚本文件。**
 **改文件不要经过 PowerShell 的字符串管道。**
