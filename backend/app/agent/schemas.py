@@ -20,6 +20,11 @@ class UserProfile(BaseModel):
     passengers: int | None = None
     body_type: list[str] = Field(default_factory=list)
     energy_preference: list[str] = Field(default_factory=list)
+    # 品牌硬约束（用户说「只要奔驰」这类要求）：ids 硬下推 SQL；labels 仅用于回复/前端展示；
+    # exclude_ids 承载「不要日系」这类否定要求。取值来自 brands 表（名称 + 别名解析）
+    brand_ids: list[int] = Field(default_factory=list)
+    brand_labels: list[str] = Field(default_factory=list)
+    brand_exclude_ids: list[int] = Field(default_factory=list)
     charging_tolerance: bool | None = None
     must_have: list[str] = Field(default_factory=list)
     nice_to_have: list[str] = Field(default_factory=list)

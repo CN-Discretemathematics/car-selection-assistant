@@ -233,7 +233,7 @@ def _validate_vehicle(db: Session, vehicle_id: int, kind: str) -> None:
     else:
         variant = catalog.get_variant(db, vehicle_id)
         if variant is None or variant.status != "on_sale":
-            raise not_found(f"SKU 不存在或已停售：{vehicle_id}")
+            raise not_found(f"款型不存在或已停售：{vehicle_id}")
 
 
 def _favorite_out(db: Session, favorite: Favorite) -> FavoriteOut:

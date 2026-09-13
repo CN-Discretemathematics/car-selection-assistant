@@ -30,9 +30,15 @@ def vehicle_search(
     body_type: str | None = None,
     energy_type: str | None = None,
     brand_id: int | None = None,
+    brand: str | None = None,
     limit: int = 10,
 ) -> list[dict]:
-    """按条件查询在售车型系列与 SKU。"""
+    """按条件查询在售车型系列与款型。
+
+    brand 支持**品牌名**（如「奔驰」）：模型拿不到库内 brand_id，此前只能凭记忆列举品牌车型，
+    实测会把「奔驰在售 57 款、燃油 37 款」答成「3 款、都是纯电」。品牌名走 brands 表
+    （名称 + 别名）精确解析，解析不到时返回空列表，由调用方如实说明。
+    """
     stmt = select(VehicleSeries).where(VehicleSeries.active_status == "active")
     if query:
         like = f"%{query}%"
@@ -41,6 +47,14 @@ def vehicle_search(
         stmt = stmt.where(VehicleSeries.body_type == body_type)
     if brand_id:
         stmt = stmt.where(VehicleSeries.brand_id == brand_id)
+    if brand:
+        from app.catalog.brands import resolve_brand_mentions
+
+        resolved = resolve_brand_mentions(db, brand)
+        ids = resolved.get("brand_ids") or []
+        if not ids:
+            return []  # 品牌不在库内：如实返回空，不猜
+        stmt = stmt.where(VehicleSeries.brand_id.in_(ids))
     series_list = db.scalars(stmt.limit(limit)).all()
 
     result = []
@@ -287,6 +301,20 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
     # 会话锁定的车系（用户点名过、尚未解锁）
     if profile.locked_series_ids:
         stmt = stmt.where(VehicleVariant.series_id.in_(profile.locked_series_ids))
+    # 品牌硬约束（「只要奔驰」）：必须下推 SQL——此前画像没有品牌字段，用户声明的品牌
+    # 在推荐里完全失效，会推出其他品牌（2026-09 用户实测缺陷）
+    if profile.brand_ids:
+        stmt = stmt.where(
+            VehicleVariant.series_id.in_(
+                select(VehicleSeries.id).where(VehicleSeries.brand_id.in_(profile.brand_ids))
+            )
+        )
+    if profile.brand_exclude_ids:
+        stmt = stmt.where(
+            ~VehicleVariant.series_id.in_(
+                select(VehicleSeries.id).where(VehicleSeries.brand_id.in_(profile.brand_exclude_ids))
+            )
+        )
     # 车身类型偏好
     if profile.body_type:
         stmt = stmt.where(VehicleVariant.body_type.in_(profile.body_type))
@@ -576,7 +604,11 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "vehicle_search",
-            "description": "查询在售车型系列（可带关键字、车身类型、能源类型、品牌过滤）。只返回数据库中的事实。",
+            "description": (
+                "查询在售车型系列（可带关键字、车身类型、能源类型、品牌过滤）。只返回数据库中的事实。"
+                "询问某品牌有哪些车型时必须用 brand 传品牌名（如「奔驰」），不要凭记忆列举；"
+                "需要完整清单时把 limit 调到 200。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -584,6 +616,7 @@ TOOL_SCHEMAS: list[dict] = [
                     "body_type": {"type": "string", "enum": ["sedan", "suv", "mpv"]},
                     "energy_type": {"type": "string"},
                     "brand_id": {"type": "integer"},
+                    "brand": {"type": "string", "description": "品牌名（如「奔驰」「比亚迪」），按库内名称/别名解析"},
                     "limit": {"type": "integer", "default": 10},
                 },
             },
