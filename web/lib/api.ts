@@ -228,6 +228,23 @@ export async function fetchServerJson<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/**
+ * 取列表 + 命中总数（总数在后端 `X-Total-Count` 响应头）。
+ * 用于首页销量榜：接口只返回前 N 名（榜单语义），但页面要如实显示「共 N 款」。
+ */
+export async function fetchServerListWithTotal<T>(
+  path: string,
+): Promise<{ items: T[]; total: number }> {
+  const res = await fetch(`${BACKEND_URL}${path}`, { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`后端请求失败：${res.status} ${path}`);
+  }
+  const items = (await res.json()) as T[];
+  const header = res.headers.get("x-total-count");
+  const total = header !== null && !Number.isNaN(Number(header)) ? Number(header) : items.length;
+  return { items, total };
+}
+
 export function formatPrice(value: number | null): string {
   if (value === null || value === undefined) return "暂无";
   const wan = value / 10000;

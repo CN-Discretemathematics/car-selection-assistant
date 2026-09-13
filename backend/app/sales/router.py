@@ -2,10 +2,14 @@
 
 按指定月份（默认最近完整自然月）的车型销量排序，
 支持能源/车身/价格/品牌类别筛选，以及关键词搜索（车系名 / 品牌名 / 别名）。
+
+返回**榜单前 N 名**（limit，默认 20）：完整榜单由 /vehicles 承担（可按销量排序浏览），
+命中总数通过 `X-Total-Count` 响应头返回——2026-09 补齐销量数据后单月有 650 个车系，
+首页若整体返回会把 HTML 撑到数 MB（实测 4.7MB），故在此限流。
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -18,10 +22,13 @@ from app.common.models import Brand, MonthlySales, OfficialPrice, VehicleSeries,
 from app.sales.schemas import HomeCardOut, PriceRangeOut, SalesSourceOut
 
 router = APIRouter(tags=["home"])
+HOME_DEFAULT_LIMIT = 20
+HOME_MAX_LIMIT = 100
 
 
 @router.get("/home", response_model=list[HomeCardOut])
 def home(
+    response: Response,
     q: str | None = Query(
         default=None,
         max_length=40,
@@ -34,6 +41,12 @@ def home(
     price_max: float | None = Query(default=None, ge=0),
     brand_type: str | None = Query(default=None),
     sort: str = Query(default="desc", pattern="^(asc|desc)$"),
+    limit: int = Query(
+        default=HOME_DEFAULT_LIMIT,
+        ge=1,
+        le=HOME_MAX_LIMIT,
+        description="榜单条数上限（命中总数见 X-Total-Count 响应头）",
+    ),
     db: Session = Depends(get_session),
 ) -> list[HomeCardOut]:
     # 默认月份 = 最近一个有销量数据的月份（销量数据月中发布，避免月初首页整体为空），
@@ -110,6 +123,10 @@ def home(
         if price_max is not None and (price_min_val is None or price_min_val > price_max):
             continue
         matched.append((sales, series, brand, price_min_val, price_max_val))
+
+    # 命中总数走响应头：首页只渲染前 limit 名（榜单语义），完整榜单在 /vehicles
+    response.headers["X-Total-Count"] = str(len(matched))
+    matched = matched[:limit]
 
     cards: list[HomeCardOut] = []
     for sales, series, brand, price_min_val, price_max_val in matched:
