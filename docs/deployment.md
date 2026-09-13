@@ -92,13 +92,59 @@ crontab /var/cache/cron.tmp && rm -f /var/cache/cron.tmp
 /usr/local/bin/carsel-deploy.sh --check
 ```
 
-## 5. 已知事项与后续改进
+## 5. 夜间任务与向量索引重建
+
+脚本：`deploy/carsel-nightly.sh`（服务器上安装为 `/usr/local/bin/carsel-nightly.sh`）。
+定时：`30 2 * * *`（cron 另有 `*/5` 看门狗与 `0 5` 自动部署）。
+
+```bash
+carsel-nightly.sh                 # 正常：销量导入（幂等）→ 仅当有新月份才重建索引
+carsel-nightly.sh --force         # 数据回补/手工修数后强制重建一次
+carsel-nightly.sh --no-rebuild    # 只导入不重建（排障用）
+```
+
+流程与要点：
+
+1. **销量导入**：`docker exec deploy-api-1 python tools/fetch_sales_scheduled.py`（幂等，
+   目标月已就绪时零操作；未发布则次日重试）。
+2. **重建触发**：只有导入成功写入 `.tmp/sales-changed.flag`（新月份到位）才重建；
+   `--force` 忽略标记。
+3. **稠密（Zilliz）**：`tools/build_retrieval_index.py --target dense` 全量重灌，并写水位标记
+   `.tmp/dense-build-meta.json`（含构建时的**销量月份 + 库内规模**）。
+4. **稀疏（BM25）**：**必须走管理接口** `POST /admin/rag/reindex {"target":"sparse"}`——
+   在运行中的 api 进程内重建。另起进程跑 `--target sparse` 建的索引会随子进程退出而丢弃
+   （生产 `RETRIEVAL_BACKEND=milvus` 时，按数据量自动重建是关闭的）。
+5. **重建后核对**：脚本自动打印 `/admin/rag/status` 的稠密/稀疏切片数与
+   `stale/stale_reason`（月份 + 规模双比对，见 §7）。
+6. **自更新**：仓库里的脚本变化后，下次运行自动安装到 `/usr/local/bin`。
+7. 日志：`logs/sales-cron.log`（任务级）与 `logs/rebuild-cron.log`（重建明细），自动截断保留 3000 行。
+
+**为什么销量变化必须重建**：车系摘要切片文本含「YYYY-MM 月销量 N 辆」一句话
+（`app/rag/ingest.py`），不重建则 RAG 回答里的销量是旧的（2026-09 实况：数据补齐后
+集合仍停留在旧切片集，而水位只比月份故误报「新鲜」）。
+
+## 6. 管理页面入口
+
+- **RAG 流程管理**：`http://<服务器>/ops/rag`（备案前用 `http://121.41.4.12/ops/rag`）——
+  流程图 / 运行状态（含水位置信）/ 试运行 / 运行轨迹 / 评测报告，可在页面上触发索引重建。
+- **凭据**：页面右上角填 **Bearer token**，值为服务器 `/root/carsel-admin-token.txt`
+  （600 权限）；填写后保存在浏览器 localStorage，页面内所有管理请求自动带上。
+  查看命令：`ssh root@<服务器> 'cat /root/carsel-admin-token.txt'`。
+- **明文传输提醒**：备案前站点是 HTTP，token 会明文过网。远程管理建议走 SSH 隧道：
+  ```bash
+  ssh -i .deploy/ecs_key -L 8080:127.0.0.1:3000 root@121.41.4.12   # 然后访问 http://127.0.0.1:8080/ops/rag
+  ```
+- 管理接口在无 token 时返回 401、未配置 token 时返回 503（可用 `curl -s -o /dev/null -w '%{http_code}'` 自查）。
+
+## 7. 已知事项与后续改进
 
 - **`web/public/` 曾被漏掉**：`deploy/frontend.Dockerfile` 会 `COPY .../web/public ./public`，
   但仓库此前未跟踪该目录——全新克隆构建必失败（服务器靠手工 `.gitkeep` 侥幸可用）。
   现已补 `web/public/.gitkeep` 入库；rsync 排除清单里的 `web/public/.gitkeep` 可一并移除。
+- **索引水位必须同时看月份与规模**：`dense-build-meta.json` 记录构建时的 `db_counts`，
+  `/admin/rag/status` 在规模漂移时给出「车系 908→1078」式原因。旧标记（无 `db_counts`）
+  退回只比月份，不误报。
 - **只部署 main 的代价**：未合并的改动不会上线（需要的验证放在 PR 阶段完成）。
-  如果希望「PR 预览环境」，可在另一台机器/端口用同一脚本部署分支，但不要与生产混用。
-- **可选的 CI 门禁**：目前 PR 阶段没有自动跑测试（248 用例只在本地/手工执行）。
+- **可选的 CI 门禁**：目前 PR 阶段没有自动跑测试（254 用例只在本地/手工执行）。
   公开仓库可加 GitHub Actions 跑 `pytest` + `tsc`，让「自动部署 main」更有底气。
 - **通知**：脚本只写日志与状态文件；如需微信/邮件通知，可在脚本末尾追加钩子。
