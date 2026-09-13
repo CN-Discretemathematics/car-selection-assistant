@@ -7,7 +7,7 @@ import CompareBar from "./components/CompareBar";
 export const metadata: Metadata = {
   title: "选车助手 | 家用新车推荐",
   description:
-    "浏览车型、查看详情、SKU 级对比。按月销量排序，只展示官方指导价，全部数据带来源与更新时间。",
+    "浏览车型、查看详情、款型级对比。按月销量排序，只展示官方指导价，全部数据带来源与更新时间。",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

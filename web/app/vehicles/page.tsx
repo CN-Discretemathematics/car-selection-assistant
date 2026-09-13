@@ -67,7 +67,7 @@ export default async function BrowsePage({
           >
             {keyword
               ? "按车系名 / 品牌名 / 别名匹配（忽略大小写与空格）；下方筛选可继续收窄范围。"
-              : "浏览全部在范围车系（§2.1 品牌覆盖）；进入任意车型详情即可把具体 SKU 加入对比。"}
+              : "浏览全部在售车系；进入任意车型详情即可把具体款型加入对比。"}
           </p>
           <div
             className="animate-fade-up mt-5 flex flex-wrap items-center justify-center gap-2"

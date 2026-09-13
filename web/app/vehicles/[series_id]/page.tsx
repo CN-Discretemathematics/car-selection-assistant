@@ -48,7 +48,7 @@ export default async function VehiclePage({
     try {
       variants = await fetchServerJson<VariantOut[]>(`/api/v1/vehicles/${id}/variants`);
     } catch {
-      variantsError = "SKU 列表暂时不可用，请稍后重试。";
+      variantsError = "款型列表暂时不可用，请稍后重试。";
     }
   }
 
@@ -165,7 +165,7 @@ export default async function VehiclePage({
             <div className="lift glass h-full rounded-[24px] border border-black/[0.05] p-5">
               <p className="flex items-center gap-1.5 text-xs font-medium text-ash">
                 <span className="h-1.5 w-1.5 rounded-full bg-[#64d2ff]" />
-                月销量（{sales?.sales_type ? (SALES_TYPE_LABELS[sales.sales_type] ?? sales.sales_type) : "口径"}）
+                月销量（{sales?.sales_type ? (SALES_TYPE_LABELS[sales.sales_type] ?? sales.sales_type) : "口径未标注"}）
               </p>
               <p className="mt-2.5 text-[22px] font-semibold tracking-tight text-ink">
                 {sales?.sales_count != null ? `${sales.sales_count.toLocaleString()} 辆` : "暂无统一公开数据"}
@@ -202,9 +202,9 @@ export default async function VehiclePage({
           </Reveal>
         </div>
 
-        {/* ── 在售 SKU ───────────────────────────────────────────────── */}
+        {/* ── 在售款型 ───────────────────────────────────────────────── */}
         <Reveal className="mt-14 flex items-baseline gap-2.5">
-          <h2 className="text-[24px] font-semibold tracking-tight text-ink">在售 SKU</h2>
+          <h2 className="text-[24px] font-semibold tracking-tight text-ink">在售款型</h2>
           <span className="rounded-full bg-apple/10 px-2.5 py-0.5 text-xs font-semibold text-apple">
             {variants.length} 款
           </span>
@@ -215,7 +215,7 @@ export default async function VehiclePage({
             {variantsError}
           </Reveal>
         ) : variants.length === 0 ? (
-          <Reveal className="mt-4 text-sm text-ash">暂无在售 SKU 数据（官方资料未披露）。</Reveal>
+          <Reveal className="mt-4 text-sm text-ash">暂无在售款型数据（官方资料未披露）。</Reveal>
         ) : null}
         <div className="mt-4 grid grid-cols-1 gap-5 lg:grid-cols-2">
           {variants.map((v, index) => (

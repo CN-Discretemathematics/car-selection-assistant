@@ -432,7 +432,7 @@ function AddFromAgent({ variantId }: { variantId: number }) {
           return;
         }
         if (ids.length >= 5) {
-          window.alert("最多同时对比 5 个 SKU，请先移除部分车型。");
+          window.alert("最多同时对比 5 个款型，请先移除部分车型。");
           return;
         }
         writeCompareIds([...ids, variantId]);

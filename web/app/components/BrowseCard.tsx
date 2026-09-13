@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { BODY_LABELS, ENERGY_LABELS, formatPriceRange, type VehicleListItem } from "@/lib/api";
+import { BODY_LABELS, ENERGY_LABELS, formatPriceRange, SALES_TYPE_LABELS, type VehicleListItem } from "@/lib/api";
 
 const ENERGY_CHIP: Record<string, string> = {
   BEV: "bg-ice text-apple ring-apple/12",
@@ -60,7 +60,8 @@ export default function BrowseCard({ item }: { item: VehicleListItem }) {
           </p>
           {item.latest_sales.sales_count != null && (
             <p className="mt-0.5 text-xs text-ash">
-              {item.latest_sales.month} 销量 {item.latest_sales.sales_count.toLocaleString()} 辆（{item.latest_sales.sales_type === "portal" ? "门户口径" : "零售口径"}）
+              {item.latest_sales.month} 销量 {item.latest_sales.sales_count.toLocaleString()} 辆（
+              {SALES_TYPE_LABELS[item.latest_sales.sales_type ?? ""] ?? "口径未标注"}）
             </p>
           )}
         </div>
@@ -74,7 +75,7 @@ export default function BrowseCard({ item }: { item: VehicleListItem }) {
           <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
             更新：{item.data_updated_at ? item.data_updated_at.slice(0, 10) : "未标注"}
             <span className="hidden text-apple/80 transition-all duration-300 group-hover:translate-x-0.5 sm:inline">
-              · 查看详情与 SKU →
+              · 查看详情与款型 →
             </span>
           </span>
         </div>

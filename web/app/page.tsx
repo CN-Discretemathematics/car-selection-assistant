@@ -95,7 +95,7 @@ export default async function HomePage({
               {salesTypeLabel ? ` · ${salesTypeLabel}` : ""}
             </span>
             <span className="glass inline-flex items-center rounded-full border border-black/[0.05] px-3.5 py-1.5 text-xs font-medium text-ink-soft">
-              只收录在范围内主流品牌
+              只收录主流品牌
             </span>
             {staleNote && (
               <span className="inline-flex items-center rounded-full border border-amber-300/40 bg-amber-50/90 px-3.5 py-1.5 text-xs font-medium text-amber-700 backdrop-blur">
