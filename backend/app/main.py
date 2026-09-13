@@ -15,6 +15,7 @@ from app.admin.rag_router import router as admin_rag_router
 from app.admin.router import router as admin_router
 from app.auth.router import router as auth_router
 from app.brands.router import router as brands_router
+from app.common.admin_auth import AdminAuditMiddleware
 from app.common.config import get_settings
 from app.common.database import create_all, get_session_factory
 from app.common.ratelimit import RateLimitMiddleware
@@ -55,6 +56,9 @@ app.add_middleware(
 
 # 本地开发基础限流（每 IP 每分钟 1000 次，健康检查豁免）；生产由 WAF/Redis 承担
 app.add_middleware(RateLimitMiddleware, max_requests=1000, window_seconds=60)
+
+# 管理路径审计（/api/v1/admin 与 /ops）：时间 / 标签 / 真实 IP / 方法 / 路径 / 状态 / 耗时
+app.add_middleware(AdminAuditMiddleware)
 
 api = settings.api_prefix
 app.include_router(brands_router, prefix=api)

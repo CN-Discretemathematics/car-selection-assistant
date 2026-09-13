@@ -236,13 +236,15 @@ web/
 skills/           # 开发工作流沉淀（数据校验 / 参数归一化 / 端到端验证 / 分支同步）
 deploy/           # Docker Compose、前后端 Dockerfile、Nginx 反向代理配置
 reviewer/         # 独立代码审查 Agent（密钥扫描器 + 审查规范）
-docs/             # 运维手册（凭据轮换等）
+docs/             # 运维手册（部署与自动更新 / 阿里云控制台运维 / 凭据轮换）
 RAG.md            # RAG 子系统设计与运维文档
 ```
 
 ## 生产部署（Docker Compose + Nginx）
 
-> 完整手册见 [docs/deployment.md](docs/deployment.md)（服务器实际形态、自动更新、回滚、新机接入）。
+> 完整手册见 [docs/deployment.md](docs/deployment.md)（服务器实际形态、自动更新、回滚、新机接入）；
+> 阿里云侧运维（续费 / 防火墙 / 快照 / RDS 账号与备份恢复 / OSS / RAM / 域名备案）见
+> [docs/aliyun-ops.md](docs/aliyun-ops.md)。
 
 ```bash
 # 服务器（阿里云中国内地节点；容器内跑 redis / api / web 三服务）

@@ -157,7 +157,16 @@ curl -s -X POST localhost:8000/api/v1/auth/email-code -H 'Content-Type: applicat
 
 - **周期**：常规 90 天一轮；人员变动、疑似泄漏、凭据误提交时立即轮换。
 - **权限收敛（待办）**：`power-application-user` 降权或删除（见 §6）；RDS 拆「应用账号 / 运维账号」；
-  管理 token 支持多凭据与过期时间；`.env` 逐步迁移到 KMS / 密钥托管（当前决策为暂缓）。
+  `.env` 逐步迁移到 KMS / 密钥托管（当前决策为暂缓）。
+- **管理凭据与入口已加固（2026-09-14）**：
+  * 凭据改为**多标签** `ADMIN_API_TOKENS="label:token,..."`——可单独吊销，审计里能区分
+    「人（ryan）/ 定时任务（nightly）/ 旧单值（legacy）」；
+  * 管理入口 `/ops/` 与 `/api/v1/admin/` 在 nginx 层**只允许 127.0.0.1**（即 SSH 隧道访问），
+    公网返回 403（实测：公网 403、隧道内 200）；
+  * 每次管理请求（含 401 被拒的尝试）写审计：`时间 / label / 真实来访 IP / 方法 / 路径 / 状态 / 耗时`
+    （宿主机 `/srv/carsel/backend/.tmp/admin-audit.log`，随 compose 卷持久化）。
+  * **仍未解决**：凭据 ≠ 身份。凭据被转交或复制后，无法证明操作者是谁本人；要做到「人」级别
+    需要短期会话（token 换 30 分钟会话）或账号体系，列为后续项。
 - **已完成**：生产 `CORS_ORIGINS` 已由旧 ECS 来源改为正式域名集合
   （`https://hp-car-selection-assistant.cn`、`https://www.…`、`http://…`、`http://121.41.4.12`），
   预检验证通过：正式域名回 `access-control-allow-origin`，旧来源被拒。

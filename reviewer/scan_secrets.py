@@ -189,6 +189,25 @@ def _is_placeholder(value: str) -> bool:
     return bool(PLACEHOLDER_PATTERNS.match(value.strip())) or len(value.strip()) < 8
 
 
+def _looks_like_identifier_or_path(value: str) -> bool:
+    """高熵候选是否其实是**标识符或路径**（而非密钥）。
+
+    动机（2026-09 实测）：`HIGH_ENTROPY` 是「24+ 位 [A-Za-z0-9+/_-]」，于是把
+    `test_credentials_include_legacy_single_token`（函数名）、`/root/carsel-nightly-token.txt`
+    （凭据文件路径）都判成了疑似密钥——同一行出现「token」字样就命中，纯属噪声。
+    真实密钥几乎不会长成「纯小写单词用 _ 拼起来」或「带 / 与扩展名的路径」，
+    因此这两类直接放过；混合大小写或含数字/符号的仍照常上报。
+    """
+    candidate = value.strip()
+    if "/" in candidate or "\\" in candidate or candidate.endswith((".txt", ".env", ".json", ".sh", ".py", ".md")):
+        return True  # 路径 / 文件名
+    if re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", candidate):
+        return True  # snake_case 标识符（全小写 + 下划线）
+    if re.fullmatch(r"[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+", candidate):
+        return True  # kebab-case / dotted 名称
+    return False
+
+
 def _is_placeholder_url(url: str) -> bool:
     """带凭据 URL 是否只是文档示例（含 ...、xxx、example、<...> 等占位标记）。"""
     return bool(
@@ -286,22 +305,24 @@ def scan_path(root: Path, verbose: bool = False) -> list[dict]:
                             }
                         )
                 # 高熵 token 跟随密钥类变量名（如 DEEPSEEK_API_KEY="..." 已被 nv 规则覆盖）
-                # 这里补充：行内同时出现密钥类变量名与高熵字符串且不在占位符集合
+                # 这里补充：行内同时出现密钥类变量名与高熵字符串，且该串既不是占位符
+                # 也不像标识符/路径时才上报
                 if HIGH_ENTROPY.search(line):
                     lowered = line.lower()
                     if re.search(r"(api[_-]?key|secret|token|password|passwd)", lowered):
                         for m in HIGH_ENTROPY.finditer(line):
-                            if not _is_placeholder(m.group(0)):
-                                findings.append(
-                                    {
-                                        "file": str(path.relative_to(root)),
-                                        "line": lineno,
-                                        "rule": "high-entropy-secret",
-                                        "severity": "MEDIUM",
-                                        "detail": "密钥类变量附近出现疑似高熵字符串，需人工确认",
-                                    }
-                                )
-                                break
+                            if _is_placeholder(m.group(0)) or _looks_like_identifier_or_path(m.group(0)):
+                                continue
+                            findings.append(
+                                {
+                                    "file": str(path.relative_to(root)),
+                                    "line": lineno,
+                                    "rule": "high-entropy-secret",
+                                    "severity": "MEDIUM",
+                                    "detail": "密钥类变量附近出现疑似高熵字符串，需人工确认",
+                                }
+                            )
+                            break
     return findings
 
 

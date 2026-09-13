@@ -19,7 +19,10 @@ set -uo pipefail
 APP_DIR="/srv/carsel"
 CONTAINER="deploy-api-1"
 FLAG="${APP_DIR}/backend/.tmp/sales-changed.flag"
-TOKEN_FILE="/root/carsel-admin-token.txt"
+# 定时任务用自己的标签凭据（ADMIN_API_TOKENS 里的 nightly:...），便于审计区分「人 / 自动化」；
+# 未配置时回退到人工凭据文件，保证脚本在过渡期也能跑。
+TOKEN_FILE="/root/carsel-nightly-token.txt"
+[ -r "$TOKEN_FILE" ] || TOKEN_FILE="/root/carsel-admin-token.txt"
 API="http://127.0.0.1:8000/api/v1"
 LOG="${APP_DIR}/logs/sales-cron.log"
 REBUILD_LOG="${APP_DIR}/logs/rebuild-cron.log"
