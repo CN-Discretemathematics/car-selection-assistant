@@ -242,8 +242,11 @@ RAG.md            # RAG 子系统设计与运维文档
 
 ## 生产部署（Docker Compose + Nginx）
 
+> 完整手册见 [docs/deployment.md](docs/deployment.md)（服务器实际形态、自动更新、回滚、新机接入）。
+
 ```bash
 # 服务器（阿里云中国内地节点；容器内跑 redis / api / web 三服务）
+# 注意：实际生产机不装 git，源码经 GitHub 源码包同步（见 docs/deployment.md）
 git clone <repo> /srv/carsel && cd /srv/carsel
 cp backend/.env.example backend/.env      # 填生产值（数据库 / LLM / 嵌入 / 管理凭据）
 cd deploy
@@ -251,6 +254,11 @@ docker compose up -d --build              # 构建并启动
 cp nginx.conf /etc/nginx/conf.d/carsel.conf   # server_name 改为已备案域名
 nginx -t && systemctl reload nginx
 ```
+
+**自动更新（只部署 main）**：`deploy/carsel-deploy.sh` 每天 05:00 由 cron 触发——
+对比 GitHub 上 `main` 的最新提交，有更新才同步源码、重建镜像、切流，并在健康检查失败时
+自动回滚到上一版镜像。手工执行 `carsel-deploy.sh --check / --dry-run / --force` 可查状态、
+预演与强制重部署。
 
 部署要点（均为线上实证）：
 
@@ -260,7 +268,9 @@ nginx -t && systemctl reload nginx
   内固化为 `/root/.npmrc`），运行时直接调用镜像内 `next` 二进制，无运行期联网依赖
 - **数据库**：容器化部署与 RDS 不同 VPC 时须使用**外网 endpoint**，并把出口 IP 加入白名单
 - **定时任务**：看门狗（每 5 分钟自愈）+ 夜间 02:30 销量导入 → 条件触发稠密重建
-- **备案**：中国内地节点须完成 ICP 备案；页脚备案号由环境变量 `ICP_NUMBER` 注入并链接工信部
+  + 早上 05:00 自动部署 `main`
+- **备案**：中国内地节点须完成 ICP 备案；页脚备案号由环境变量 `ICP_NUMBER` 注入并链接工信部；
+  备案通过前对外只能用 IP 访问（`http://121.41.4.12`），域名在大陆节点对外服务属违规
 
 ## 安全实践
 
