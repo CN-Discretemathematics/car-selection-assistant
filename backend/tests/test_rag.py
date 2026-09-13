@@ -1,6 +1,7 @@
 """RAG 模块测试：切分/召回/融合/重排/LangGraph 流水线/摄取。"""
 from __future__ import annotations
 
+import json
 from datetime import date
 
 from sqlalchemy.orm import Session
@@ -590,7 +591,7 @@ def test_dense_watermark_detects_lagging_month():
 
 
 def test_dense_watermark_fresh_when_months_match():
-    """月份一致 → stale=False 且无原因文案。"""
+    """月份一致且规模一致 → stale=False 且无原因文案。"""
     status = {
         "dense": {"built_at": "2026-09-10T20:00:00+00:00", "sales_month": "2026-08"},
         "db_counts": {"latest_sales_month": 202608},
@@ -598,6 +599,62 @@ def test_dense_watermark_fresh_when_months_match():
     rag.annotate_dense_watermark(status)
     assert status["dense"]["stale"] is False
     assert status["dense"]["stale_reason"] is None
+
+
+def test_dense_watermark_detects_same_month_scale_change():
+    """2026-09 实况：月份同为 2026-08，但库内规模变了（销量补齐使车系 908→1078）。
+
+    这种「同月内数据更新」只比月份会误判为新鲜，必须靠构建时的规模快照识别。
+    """
+    status = {
+        "dense": {
+            "built_at": "2026-09-10T11:37:07+00:00",
+            "sales_month": "2026-08",
+            "build_counts": {"documents": 7, "facts": 743276, "series": 908, "variants": 6629},
+        },
+        "db_counts": {
+            "latest_sales_month": 202608,
+            "documents": 7,
+            "facts": 743276,
+            "series": 1078,
+            "variants": 6629,
+        },
+    }
+    rag.annotate_dense_watermark(status)
+    assert status["dense"]["stale"] is True
+    assert "车系 908→1078" in status["dense"]["stale_reason"]
+    assert "款型" not in status["dense"]["stale_reason"]  # 一致的维度不进原因文案
+
+
+def test_dense_watermark_scale_check_skipped_for_legacy_marker():
+    """旧版标记（没有 build_counts）不做规模判断：不因缺字段而误报落后。"""
+    status = {
+        "dense": {"built_at": "2026-09-10T11:37:07+00:00", "sales_month": "2026-08"},
+        "db_counts": {"latest_sales_month": 202608, "documents": 7, "series": 1078},
+    }
+    rag.annotate_dense_watermark(status)
+    assert status["dense"]["stale"] is False
+
+
+def test_dense_build_meta_reads_build_counts(tmp_path, monkeypatch):
+    """水位标记里的规模快照要能被读出（否则上面的规模判断永远拿不到数据）。"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".tmp").mkdir()
+    (tmp_path / ".tmp" / "dense-build-meta.json").write_text(
+        json.dumps(
+            {
+                "built_at": "2026-09-13T16:00:00+00:00",
+                "indexed": 12418,
+                "sales_month": "2026-08",
+                "db_counts": {"series": 1078, "variants": 6629},
+            }
+        ),
+        encoding="utf-8",
+    )
+    meta = rag.dense_build_meta()
+    assert meta["chunks"] == 12418
+    assert meta["sales_month"] == 202608
+    assert meta["build_counts"] == {"series": 1078, "variants": 6629}
 
 
 # ── 评测 v4：约束解析 / compare 双侧均衡 / 约束下推重排 ─────────────────────
