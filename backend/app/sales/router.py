@@ -1,7 +1,7 @@
 """首页接口：GET /home。
 
 按指定月份（默认最近完整自然月）的车型销量排序，
-支持能源/车身/价格/品牌类别筛选。
+支持能源/车身/价格/品牌类别筛选，以及关键词搜索（车系名 / 品牌名 / 别名）。
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.catalog import services as catalog
+from app.catalog.series_index import keyword_needle, keyword_score
 from app.common.database import get_session
 from app.common.enums import NEW_ENERGY_TYPES
 from app.common.images import proxy_image_url
@@ -21,6 +22,11 @@ router = APIRouter(tags=["home"])
 
 @router.get("/home", response_model=list[HomeCardOut])
 def home(
+    q: str | None = Query(
+        default=None,
+        max_length=40,
+        description="关键词：车系名 / 品牌名 / 别名（忽略大小写与分隔符），与 /vehicles 同口径",
+    ),
     month: str | None = Query(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$", description="YYYY-MM；默认最近完整自然月"),
     body_type: str | None = Query(default=None),
     energy_type: str | None = Query(default=None, description="new_energy / fuel，或具体 energy_type 枚举"),
@@ -91,7 +97,11 @@ def home(
         price_ranges[series_id] = (float(pmin), float(pmax))
 
     matched: list[tuple[MonthlySales, VehicleSeries, Brand, float | None, float | None]] = []
+    # 关键词与筛选同口径：排名保留全站真实名次（与能源/价格筛选一致，不重新编号）
+    needle = keyword_needle(q)
     for sales, series, brand in rows:
+        if needle and keyword_score(series, brand, needle) is None:
+            continue
         if not _energy_matches(series.energy_types or [], energy_type):
             continue
         price_min_val, price_max_val = price_ranges.get(series.id, (None, None))

@@ -35,6 +35,53 @@ def normalize_name(text: str) -> str:
     return _SEP_RE.sub("", text).lower()
 
 
+def keyword_needle(keyword: str | None) -> str:
+    """把用户输入的关键词归一化为匹配用 needle（纯空白输入视为未搜索）。"""
+    return normalize_name(keyword) if keyword and keyword.strip() else ""
+
+
+def keyword_score(series: VehicleSeries, brand: Brand, needle: str) -> int | None:
+    """关键词匹配得分：越小越靠前；不匹配返回 None。
+
+    归一化后比较（去空白/分隔符 + 小写），因此「腾势Z9 GT」「z9gt」「Z9GT」等效。
+    0 = 车系名/别名完全相同；1 = 车系名前缀，或品牌名精确命中（列出该品牌全部车系）；
+    2 = 子串命中（车系名/别名/品牌名的任意位置）。
+
+    搜索接口（/vehicles、/home）与 Agent 实体解析共用同一套归一化口径，
+    保证「搜得到」与「问得到」一致。
+    """
+    if not needle:
+        return None
+    best: int | None = None
+    for brand_name in (brand.name, *(brand.aliases or [])):
+        normalized = normalize_name(brand_name or "")
+        if not normalized:
+            continue
+        if normalized == needle:
+            best = 1 if best is None else min(best, 1)
+        elif needle in normalized:
+            best = 2 if best is None else min(best, 2)
+    names = [series.name, *(series.aliases or [])]
+    brand_name = brand.name or ""
+    if brand_name and series.name.startswith(brand_name):
+        # 车系名自带品牌前缀时，额外登记「去掉品牌名」的短名（海豚 → 比亚迪海豚）
+        names.append(series.name[len(brand_name) :])
+    for name in names:
+        normalized = normalize_name(name or "")
+        if not normalized:
+            continue
+        if normalized == needle:
+            score = 0
+        elif normalized.startswith(needle):
+            score = 1
+        elif needle in normalized:
+            score = 2
+        else:
+            continue
+        best = score if best is None else min(best, score)
+    return best
+
+
 # 车系名 → series_id 索引缓存（评审 P2：此前每条消息全量加载 908 车系行）。
 # 指纹 = (活跃车系数, max(id), max(车系名), max(校验时间), max(品牌名),
 #          在售款型数, max(款型 id))；
