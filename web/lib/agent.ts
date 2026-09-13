@@ -24,6 +24,16 @@ export async function sendAgentMessage(
 }
 
 /**
+ * 清空该会话的记忆（后端删除画像/消息/上次结果），会话 ID 继续可用。
+ * 用于「重新开始这段对话」：Agent 的约束在会话内累积，理解错了需要有正式入口重置。
+ */
+export async function resetAgentSession(sessionId: string): Promise<void> {
+  const res = await fetch(`/api/v1/agent/sessions/${sessionId}/reset`, { method: "POST" });
+  // 404 = 会话已过期（Redis TTL 到期）；对调用方等价于「已经是干净的」，不报错
+  if (!res.ok && res.status !== 404) throw new Error(`重置会话失败（${res.status}）`);
+}
+
+/**
  * 订阅会话 SSE 流（后端 /stream 端点；生产环境由 Redis Stream 事件中转桥接）。
  * 返回的 payload 与 POST 结果同构，作为权威事件源；SSE 不可用时调用方回退 POST 响应。
  */
