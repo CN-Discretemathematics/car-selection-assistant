@@ -48,17 +48,56 @@ def test_ready_month_skips_fetch(db_session: Session, monkeypatch):
     source = make_source(db_session)
     brand = make_brand(db_session, source=source)
     series = make_series(db_session, brand, source=source)
-    make_sales(db_session, series, "2026-08", 100, source=source)
+    make_sales(db_session, series, "2026-08", 39651, source=source)
     db_session.commit()
+    # 阈值单独由 test_low_row_count_triggers_refetch 覆盖；这里聚焦「已就绪即跳过」
+    monkeypatch.setattr(fss, "MIN_TRUSTED_ROWS", 1)
 
-    def boom(**kwargs):
-        raise AssertionError("库内已有目标月数据时不应再抓取")
+    def boom(*args, **kwargs):
+        raise AssertionError("库内已有目标月完整数据时不应再抓取")
 
     monkeypatch.setattr(fss, "fetch_and_import_month", boom)
     log_path = _log_path("ready")
     rc = fss.main(["--month", "2026-08", "--log", str(log_path)], session_factory=_factory(db_session))
     assert rc == 0
     assert "已就绪" in log_path.read_text(encoding="utf-8")
+
+
+def test_low_row_count_triggers_refetch(db_session: Session, monkeypatch):
+    """2026-09 事故：库内仅 20 行（只抓到榜单首屏）却被判「已就绪」，残缺数据静默存在一个月。
+
+    现在行数低于 MIN_TRUSTED_ROWS（默认 100）时不再跳过，改为补抓（抓取幂等）。
+    """
+    source = make_source(db_session)
+    brand = make_brand(db_session, source=source)
+    series = make_series(db_session, brand, source=source)
+    make_sales(db_session, series, "2026-08", 39651, source=source)
+    db_session.commit()
+
+    calls: list[str] = []
+
+    def fake_fetch(month, **kwargs):
+        calls.append(month)
+        return {
+            "requested_month": month,
+            "month": month,
+            "rows": 650,
+            "pages": 4,
+            "total_pages": 4,
+            "source": "api",
+            "imported": True,
+            "errors": [],
+            "created": {"sales": 649},
+            "updated": {},
+            "skipped_reason": None,
+        }
+
+    monkeypatch.setattr(fss, "fetch_and_import_month", fake_fetch)
+    log_path = _log_path("low_rows")
+    rc = fss.main(["--month", "2026-08", "--log", str(log_path)], session_factory=_factory(db_session))
+    assert rc == 0
+    assert calls == ["2026-08"], "低于可信下限时应补抓"
+    assert "低于可信下限" in log_path.read_text(encoding="utf-8")
 
 
 def test_not_ready_no_import_and_alert(db_session: Session, monkeypatch):
@@ -160,8 +199,9 @@ def test_ready_month_does_not_set_flag(db_session: Session, monkeypatch):
     series = make_series(db_session, brand, source=source)
     make_sales(db_session, series, "2026-08", 100, source=source)
     db_session.commit()
+    monkeypatch.setattr(fss, "MIN_TRUSTED_ROWS", 1)  # 本用例只验证「已就绪不置标记」
 
-    def boom(**kwargs):
+    def boom(*args, **kwargs):
         raise AssertionError("已就绪不应抓取")
 
     monkeypatch.setattr(fss, "fetch_and_import_month", boom)

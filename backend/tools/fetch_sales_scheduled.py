@@ -37,6 +37,10 @@ from tools.fetch_autohome_sales import fetch_and_import_month  # noqa: E402
 
 DEFAULT_LOG_PATH = os.path.join("logs", "sales_fetch.log")
 DEFAULT_WARN_DAYS = 15
+# 「已就绪」的可信下限：门户单月榜单通常 600+ 个车系，行数远低于此说明当年只抓到首屏
+# （2026-09 实况：库内仅 20 行被判定「已就绪」，导致残缺数据静默存在一个月）。
+# 低于阈值时不再跳过，而是补抓一次（抓取幂等，重复执行安全）。
+MIN_TRUSTED_ROWS = 100
 # 稠密索引重建触发标记：成功导入「新月份」数据后写入（放持久化 .tmp 目录；
 # cron 仅在标记存在时触发增量重建——销量按月更新，不每晚重建）
 FLAG_PATH = os.path.join(".tmp", "sales-changed.flag")
@@ -106,8 +110,14 @@ def main(argv: list[str] | None = None, session_factory=None) -> int:
         return 2
 
     if present and not args.force:
-        log(f"已就绪：目标月 {month} 已有销量数据（{present} 行），无需抓取")
-        return 0
+        if present >= MIN_TRUSTED_ROWS:
+            log(f"已就绪：目标月 {month} 已有销量数据（{present} 行），无需抓取")
+            return 0
+        # 行数低得可疑：多半是历史版本只抓到榜单首屏（20 行）——补抓一次，不静默接受
+        log(
+            f"注意：目标月 {month} 库内仅 {present} 行，低于可信下限 {MIN_TRUSTED_ROWS} 行，"
+            f"疑似此前只抓到榜单首屏，本次补抓（幂等，安全）"
+        )
 
     log(f"目标月 {month} 尚无数据（库内 {present} 行），尝试抓取…")
     try:
