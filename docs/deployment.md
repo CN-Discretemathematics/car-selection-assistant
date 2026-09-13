@@ -123,18 +123,49 @@ carsel-nightly.sh --no-rebuild    # 只导入不重建（排障用）
 （`app/rag/ingest.py`），不重建则 RAG 回答里的销量是旧的（2026-09 实况：数据补齐后
 集合仍停留在旧切片集，而水位只比月份故误报「新鲜」）。
 
-## 6. 管理页面入口
+## 6. 管理页面入口（只允许 SSH 隧道）
 
-- **RAG 流程管理**：`http://<服务器>/ops/rag`（备案前用 `http://121.41.4.12/ops/rag`）——
-  流程图 / 运行状态（含水位置信）/ 试运行 / 运行轨迹 / 评测报告，可在页面上触发索引重建。
-- **凭据**：页面右上角填 **Bearer token**，值为服务器 `/root/carsel-admin-token.txt`
-  （600 权限）；填写后保存在浏览器 localStorage，页面内所有管理请求自动带上。
-  查看命令：`ssh root@<服务器> 'cat /root/carsel-admin-token.txt'`。
-- **明文传输提醒**：备案前站点是 HTTP，token 会明文过网。远程管理建议走 SSH 隧道：
-  ```bash
-  ssh -i .deploy/ecs_key -L 8080:127.0.0.1:3000 root@121.41.4.12   # 然后访问 http://127.0.0.1:8080/ops/rag
-  ```
-- 管理接口在无 token 时返回 401、未配置 token 时返回 503（可用 `curl -s -o /dev/null -w '%{http_code}'` 自查）。
+管理入口（`/ops/` 与 `/api/v1/admin/`）**不对公网开放**：nginx 只放行 `127.0.0.1`，
+公网访问返回 403（实测）。原因：管理凭据是静态 Bearer token，**认证的是「凭据」而不是「人」**，
+一旦泄露从任何地方都能用；把入口收到隧道后，泄露也无法从公网触达。
+
+```powershell
+# 一条命令开隧道，然后浏览器访问 http://127.0.0.1:8080/ops/rag
+ssh -i .deploy\ecs_key -L 8080:127.0.0.1:3000 root@121.41.4.12
+```
+
+页面右上角填 **Bearer token**（保存在浏览器 localStorage），取值：
+
+```powershell
+ssh -i .deploy\ecs_key root@121.41.4.12 "cat /root/carsel-admin-token.txt"   # 人工使用
+```
+
+**多标签凭据（可单独吊销、可在审计里区分谁在操作）**：
+
+```bash
+# 服务器 .env
+ADMIN_API_TOKENS="ryan:<token1>,nightly:<token2>"   # label:token，逗号分隔
+ADMIN_API_TOKEN=<token1>                            # 兼容保留（未升级客户端/脚本），标签 legacy
+```
+
+轮换某个人/某条自动化时，只改对应的 `label:token` 并重建容器即可，不影响其他凭据。
+
+**审计**：管理路径的每一次请求（含 401 被拒的尝试）都会记录
+`时间 / label / 真实来访 IP / 方法 / 路径 / 状态 / 耗时`：
+
+- 宿主机：`/srv/carsel/backend/.tmp/admin-audit.log`（随 compose 卷持久化，超 2MB 轮转为 `.1`）
+- 容器日志：`docker logs deploy-api-1 | grep app.admin.audit`
+
+**能回答与不能回答的问题**：有了标签与审计后可以回答「哪把凭据、什么时间、从哪个 IP 做了什么」；
+但**仍然不能证明操作者是谁本人**（凭据可被转交/复制）。要做到「人」级别的身份，需要短期会话
+（token 换 30 分钟会话）+ 单独的 SSO/账号体系，属后续项。
+
+其它可用入口与自查：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+  http://127.0.0.1:8000/api/v1/admin/rag/status   # 无 token 401、未配置 503
+```
 
 ## 7. 已知事项与后续改进
 

@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # 管理后台：独立凭据由运维经环境变量注入（Bearer token），不开放注册；
     # 为空时管理后台接口返回 503（未配置）
     admin_api_token: str = ""
+    # 多标签管理凭据：`label:token,label2:token2`。每把带标签 → 审计里能区分「谁在操作」，
+    # 也能单独吊销（旧单值 admin_api_token 仍兼容，标签为 legacy）
+    admin_api_tokens: str = ""
     # 云 Redis（会话/限流/验证码/令牌的生产存储；为空时回退进程内存储）
     redis_url: str = ""
     # OSS 对象存储（网页快照/PDF/图片；为空时仅本地存档）

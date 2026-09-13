@@ -1,13 +1,96 @@
-"""管理后台接口测试（PATCH 状态、不删除历史数据）。"""
+"""管理后台接口测试（PATCH 状态、不删除历史数据；多标签凭据与审计）。"""
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.common.admin_auth import (
+    admin_credentials,
+    parse_admin_tokens,
+    resolve_admin_label,
+)
 from app.common.models import DataQualityConflict
 from tests.seed import make_brand, make_series, make_source, make_variant, make_year
 
 ADMIN = {"Authorization": "Bearer test-admin-token"}
+AUDIT_TMP = Path(__file__).resolve().parent / ".tmp"
+
+
+def test_parse_admin_tokens():
+    assert parse_admin_tokens("ryan:abc,nightly:def") == [("ryan", "abc"), ("nightly", "def")]
+    # 空项 / 缺冒号 / 缺标签或 token 一律忽略，不影响其余凭据
+    assert parse_admin_tokens(" ryan:abc , ,bad,onlylabel:,:onlytoken") == [("ryan", "abc")]
+    assert parse_admin_tokens("") == []
+
+
+def test_credentials_include_legacy_single_token(monkeypatch):
+    """旧单值 ADMIN_API_TOKEN 仍生效（标签 legacy），且与多标签重复时不重复计入。"""
+    from app.common.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "admin_api_tokens", "ryan:shared,nightly:solo")
+    monkeypatch.setattr(settings, "admin_api_token", "shared")
+    assert admin_credentials() == [("ryan", "shared"), ("nightly", "solo")]
+
+    monkeypatch.setattr(settings, "admin_api_token", "legacy-only")
+    assert admin_credentials() == [("ryan", "shared"), ("nightly", "solo"), ("legacy", "legacy-only")]
+
+
+def test_resolve_admin_label(monkeypatch):
+    from app.common.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "admin_api_tokens", "ryan:aaa,nightly:bbb")
+    monkeypatch.setattr(settings, "admin_api_token", "")
+    assert resolve_admin_label("Bearer aaa") == "ryan"
+    assert resolve_admin_label("Bearer bbb") == "nightly"
+    assert resolve_admin_label("Bearer ccc") is None
+    assert resolve_admin_label("aaa") is None  # 缺 Bearer 前缀
+    assert resolve_admin_label(None) is None
+
+
+def test_multi_token_grants_access_and_audits(client: TestClient, db_session: Session, monkeypatch):
+    """多标签凭据可用；每次管理请求（含被拒的）都写审计（标签 + 真实 IP + 状态）。"""
+    _seed(db_session)
+    from app.common import admin_auth
+    from app.common.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "admin_api_tokens", "ryan:ryan-token,nightly:nightly-token")
+    monkeypatch.setattr(settings, "admin_api_token", "")
+
+    audit_path = AUDIT_TMP / "admin-audit-test.log"
+    audit_path.unlink(missing_ok=True)
+    monkeypatch.setattr(admin_auth, "AUDIT_LOG_PATH", audit_path)
+
+    # 两个标签都能过；未知凭据 401
+    assert client.get("/api/v1/admin/stats", headers={"Authorization": "Bearer ryan-token"}).status_code == 200
+    assert client.get("/api/v1/admin/stats", headers={"Authorization": "Bearer nightly-token"}).status_code == 200
+    assert client.get("/api/v1/admin/stats", headers={"Authorization": "Bearer nope"}).status_code == 401
+
+    lines = audit_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 3, "每次管理请求都应留下审计行（含 401 尝试）"
+    assert "label=ryan" in lines[0] and "status=200" in lines[0]
+    assert "label=nightly" in lines[1]
+    assert "label=-" in lines[2] and "status=401" in lines[2], "未通过鉴权的尝试也要记录（label=-）"
+    assert all("GET /api/v1/admin/stats" in line for line in lines)
+    assert all("ip=" in line for line in lines)
+
+
+def test_non_admin_paths_not_audited(client: TestClient, db_session: Session, monkeypatch):
+    """公开路径不写管理审计（避免把整站流量灌进审计文件）。"""
+    _seed(db_session)
+    from app.common import admin_auth
+
+    audit_path = AUDIT_TMP / "admin-audit-public.log"
+    audit_path.unlink(missing_ok=True)
+    monkeypatch.setattr(admin_auth, "AUDIT_LOG_PATH", audit_path)
+
+    assert client.get("/api/v1/health").status_code == 200
+    assert not audit_path.exists()
 
 
 def _seed(db_session: Session):

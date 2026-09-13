@@ -1,10 +1,9 @@
 """管理后台接口（独立凭据，PATCH 状态而非删除）。"""
 from __future__ import annotations
 
-import secrets
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -17,7 +16,7 @@ from app.admin.schemas import (
     SeriesPatch,
     VariantPatch,
 )
-from app.common.config import get_settings
+from app.common.admin_auth import require_admin as admin_require_admin
 from app.common.database import get_session
 from app.common.errors import not_found
 from app.common.models import (
@@ -35,22 +34,9 @@ from app.common.models import (
 
 router = APIRouter(tags=["admin"])
 
-
-def require_admin(authorization: str | None = Header(default=None)) -> None:
-    """管理后台独立凭据鉴权（Bearer token，经环境变量注入；不开放注册）。
-
-    未配置 → 503；缺凭据/凭据无效 → 401。
-    """
-    from fastapi import HTTPException
-
-    settings = get_settings()
-    if not settings.admin_api_token:
-        raise HTTPException(status_code=503, detail="管理后台未配置（ADMIN_API_TOKEN 为空）。")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="缺少管理凭据。")
-    token = authorization[len("Bearer "):].strip()
-    if not secrets.compare_digest(token, settings.admin_api_token):
-        raise HTTPException(status_code=401, detail="管理凭据无效。")
+# 管理鉴权与审计集中在 app.common.admin_auth：多标签 token（可单独吊销）+ 每次管理请求写审计。
+# 这里保留 require_admin 名字，路由上的 Depends(require_admin) 无需改动。
+require_admin = admin_require_admin
 
 
 @router.get("/admin/brands", response_model=list[BrandAdminOut], dependencies=[Depends(require_admin)])
