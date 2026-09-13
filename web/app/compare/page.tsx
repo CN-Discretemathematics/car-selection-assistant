@@ -276,7 +276,7 @@ function CompareTable({ data }: { data: ComparisonDetail }) {
       )}
       <Reveal className="mt-4" delay={60}>
         <p className="text-xs leading-6 text-ash">
-          对比对象为具体 SKU；缺失数据统一显示「{MISSING_LABEL}」，不同工况（CLTC/NEDC/WLTC）的续航/油耗不直接比较。
+          对比对象为具体款型；不同工况（CLTC/NEDC/WLTC）的续航与油耗不直接比较。
         </p>
       </Reveal>
     </div>
@@ -293,7 +293,7 @@ function CompareContent() {
         <HeroGlow />
         <div className="relative mx-auto max-w-6xl px-4 pb-10 pt-12 text-center sm:px-6 sm:pt-14">
           <h1 className="text-[32px] font-semibold leading-tight tracking-tight text-ink sm:text-[42px]">
-            <RiseText text="SKU 对比" startDelay={120} />
+            <RiseText text="款型对比" startDelay={120} />
             <RiseText text="，" startDelay={430} />
             <RiseText text="差异一目了然" gradient startDelay={520} />
           </h1>
@@ -301,7 +301,7 @@ function CompareContent() {
             className="animate-fade-up mx-auto mt-4 max-w-xl text-sm leading-6 text-ash sm:text-[15px]"
             style={{ animationDelay: "880ms" }}
           >
-            从车型详情页选择 SKU 加入对比，最多同时比较 {MAX_COMPARE} 个；对比链接可分享。
+            从车型详情页选择具体款型加入对比，最多同时比较 {MAX_COMPARE} 个；对比链接可分享。
           </p>
           {data && data.variants.length > 0 && (
             <div className="animate-scale-in mt-6 flex justify-center" style={{ animationDelay: "200ms" }}>
@@ -337,9 +337,9 @@ function CompareContent() {
             <span className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-ice text-4xl shadow-inner shadow-apple/10">
               🚗
             </span>
-            <p className="mt-5 text-[17px] font-semibold tracking-tight text-ink">尚未选择 SKU</p>
+            <p className="mt-5 text-[17px] font-semibold tracking-tight text-ink">尚未选择款型</p>
             <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-ash">
-              请前往任意车型详情页点击「加入对比」，即可开始比较具体 SKU 的参数差异。
+              请前往任意车型详情页点击「加入对比」，即可开始比较具体款型的参数差异。
             </p>
             <div className="mt-6">
               <Link

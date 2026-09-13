@@ -15,7 +15,7 @@ export default function AddToCompareButton({ variantId }: { variantId: number })
       writeCompareIds(ids.filter((id) => id !== variantId));
       setSelected(false);
     } else if (ids.length >= MAX_COMPARE) {
-      window.alert(`最多同时对比 ${MAX_COMPARE} 个 SKU，请先移除部分车型。`);
+      window.alert(`最多同时对比 ${MAX_COMPARE} 个款型，请先移除部分车型。`);
     } else {
       writeCompareIds([...ids, variantId]);
       setSelected(true);

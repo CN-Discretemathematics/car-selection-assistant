@@ -48,7 +48,7 @@ export default function FavoritesPage() {
             className="animate-fade-up mx-auto mt-4 max-w-xl text-sm leading-6 text-ash sm:text-[15px]"
             style={{ animationDelay: "560ms" }}
           >
-            收藏的车型系列与 SKU（仅存账号邮箱，不收集其他信息）。
+            收藏的车型与款型（仅存账号邮箱，不收集其他信息）。
           </p>
         </div>
       </section>
@@ -112,7 +112,7 @@ export default function FavoritesPage() {
                           {item.brand_name} {item.name}
                         </p>
                         <p className="mt-0.5 text-xs text-ash">
-                          {item.kind === "series" ? "车型系列" : "具体 SKU"}
+                          {item.kind === "series" ? "车型" : "具体款型"}
                         </p>
                       </div>
                     </div>

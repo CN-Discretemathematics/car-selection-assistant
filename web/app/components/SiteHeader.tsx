@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 const NAV = [
   { href: "/", label: "首页", match: (p: string) => p === "/" },
   { href: "/vehicles", label: "全部车型", match: (p: string) => p === "/vehicles" },
-  { href: "/compare", label: "SKU 对比", match: (p: string) => p.startsWith("/compare") },
+  { href: "/compare", label: "款型对比", match: (p: string) => p.startsWith("/compare") },
   { href: "/favorites", label: "我的收藏", match: (p: string) => p.startsWith("/favorites") },
 ];
 

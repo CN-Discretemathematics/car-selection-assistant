@@ -51,7 +51,7 @@ export default function CompareBar() {
         {ids.length}
       </span>
       <span className="whitespace-nowrap text-sm text-ash">
-        已选 <span className="font-semibold text-ink">{ids.length}</span> 个 SKU
+        已选 <span className="font-semibold text-ink">{ids.length}</span> 个款型
       </span>
       <Link
         href={compareHref(ids)}

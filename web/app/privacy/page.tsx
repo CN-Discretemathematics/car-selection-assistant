@@ -20,7 +20,7 @@ export default function PrivacyPage() {
           <div className="glass rounded-[26px] border border-black/[0.05] p-6 sm:p-8">
             <h2 className="text-[17px] font-semibold tracking-tight text-ink">1. 我们收集什么</h2>
             <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-7 text-ink-soft">
-              <li>浏览、查看车型详情、SKU 对比、分享链接等功能无需注册，也不收集任何个人信息。</li>
+              <li>浏览、查看车型详情、款型对比、分享链接等功能无需注册，也不收集任何个人信息。</li>
               <li>
                 只有在你主动使用「收藏」功能时，才需要登录；登录只收集<strong className="font-semibold text-ink">邮箱地址</strong>
                 （或未来接入的手机号），不收集姓名、性别、生日、地址等任何其他信息。
@@ -35,7 +35,7 @@ export default function PrivacyPage() {
             <h2 className="text-[17px] font-semibold tracking-tight text-ink">2. 我们如何使用信息</h2>
             <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-7 text-ink-soft">
               <li>邮箱仅用于登录验证（发送验证码）与账号标识；</li>
-              <li>收藏列表仅用于向你自己展示收藏的车型与 SKU；</li>
+              <li>收藏列表仅用于向你自己展示收藏的车型与款型；</li>
               <li>我们不会将上述信息出售、出租或用于任何广告营销。</li>
             </ul>
           </div>
