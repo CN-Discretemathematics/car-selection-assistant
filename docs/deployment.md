@@ -118,6 +118,8 @@ carsel-nightly.sh --no-rebuild    # 只导入不重建（排障用）
    `stale/stale_reason`（月份 + 规模双比对，见 §7）。
 6. **自更新**：仓库里的脚本变化后，下次运行自动安装到 `/usr/local/bin`。
 7. 日志：`logs/sales-cron.log`（任务级）与 `logs/rebuild-cron.log`（重建明细），自动截断保留 3000 行。
+8. **凭据**：脚本优先读 `/root/carsel-nightly-token.txt`（`ADMIN_API_TOKENS` 里 `nightly:` 那把），
+   读不到才回退 `/root/carsel-admin-token.txt`——这样审计里能区分「定时任务」与「人」。
 
 **为什么销量变化必须重建**：车系摘要切片文本含「YYYY-MM 月销量 N 辆」一句话
 （`app/rag/ingest.py`），不重建则 RAG 回答里的销量是旧的（2026-09 实况：数据补齐后
