@@ -78,10 +78,27 @@ git push --force-with-lease origin <branch>     # 历史被重写后用它，不
 3. 嵌套引号（如 `python3 -c "… '…' …"`）几乎必坏，bash 侧报
    `syntax error near unexpected token '('` 或 `unexpected EOF while looking for matching quote`。
    → 同上：一律走脚本文件。
-4. 不要用 PowerShell 管道改文件（`Get-Content … | Set-Content`）：会破坏 UTF-8（中文变乱码）
-   与行尾。需要改文件用编辑工具，或改完用 `scp` 传 LF 文件过去。
+4. **任何 PowerShell 文本改写都不要用**：`(Get-Content -Raw) -replace … | Set-Content -Encoding utf8`
+   本次真的把源码写坏了（JSX 语法错误、中文字符被替换），只能 `git checkout -- <file>` 回滚重做。
+   改文件一律用编辑工具；确需批量替换就写 Python 脚本（`encoding='utf-8'` + `newline='\n'`），
+   改完用 `git diff` 与解析器/编译器复核。
 
 判断口诀：**命令里出现引号嵌套、`$()`、括号、反引号时，不要再拼字符串，直接落成脚本文件。**
+**改文件不要经过 PowerShell 的字符串管道。**
+
+## 前端/构建类环境陷阱（同期实测）
+
+- **不要在 `next dev` 运行时执行 `next build`**：两者共用 `.next` 目录会互相破坏，症状是
+  dev 端报 `Cannot find module './448.js'` / `vendor-chunks/…` 并整页 500——看着像代码坏了，
+  其实停掉 dev、删掉 `.next`、重启 dev 即可恢复。要跑生产构建就先停 dev。
+- **CSS 动画残留 `transform` 会创建层叠上下文**：筛选栏 `.glass` 带 `animate-fade-up`，
+  动画结束后 `transform` 仍是 `matrix(1,0,0,1,0,0)`（非 none），于是栏内 `z-50` 的下拉浮层
+  被下方卡片盖住。修法是给容器显式 `relative z-N`（本仓库用 `z-20`，低于导航 `z-30`、
+  悬浮助手 `z-40`），而不是继续抬高浮层自身的 z 值。
+- **浮层是否真在最上层用 `document.elementFromPoint(x, y)` 判断**，比肉眼看截图可靠
+  （半透明浮层在缩略图里极易误判）。
+- 半透明浮层（`bg-white/95` + `backdrop-blur`）会让下层卡片文字透出来，深色文字叠浅色底时
+  尤其明显；下拉这类需要精确阅读的浮层用**实心白底**。
 
 ## 处理密钥时的硬规则（本次因违反付出代价）
 

@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { BODY_LABELS, formatPriceRange, type VehicleList, type VehicleListItem } from "@/lib/api";
@@ -9,47 +8,38 @@ const DEBOUNCE_MS = 220;
 /** 下拉最多展示的结果数（超出走「查看全部」）。 */
 const DROPDOWN_SIZE = 6;
 const HINT = "试试：比亚迪 / Model Y / 腾势Z9GT";
-/** 支持就地关键词筛选的页面（筛选栏搜索回车即筛当前列表，不跳页）。 */
+/** 支持就地关键词筛选的页面（回车即筛当前列表，不跳页）；其它页面回退到 /vehicles?q=。 */
 const INLINE_QUERY_PATHS = ["/", "/vehicles"];
 
 interface SearchBarProps {
-  /**
-   * header：导航内联搜索（≥lg 常显输入框；sm~lg 折叠为图标 + 浮层，避免挤压导航）；
-   * hero：整行大搜索框；
-   * filter：筛选栏内紧凑输入框（放在排序右侧），回车＝筛选当前页列表（/ 与 /vehicles），
-   *         选择下拉项＝直达该车系详情。
-   */
-  variant?: "header" | "hero" | "filter";
   placeholder?: string;
   className?: string;
 }
 
 /**
- * 车系搜索：输入即搜（防抖 220ms），下拉展示缩略图/品牌车系/价格区间，↑↓ 可键盘选择。
+ * 筛选栏搜索（放在筛选栏「排序」右侧，首页与全部车型页共用）：
+ * 输入即搜（防抖 220ms），下拉展示缩略图/品牌车系/价格区间，↑↓ 可键盘选择；
+ * 回车＝把 q 写进当前页 URL 就地筛选，选择下拉项＝直达该车系详情，✕＝取消关键词筛选。
  * 数据来自 GET /api/v1/vehicles?q=（与 /home?q=、「问 Agent」共用同一套名称归一化匹配）。
  *
  * 内部用 useSearchParams 读取当前 q，Next 15 要求这类组件必须有 Suspense 边界，
- * 否则任何静态页（如 /ops/rag，含 SiteHeader）预渲染会因 CSR bailout 失败——
- * 这里在组件内统一兜住，调用方无需关心。
+ * 否则任何静态页（如 /ops/rag）预渲染会因 CSR bailout 失败——这里统一兜住，调用方无需关心。
  */
 export default function SearchBar(props: SearchBarProps) {
   return (
-    <Suspense fallback={<SearchBarSkeleton variant={props.variant ?? "header"} />}>
+    <Suspense fallback={<SearchBarSkeleton />}>
       <SearchBarInner {...props} />
     </Suspense>
   );
 }
 
 /** 加载/占位：尺寸与真实输入框一致，避免布局跳动。 */
-function SearchBarSkeleton({ variant }: { variant: NonNullable<SearchBarProps["variant"]> }) {
-  const size =
-    variant === "hero" ? "h-10 w-full" : variant === "filter" ? "h-9 w-[190px]" : "h-9 w-[210px]";
-  return <div className={`animate-pulse rounded-full bg-white/70 ${size}`} aria-hidden />;
+function SearchBarSkeleton() {
+  return <div className="h-9 w-[190px] animate-pulse rounded-full bg-white/70" aria-hidden />;
 }
 
 function SearchBarInner({
-  variant = "header",
-  placeholder = "搜品牌或车系，如「比亚迪」「Z9GT」",
+  placeholder = "搜索车系/品牌",
   className = "",
 }: SearchBarProps) {
   const router = useRouter();
@@ -61,18 +51,17 @@ function SearchBarInner({
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   const [open, setOpen] = useState(false);
-  const [expanded, setExpanded] = useState(false); // header 变体在窄屏的浮层
   const [active, setActive] = useState(-1);
   const boxRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   // 相同关键词不重复请求（删除后又输入同一词时直接命中）
   const cacheRef = useRef<Map<string, VehicleList>>(new Map());
 
-  // filter 变体：输入框跟随 URL 的 q（前进/后退、清空筛选后保持一致）
+  // 输入框跟随 URL 的 q（前进/后退、清空筛选后保持一致）
   const urlKeyword = searchParams.get("q") ?? "";
   useEffect(() => {
-    if (variant === "filter") setValue(urlKeyword);
-  }, [variant, urlKeyword]);
+    setValue(urlKeyword);
+  }, [urlKeyword]);
 
   const keyword = value.trim();
 
@@ -123,33 +112,27 @@ function SearchBarInner({
     };
   }, [keyword]);
 
-  // 点击外部 / Esc 收起下拉与窄屏浮层
+  // 点击外部收起下拉
   useEffect(() => {
-    if (!open && !expanded) return;
+    if (!open) return;
     const onDown = (e: MouseEvent) => {
       if (boxRef.current && !boxRef.current.contains(e.target as Node)) {
         setOpen(false);
-        setExpanded(false);
       }
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
-  }, [open, expanded]);
-
-  useEffect(() => {
-    if (expanded) inputRef.current?.focus();
-  }, [expanded]);
+  }, [open]);
 
   function go(href: string) {
     setOpen(false);
-    setExpanded(false);
     setActive(-1);
     setValue("");
     router.push(href);
   }
 
-  /** filter 变体：把关键词写进当前页 URL（保留其它筛选条件），列表就地筛选。 */
-  const inlineQuery = variant === "filter" && INLINE_QUERY_PATHS.includes(pathname);
+  /** 把关键词写进当前页 URL（保留其它筛选条件），列表就地筛选。 */
+  const inlineQuery = INLINE_QUERY_PATHS.includes(pathname);
 
   function applyInlineQuery(next: string | null) {
     const params = new URLSearchParams(searchParams.toString());
@@ -191,7 +174,6 @@ function SearchBarInner({
       submit();
     } else if (e.key === "Escape") {
       if (open) setOpen(false);
-      else setExpanded(false);
     }
   }
 
@@ -221,9 +203,7 @@ function SearchBarInner({
         role="combobox"
         aria-expanded={showPanel}
         aria-controls="series-search-results"
-        className={`w-full rounded-full border border-black/[0.08] bg-white/85 py-2 pl-9 pr-9 text-[13.5px] text-ink shadow-sm transition-all duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)] placeholder:text-ash/70 hover:border-apple/35 hover:bg-white focus:border-apple focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12 [&::-webkit-search-cancel-button]:hidden ${
-          variant === "hero" ? "py-2.5 pl-10 text-sm" : ""
-        } ${variant === "filter" ? "h-9 py-0 pl-8 pr-8 text-[13px]" : ""}`}
+        className={`w-full rounded-full border border-black/[0.08] bg-white/85 py-2 pl-9 pr-9 text-[13.5px] text-ink shadow-sm transition-all duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)] placeholder:text-ash/70 hover:border-apple/35 hover:bg-white focus:border-apple focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12 [&::-webkit-search-cancel-button]:hidden h-9 py-0 pl-8 pr-8 text-[13px]`}
       />
       {loading && (
         <span
@@ -255,12 +235,7 @@ function SearchBarInner({
         <div
           id="series-search-results"
           role="listbox"
-          className={`animate-scale-in absolute top-[calc(100%+0.5rem)] z-50 overflow-hidden rounded-[22px] border border-black/[0.07] bg-white/95 p-1.5 shadow-[0_22px_50px_-18px_rgba(0,0,0,0.28)] backdrop-blur-xl ${
-            variant === "hero"
-              ? "left-0 right-0 origin-top"
-              : // 导航/筛选栏输入框较窄：下拉比输入框宽，右对齐向左展开，条目才读得全
-                "right-0 w-[360px] max-w-[calc(100vw-2rem)] origin-top-right"
-          }`}
+          className="animate-scale-in absolute right-0 top-[calc(100%+0.5rem)] z-50 w-[360px] max-w-[calc(100vw-2rem)] origin-top-right overflow-hidden rounded-[22px] border border-black/[0.08] bg-white p-1.5 shadow-[0_22px_50px_-14px_rgba(0,0,0,0.32)]"
         >
           {failed ? (
             <p className="px-3 py-3 text-xs leading-5 text-ash">搜索服务暂时不可用，请稍后重试。</p>
@@ -339,44 +314,10 @@ function SearchBarInner({
     </div>
   );
 
-  if (variant === "hero") {
-    return <div className={`relative w-full ${className}`}>{field}</div>;
-  }
-
-  if (variant === "filter") {
-    // 筛选栏内联：紧凑输入框，宽度自适应（窄屏换行时占满一行）
-    return (
-      <div ref={boxRef} className={`relative w-[190px] max-w-full ${className}`}>
-        {field}
-      </div>
-    );
-  }
-
+  // 筛选栏内联：紧凑输入框（窄屏换行时占满一行）
   return (
-    <div ref={boxRef} className={`relative ${className}`}>
-      {/* 窄屏（<lg）：只放图标，点开浮层输入，避免挤压导航 */}
-      <button
-        type="button"
-        onClick={() => {
-          setExpanded(true);
-          setOpen(true);
-        }}
-        aria-label="搜索品牌或车系"
-        className="press hidden h-9 w-9 items-center justify-center rounded-full text-ink-soft hover:bg-black/[0.05] hover:text-ink sm:flex lg:hidden"
-      >
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-[18px] w-[18px]">
-          <circle cx="8.5" cy="8.5" r="5.5" />
-          <path d="M12.8 12.8 17 17" strokeLinecap="round" />
-        </svg>
-      </button>
-
-      <div
-        className={`${
-          expanded ? "fixed inset-x-3 top-[3.75rem] z-50" : "hidden"
-        } lg:static lg:block lg:w-[210px] lg:transition-[width] lg:duration-500 lg:ease-[cubic-bezier(0.25,0.1,0.25,1)] lg:focus-within:w-[260px]`}
-      >
-        {field}
-      </div>
+    <div ref={boxRef} className={`relative w-[190px] max-w-full ${className}`}>
+      {field}
     </div>
   );
 }
