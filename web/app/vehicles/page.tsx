@@ -6,7 +6,6 @@ import HeroGlow from "../components/HeroGlow";
 import Pagination from "../components/Pagination";
 import Reveal from "../components/Reveal";
 import RiseText from "../components/RiseText";
-import SearchBar from "../components/SearchBar";
 import SiteHeader from "../components/SiteHeader";
 import { fetchServerJson, type VehicleList } from "@/lib/api";
 
@@ -91,11 +90,6 @@ export default async function BrowsePage({
       </section>
 
       <main className="mx-auto max-w-6xl px-4 sm:px-6">
-        {/* 移动端（<sm）导航栏放不下搜索框，这里给整行入口 */}
-        <div className="sm:hidden">
-          <SearchBar variant="hero" placeholder="搜索品牌或车系" />
-        </div>
-
         <Suspense
           fallback={
             <div className="h-16 animate-pulse rounded-3xl bg-white/60" aria-label="加载筛选器" />

@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { trackFilterClear } from "@/lib/agentTriggers";
+import SearchBar from "./SearchBar";
 
 const BRAND_TYPES = [
   { value: "domestic_nev", label: "国产新能源" },
@@ -133,6 +134,9 @@ export default function BrowseFilters() {
           <option value="price_asc">价格从低到高</option>
           <option value="price_desc">价格从高到低</option>
         </select>
+
+        {/* 搜索框固定放在排序右侧：回车即按关键词筛选本页列表 */}
+        <SearchBar variant="filter" placeholder="搜索车系/品牌" className="ml-auto sm:ml-0" />
         {searchParams.size > 0 && (
           <button
             type="button"

@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { trackFilterClear } from "@/lib/agentTriggers";
+import SearchBar from "./SearchBar";
 
 const BRAND_TYPES = [
   { value: "domestic_nev", label: "国产新能源" },
@@ -31,6 +32,9 @@ export default function HomeFilters() {
   function apply(next: typeof form) {
     setForm(next);
     const qs = new URLSearchParams();
+    // 关键词来自筛选栏搜索框（非本表单字段）：改筛选时必须保留，否则搜索结果被静默丢弃
+    const keyword = searchParams.get("q");
+    if (keyword) qs.set("q", keyword);
     for (const [k, v] of Object.entries(next)) {
       if (!v) continue;
       if ((k === "price_min" || k === "price_max") && v !== "" && Number(v) >= 0 && !Number.isNaN(Number(v))) {
@@ -130,6 +134,9 @@ export default function HomeFilters() {
           <option value="desc">销量从高到低</option>
           <option value="asc">销量从低到高</option>
         </select>
+
+        {/* 搜索框固定放在排序右侧：回车即按关键词筛选本页榜单 */}
+        <SearchBar variant="filter" placeholder="搜索车系/品牌" className="ml-auto sm:ml-0" />
 
         {searchParams.size > 0 && (
           <button

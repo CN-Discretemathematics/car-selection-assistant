@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.catalog.series_index import normalize_name
 from app.vehicles.router import keyword_score
-from tests.seed import make_brand, make_series, make_source
+from tests.seed import make_brand, make_sales, make_series, make_source
 
 
 def _fixture(db_session: Session) -> dict[str, int]:
@@ -127,3 +127,54 @@ def test_search_combines_with_filters_and_pagination(client: TestClient, db_sess
 
 def test_search_keyword_length_guard(client: TestClient):
     assert client.get("/api/v1/vehicles", params={"q": "x" * 41}).status_code == 422
+
+
+def _sales_fixture(db_session: Session, month: str = "2026-08") -> dict[str, int]:
+    """销量榜种子：海豚 9000（榜首）、Model Y 7000、汉 5000、腾势Z9GT 1000。"""
+    source = make_source(db_session, name="销量来源")
+    byd = make_brand(db_session, name="比亚迪", source=source)
+    tesla = make_brand(db_session, name="Tesla", source=source)
+    denza = make_brand(db_session, name="腾势", source=source)
+    dolphin = make_series(db_session, byd, name="比亚迪海豚", body_type="sedan", source=source)
+    han = make_series(db_session, byd, name="比亚迪汉", body_type="sedan", source=source)
+    modely = make_series(db_session, tesla, name="Model Y", body_type="suv", source=source)
+    z9gt = make_series(db_session, denza, name="腾势Z9GT", body_type="sedan", source=source)
+    for series, count in ((dolphin, 9000), (modely, 7000), (han, 5000), (z9gt, 1000)):
+        make_sales(db_session, series, month, count, source=source)
+    db_session.commit()
+    return {"dolphin": dolphin.id, "han": han.id, "modely": modely.id, "z9gt": z9gt.id}
+
+
+def test_home_search_filters_ranking_without_renumbering(client: TestClient, db_session: Session):
+    """首页（热销榜）关键词搜索：只留命中车系，且保留全站真实名次。"""
+    ids = _sales_fixture(db_session)
+    body = client.get("/api/v1/home", params={"q": "比亚迪"}).json()
+    assert [c["series_name"] for c in body] == ["比亚迪海豚", "比亚迪汉"]
+    # 名次沿用全站排名（海豚 1、汉 3），与能源/价格筛选一致，不重新编号
+    assert [c["rank"] for c in body] == [1, 3]
+    assert all(c["series_id"] in {ids["dolphin"], ids["han"]} for c in body)
+
+    assert [c["series_name"] for c in client.get("/api/v1/home", params={"q": "z9gt"}).json()] == [
+        "腾势Z9GT"
+    ]
+    assert [c["series_name"] for c in client.get("/api/v1/home", params={"q": "  "}).json()] == [
+        "比亚迪海豚",
+        "Model Y",
+        "比亚迪汉",
+        "腾势Z9GT",
+    ]
+    assert client.get("/api/v1/home", params={"q": "不存在的车系XYZ"}).json() == []
+
+
+def test_home_search_combines_with_filters(client: TestClient, db_session: Session):
+    _sales_fixture(db_session)
+    only_suv = client.get("/api/v1/home", params={"q": "model", "body_type": "suv"}).json()
+    assert [c["series_name"] for c in only_suv] == ["Model Y"]
+    # 关键词与筛选互斥时为空，而不是忽略关键词
+    assert client.get("/api/v1/home", params={"q": "model", "body_type": "mpv"}).json() == []
+    # 关键词命中但被价格筛选排除时同样为空
+    assert client.get("/api/v1/home", params={"q": "腾势", "price_max": 300000}).json() == []
+
+
+def test_home_search_keyword_length_guard(client: TestClient):
+    assert client.get("/api/v1/home", params={"q": "x" * 41}).status_code == 422

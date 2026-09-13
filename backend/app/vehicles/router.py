@@ -13,7 +13,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.catalog import services as catalog
-from app.catalog.series_index import normalize_name
+from app.catalog.series_index import keyword_needle, keyword_score
 from app.common.database import get_session
 from app.common.enums import MISSING_VALUE_LABEL, NEW_ENERGY_TYPES
 from app.common.errors import not_found
@@ -34,46 +34,6 @@ from app.vehicles.schemas import (
 from app.variants.normalization import display_fact_value, fact_display_label
 
 router = APIRouter(tags=["vehicles"])
-
-
-def keyword_score(series: VehicleSeries, brand: Brand, needle: str) -> int | None:
-    """关键词匹配得分：越小越靠前；不匹配返回 None。
-
-    归一化后比较（去空白/分隔符 + 小写），因此「腾势Z9 GT」「z9gt」「Z9GT」等效。
-    0 = 车系名/别名完全相同；1 = 车系名前缀，或品牌名精确命中（列出该品牌全部车系）；
-    2 = 子串命中（车系名/别名/品牌名的任意位置）。
-    """
-    if not needle:
-        return None
-    brand_names = [brand.name, *(brand.aliases or [])]
-    best: int | None = None
-    for brand_name in brand_names:
-        normalized = normalize_name(brand_name or "")
-        if not normalized:
-            continue
-        if normalized == needle:
-            best = 1 if best is None else min(best, 1)
-        elif needle in normalized:
-            best = 2 if best is None else min(best, 2)
-    names = [series.name, *(series.aliases or [])]
-    brand_name = brand.name or ""
-    if brand_name and series.name.startswith(brand_name):
-        # 车系名自带品牌前缀时，额外登记「去掉品牌名」的短名（海豚 → 比亚迪海豚）
-        names.append(series.name[len(brand_name) :])
-    for name in names:
-        normalized = normalize_name(name or "")
-        if not normalized:
-            continue
-        if normalized == needle:
-            score = 0
-        elif normalized.startswith(needle):
-            score = 1
-        elif needle in normalized:
-            score = 2
-        else:
-            continue
-        best = score if best is None else min(best, score)
-    return best
 
 
 @router.get("/vehicles", response_model=VehicleListOut)
@@ -169,7 +129,7 @@ def vehicle_list(
 
     # 关键词过滤：命中即按相关度（精确 > 前缀/品牌 > 子串）优先，再按用户选择的排序
     scores: dict[int, int] = {}
-    needle = normalize_name(q) if q and q.strip() else ""
+    needle = keyword_needle(q)
     if needle:
         matched = []
         for series, brand, pmin, pmax, sale in items:
