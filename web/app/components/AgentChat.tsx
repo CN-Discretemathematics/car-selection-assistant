@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { createAgentSession, sendAgentMessage, subscribeAgentStream } from "@/lib/agent";
+import { createAgentSession, resetAgentSession, sendAgentMessage, subscribeAgentStream } from "@/lib/agent";
 import {
   ENERGY_LABELS,
   formatPrice,
@@ -102,6 +102,27 @@ export default function AgentChat() {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, busy]);
 
+  /**
+   * 新对话：清空后端会话记忆（画像/消息/上次结果）并重置本地列表。
+   * 必要性：Agent 的约束与会话内累积（某轮理解错会一直带下去），刷新页面虽然也能换新会话，
+   * 但用户不一定知道，且会丢失页面上的其他状态。
+   */
+  async function startNewChat() {
+    if (busy) return;
+    const sid = sessionId;
+    setMessages([]);
+    setError(null);
+    setInput("");
+    setSessionId(null); // 下一轮发送时按需新建会话
+    if (sid) {
+      try {
+        await resetAgentSession(sid);
+      } catch {
+        /* 重置失败不阻断本地清空：最坏情况是旧会话留着，下次发送会新建会话 */
+      }
+    }
+  }
+
   async function send(text: string) {
     const trimmed = text.trim();
     if (!trimmed || busy) return;
@@ -159,14 +180,27 @@ export default function AgentChat() {
                 <p className="text-[11px] leading-4 text-ash">说出预算与用途 · 真实车型数据 · 带来源引用</p>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              aria-label="关闭"
-              className="press flex h-7 w-7 items-center justify-center rounded-full bg-black/[0.06] text-xs text-ash hover:bg-black/10 hover:text-ink"
-            >
-              ✕
-            </button>
+            <div className="flex items-center gap-1.5">
+              {messages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={startNewChat}
+                  disabled={busy}
+                  title="清空这段对话（含已记录的预算/用途等条件），重新开始"
+                  className="press rounded-full bg-black/[0.06] px-2.5 py-1 text-[11px] font-medium text-ash hover:bg-black/10 hover:text-ink disabled:opacity-40"
+                >
+                  新对话
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                aria-label="关闭"
+                className="press flex h-7 w-7 items-center justify-center rounded-full bg-black/[0.06] text-xs text-ash hover:bg-black/10 hover:text-ink"
+              >
+                ✕
+              </button>
+            </div>
           </div>
 
           {/* 消息区 */}

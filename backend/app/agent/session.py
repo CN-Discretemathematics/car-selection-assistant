@@ -81,6 +81,25 @@ class SessionStore:
         session = self._get(session_id)
         return session.last_result if session else None
 
+    def clear(self, session_id: str) -> bool:
+        """清空会话记忆（画像 / 消息 / 上次结果），保留会话本身可用。
+
+        为什么需要：画像在会话内是累积的，一旦某轮把约束理解错（例如把「不要奔驰」记成
+        正向约束），后续每轮都会带着错误约束；用户需要能一键「重新开始对话」。
+        """
+        session = self._get(session_id)
+        if session is None:
+            return False
+        session.profile = {}
+        session.messages = []
+        session.last_result = None
+        return True
+
+    def delete(self, session_id: str) -> bool:
+        """彻底删除会话（其后任何请求都应视为会话不存在）。"""
+        self._prune()
+        return self._data.pop(session_id, None) is not None
+
 
 _session_store: SessionStore | None = None
 
@@ -160,3 +179,32 @@ class RedisSessionStore:
             return json.loads(raw) if raw else None
         except (TypeError, ValueError):
             return None
+
+    def clear(self, session_id: str) -> bool:
+        """清空会话记忆（画像重置为空、删除消息与上次结果），保留会话可用。
+
+        为什么需要：画像在会话内累积，某轮理解错（如把否定记成正向约束）会一直带下去，
+        用户需要一键「重新开始对话」。实现上用一次 pipeline：删 messages/last、profile 置 {}，
+        并统一续期，避免「删了一半」的中间态被读到。
+        """
+        profile_key = self._profile_key(session_id)
+        if not self._client.exists(profile_key):
+            return False
+        pipe = self._client.pipeline()
+        pipe.set(profile_key, "{}", ex=self._ttl)
+        pipe.delete(f"agent:session:{session_id}:messages")
+        pipe.delete(f"agent:session:{session_id}:last")
+        pipe.execute()
+        return True
+
+    def delete(self, session_id: str) -> bool:
+        """彻底删除会话（三个键一起删；其后请求按会话不存在处理）。"""
+        profile_key = self._profile_key(session_id)
+        if not self._client.exists(profile_key):
+            return False
+        self._client.delete(
+            profile_key,
+            f"agent:session:{session_id}:messages",
+            f"agent:session:{session_id}:last",
+        )
+        return True

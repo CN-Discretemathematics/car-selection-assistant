@@ -137,6 +137,16 @@ docker exec -w /srv/carsel/backend deploy-api-1 python tools/../deploy/verify_cr
 
 # 管理审计（谁在什么时候做了什么）
 tail -20 /srv/carsel/backend/.tmp/admin-audit.log
+
+# ── Agent 会话记忆（生产存 Redis；本地无 REDIS_URL 时退化为进程内）──────────
+# 键结构：agent:session:<sid>:profile（画像）/ :messages（对话历史，保留最近 50 条）/ :last（上次结果）
+docker exec deploy-redis-1 redis-cli --scan --pattern 'agent:session:*'     # 有哪些会话
+docker exec deploy-redis-1 redis-cli ttl agent:session:<sid>:profile        # 剩余 TTL（默认 3600s，每次访问续期）
+# 单个会话重置（等价于前端「新对话」按钮 / POST /api/v1/agent/sessions/{sid}/reset）
+docker exec deploy-redis-1 redis-cli del agent:session:<sid>:messages agent:session:<sid>:last
+docker exec deploy-redis-1 redis-cli set agent:session:<sid>:profile '{}' ex 3600
+# 清空全部会话记忆（谨慎：所有在线用户一起清）
+docker exec deploy-redis-1 redis-cli --scan --pattern 'agent:session:*' | xargs -r docker exec -i deploy-redis-1 redis-cli del
 ```
 
 ---
@@ -153,6 +163,9 @@ tail -20 /srv/carsel/backend/.tmp/admin-audit.log
 7. **管理入口只在隧道内可达**：公网 `/ops/` 与 `/api/v1/admin/` 一律 403（设计如此）。
 8. **凭据 ≠ 身份**：多标签 token + 审计能回答「哪把凭据、什么时候、从哪个 IP 做了什么」，
    但凭据被转交后无法证明操作者本人；要「人」级别需短期会话/账号体系。
+9. **Agent 画像在会话内累积**：某轮把约束理解错（例如把「不要奔驰」记成正向约束），后续每轮都会
+   带着错误约束继续跑；排障或用户自助都要能重置——前端「新对话」按钮、`POST .../reset`
+   （清记忆保留会话）、`DELETE .../{sid}`（删会话），或等 TTL（默认 1 小时）自然过期。
 
 ---
 

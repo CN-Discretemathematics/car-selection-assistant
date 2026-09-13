@@ -1,15 +1,21 @@
 """Agent 接口。
 
-- POST /agent/sessions                           创建会话
-- POST /agent/sessions/{session_id}/messages     发送消息（同步返回结构化结果）
-- GET  /agent/sessions/{session_id}/stream       SSE：重放会话最近一次结果事件
+- POST   /agent/sessions                          创建会话
+- POST   /agent/sessions/{session_id}/messages    发送消息（同步返回结构化结果）
+- GET    /agent/sessions/{session_id}/stream      SSE：重放会话最近一次结果事件
+- POST   /agent/sessions/{session_id}/reset       清空会话记忆（画像/消息/上次结果），会话继续可用
+- DELETE /agent/sessions/{session_id}             删除会话（其后按会话不存在处理）
 生产环境由 Redis Stream 做事件中转；本地开发为进程内存储（session.py）。
+
+为什么要重置接口：Agent 的用户画像是**会话内累积**的，某一轮把约束理解错（例如把
+「不要奔驰」记成正向约束）会一直带到后续每轮；此前只能靠刷新页面换新会话，排障与
+用户自助都没有正式入口。
 """
 from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -39,6 +45,27 @@ async def send_message(
     if not exists:
         raise not_found(f"会话不存在：{session_id}")
     return await get_agent_engine().handle(db, session_id, payload.message)
+
+
+@router.post("/agent/sessions/{session_id}/reset", status_code=204)
+async def reset_session(session_id: str) -> Response:
+    """清空该会话的记忆（画像 / 消息 / 上次结果），会话 ID 继续可用。
+
+    用于「重新开始这段对话」：清掉累计约束，不要求用户刷新页面换新会话。
+    """
+    cleared = await run_in_threadpool(get_session_store().clear, session_id)
+    if not cleared:
+        raise not_found(f"会话不存在：{session_id}")
+    return Response(status_code=204)
+
+
+@router.delete("/agent/sessions/{session_id}", status_code=204)
+async def delete_session(session_id: str) -> Response:
+    """删除会话（Redis 下三个键一并删除）；其后任何请求按会话不存在处理。"""
+    deleted = await run_in_threadpool(get_session_store().delete, session_id)
+    if not deleted:
+        raise not_found(f"会话不存在：{session_id}")
+    return Response(status_code=204)
 
 
 @router.get("/agent/sessions/{session_id}/stream")
