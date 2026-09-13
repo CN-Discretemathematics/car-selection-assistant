@@ -10,9 +10,11 @@ from app.common.models import Brand, ExternalSeriesRef, MonthlySales, VehicleSer
 from app.sources.autohome import (
     build_payload,
     build_series_payload,
+    fetch_rank_rows,
     format_price_note,
     map_body_type,
     map_energy_types,
+    parse_rank_api,
     parse_rank_page,
     parse_series_page,
 )
@@ -34,6 +36,22 @@ def _fixture_html(rows: list[dict], date: str = "2026-06") -> str:
         + json.dumps(data, ensure_ascii=False)
         + "</script>"
     )
+
+
+def _api_payload(rows: list[dict], pageindex: int = 1, pagecount: int = 1, pagesize: int = 200) -> dict:
+    """榜单接口响应结构（result.list + 分页元数据），实测字段名。"""
+    return {
+        "returncode": 0,
+        "message": "success",
+        "result": {
+            "list": rows,
+            "pagecount": pagecount,
+            "pageindex": pageindex,
+            "pagesize": pagesize,
+            "scenetitle": "全部车系总榜",
+            "scenesubtitle": "6月",
+        },
+    }
 
 
 def _sample_rows() -> list[dict]:
@@ -62,6 +80,68 @@ def test_parse_rank_page_missing_data():
         raise AssertionError("应抛出 ValueError")
     except ValueError:
         pass
+
+
+def test_parse_rank_api_normalizes_rows():
+    """接口行 → 与页面解析一致的规范化结构（下游 build_payload 复用）。"""
+    parsed = parse_rank_api(_api_payload(_sample_rows(), pagecount=4, pagesize=200))
+    assert parsed["pagecount"] == 4 and parsed["pagesize"] == 200
+    assert len(parsed["rows"]) == 2  # salecount 非数字的条目被跳过
+    assert parsed["rows"][0] == {
+        "rank": 1,
+        "external_id": "7806",
+        "seriesname": "Model Y",
+        "salecount": 38654,
+    }
+
+
+def test_fetch_rank_rows_aggregates_all_pages(monkeypatch):
+    """核心修复：按 pagecount 翻页聚合完整榜单，而不是只取首屏 20 行。"""
+    pages = {
+        1: _api_payload(
+            [{"rankNum": i, "seriesid": str(1000 + i), "seriesname": f"车系{i}", "salecount": 100 - i}
+             for i in range(1, 4)],
+            pageindex=1, pagecount=2, pagesize=3,
+        ),
+        2: _api_payload(
+            [{"rankNum": i, "seriesid": str(1000 + i), "seriesname": f"车系{i}", "salecount": 100 - i}
+             for i in range(4, 7)],
+            pageindex=2, pagecount=2, pagesize=3,
+        ),
+    }
+    calls: list[int] = []
+
+    def fake_fetch(month, pageindex=1, pagesize=200):
+        calls.append(pageindex)
+        return pages[pageindex]
+
+    monkeypatch.setattr("app.sources.autohome.fetch_rank_api_page", fake_fetch)
+    monkeypatch.setattr("app.sources.autohome.time.sleep", lambda *_: None)
+
+    out = fetch_rank_rows("2026-06")
+    assert out["source"] == "api"
+    assert out["pages"] == 2 and out["total_pages"] == 2
+    assert [r["seriesname"] for r in out["rows"]] == [f"车系{i}" for i in range(1, 7)]
+    assert calls == [1, 2]
+
+
+def test_fetch_rank_rows_falls_back_to_page(monkeypatch):
+    """接口不可用时回退页面首屏，并在 source 上标记（便于发现数据源变更）。"""
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("接口结构变化")
+
+    monkeypatch.setattr("app.sources.autohome.fetch_rank_api_page", boom)
+    monkeypatch.setattr(
+        "app.sources.autohome.fetch_rank_page",
+        lambda month: (_fixture_html(_sample_rows()), "https://example.invalid/rank"),
+    )
+    monkeypatch.setattr("app.sources.autohome.time.sleep", lambda *_: None)
+
+    out = fetch_rank_rows("2026-06")
+    assert out["source"] == "page-fallback"
+    assert len(out["rows"]) == 2
+    assert out["pages"] == 1
 
 
 def test_build_payload():

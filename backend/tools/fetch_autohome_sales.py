@@ -16,7 +16,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.catalog.services import latest_full_month  # noqa: E402
-from app.sources.autohome import build_payload, fetch_rank_page, parse_rank_page  # noqa: E402
+from app.sources.autohome import (  # noqa: E402
+    build_payload,
+    fetch_rank_page,
+    fetch_rank_rows,
+    parse_rank_page,
+)
 from app.sources.fetcher import record_snapshot  # noqa: E402
 
 
@@ -28,24 +33,31 @@ def fetch_and_import_month(
     output: str | None = None,
     require_month_match: bool = False,
 ) -> dict:
-    """抓取指定月份榜单并（可选）导入数据库。
+    """抓取指定月份**完整榜单**并（可选）导入数据库。
 
     返回报告 dict：
     - requested_month：请求的月份；
     - month：门户页面实际公布的月份（数据未发布时可能仍是上一月）；
-    - rows：榜单行数；imported/created/updated：导入结果；
+    - rows：榜单行数；pages/total_pages/source：接口翻页与回退信息；
+    - imported/created/updated：导入结果；
     - payload_path/snapshot_path：本地存档路径；
     - skipped_reason：require_month_match 且门户尚未发布目标月时非空，
       此时不生成载荷、不导入（自动脚本据此「明日再试」）。
 
-    快照与载荷存档、OSS 上传、来源记录与手动 CLI 行为一致。
+    数据面说明（2026-09 修复）：门户页面首屏只 SSR 20 行，历史实现据此导入 → 覆盖率仅
+    2.2%（20/908）。现改为调用榜单接口 getList 按 pageindex/pagesize 翻页抓全量
+    （当月实测 650 行），接口不可用时回退页面首屏并在报告里标记 source。
     """
+    # ① 页面抓取仅用于确认门户「当前公布月份」（接口会对未发布月份静默返回上一月）
     html, url = fetch_rank_page(month)
     parsed = parse_rank_page(html)
     report: dict = {
         "requested_month": month,
         "month": parsed["month"],
         "rows": len(parsed["rows"]),
+        "pages": 1,
+        "total_pages": 1,
+        "source": "page",
         "imported": False,
         "created": 0,
         "updated": 0,
@@ -56,6 +68,17 @@ def fetch_and_import_month(
     if require_month_match and parsed["month"] != month:
         report["skipped_reason"] = f"门户尚未发布 {month} 榜单（当前公布 {parsed['month']}）"
         return report
+
+    # ② 完整榜单走接口（回退时 source=page-fallback，行数会退回首屏 20 行）
+    full = fetch_rank_rows(month)
+    rows = full["rows"] or parsed["rows"]
+    parsed = {**parsed, "rows": rows}
+    report.update(
+        rows=len(rows),
+        pages=full["pages"],
+        total_pages=full["total_pages"],
+        source=full["source"],
+    )
 
     payload = build_payload(parsed, url)
     # 文件名/快照用门户实际公布月份（评审 P2：手动指定尚未发布的月份时，避免
@@ -128,7 +151,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"抓取失败：{type(err).__name__}: {err}", file=sys.stderr)
         return 1
 
-    print(f"榜单月份：{report['month']}，车系 {report['rows']} 个（Top {report['rows']}）")
+    print(
+        f"榜单月份：{report['month']}，车系 {report['rows']} 个"
+        f"（来源 {report['source']}，翻页 {report['pages']}/{report['total_pages']}）"
+    )
+    if report["source"] == "page-fallback":
+        print("警告：榜单接口不可用，已回退页面首屏（仅 20 行）——请检查数据源接口是否变更",
+              file=sys.stderr)
     if report["skipped_reason"]:
         print(f"跳过导入：{report['skipped_reason']}（自动获取请用 fetch_sales_scheduled.py）")
         return 0

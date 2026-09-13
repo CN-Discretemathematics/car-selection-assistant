@@ -1,11 +1,12 @@
 import { Suspense } from "react";
+import Link from "next/link";
 import CarCard from "./components/CarCard";
 import HeroGlow from "./components/HeroGlow";
 import HomeFilters from "./components/HomeFilters";
 import Reveal from "./components/Reveal";
 import RiseText from "./components/RiseText";
 import SiteHeader from "./components/SiteHeader";
-import { fetchServerJson, SALES_TYPE_LABELS, type HomeCard } from "@/lib/api";
+import { fetchServerListWithTotal, SALES_TYPE_LABELS, type HomeCard } from "@/lib/api";
 
 interface SearchParams {
   q?: string;
@@ -30,9 +31,13 @@ export default async function HomePage({
   }
 
   let cards: HomeCard[] = [];
+  let total = 0;
   let error: string | null = null;
   try {
-    cards = await fetchServerJson<HomeCard[]>(`/api/v1/home?${qs.toString()}`);
+    // 榜单只取前 20 名（完整榜单在「全部车型」按销量排序浏览）；总数由 X-Total-Count 返回
+    const data = await fetchServerListWithTotal<HomeCard>(`/api/v1/home?${qs.toString()}&limit=20`);
+    cards = data.items;
+    total = data.total;
   } catch {
     error = "数据暂时不可用，请稍后重试。";
   }
@@ -120,8 +125,20 @@ export default async function HomePage({
             </span>
           </h2>
           {!error && cards.length > 0 && (
-            <span className="rounded-full border border-black/[0.06] bg-white/70 px-3 py-1 text-xs font-medium text-ash backdrop-blur">
-              共 {cards.length} 个车系
+            <span className="flex items-center gap-2">
+              <span className="rounded-full border border-black/[0.06] bg-white/70 px-3 py-1 text-xs font-medium text-ash backdrop-blur">
+                {total > cards.length
+                  ? `销量榜前 ${cards.length} 名 · 共 ${total} 款`
+                  : `共 ${total} 款`}
+              </span>
+              {total > cards.length && (
+                <Link
+                  href="/vehicles?sort=sales_desc"
+                  className="press rounded-full border border-apple/25 bg-white px-3 py-1 text-xs font-medium text-apple hover:bg-ice"
+                >
+                  查看全部销量排名 →
+                </Link>
+              )}
             </span>
           )}
         </Reveal>

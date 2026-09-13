@@ -1,4 +1,4 @@
-﻿# Skill：数据采集与校验（阶段 3 数据管线）
+# Skill：数据采集与校验（阶段 3 数据管线）
 
 - 用途：把官方车型数据导入数据库，保证枚举、必填与来源优先级正确。
 - 来源：阶段 3 沉淀（对应 `backend/app/sources/importer.py`、`fetcher.py`）。
@@ -24,3 +24,39 @@
 - 缺失值写 null，禁止用 0 或占位字符串冒充。
 - 抓取原始文件存对象存储（本地开发用 `snapshots/` 目录），正文提取后写入 `SourceDocument.content_text`。
 - 同字段冲突：官方来源优先（official_site > official_doc > licensed_data > industry_data > other > user_review）。
+
+## 榜单类数据：首页 ≠ 全量（2026-09 事故沉淀）
+
+**教训**：榜单页面的首屏 SSR 只是分页的第一页。汽车之家销量榜页面只 SSR **20 行**，
+而 `listRes` 里同时给出 `pagecount=33 / pagesize=20`——历史实现只解析首屏，导致
+每月入库 20 行、覆盖 20/908 个在售车系（**2.2%**），用户侧表现为「很多车型没有销量」。
+
+**正确做法**：
+
+1. 先用页面 `__NEXT_DATA__.initialValues.date` 确认门户**当前公布月份**（接口对未发布月份会
+   静默返回上一月，调度脚本靠这个信号做「未就绪则次日重试」）；
+2. 完整榜单走站点自身的接口并按 `pageindex/pagesize` 翻页：
+   `https://www.autohome.com.cn/web-main/car/rank/getList?typeid=1&subranktypeid=1&levelid=0&price=0-9000&date=YYYY-MM&pageindex=N&pagesize=200`
+   （实测 `pagesize=1000` 可一次返回全量 650 行；实现取 200/页、上限 12 页）；
+3. 接口异常时**回退首屏并在报告里标记来源**（`source=page-fallback`），不要静默降级——
+   覆盖率会从 71% 掉回 2%，日志必须能看出来；
+4. 导入后做**覆盖度体检**（每次数据操作后都跑）：
+   ```sql
+   select month, count(*), count(distinct series_id) from monthly_sales group by month order by month desc limit 6;
+   select count(*) from vehicle_series where active_status='active';   -- 分母
+   ```
+   覆盖率（当月有销量车系 / 在售车系）应稳定在 60% 以上；个别月份异常低即为抓取缺陷。
+
+**榜单会带入新品牌/新车系**：榜单只提供名称与 brandid，导入会先建「待分类（汽车之家销量榜）」
+占位品牌的车系。必须紧接着跑车系详情抓取补齐真实品牌/级别/价格/缩略图，否则浏览页会出现
+「待分类 + 暂无价格」的空卡片：
+
+```powershell
+python tools/fetch_autohome_series.py --ids <榜单带入的 seriesid 列表> --do-import   # 礼貌限频 1 秒/页
+```
+
+查占位车系（应为 0）：`select count(*) from vehicle_series s join brands b on b.id=s.brand_id where b.name like '待分类%';`
+
+**补齐数据会放大下游**：首页榜单接口原先整体返回命中列表，数据补齐后单月 650 个车系会把
+首页 HTML 撑到 4.7MB。列表类接口一律带 `limit`（首页 `limit=20`，总数走 `X-Total-Count` 响应头），
+完整榜单交给带分页的 `/vehicles`。

@@ -131,13 +131,21 @@ def main(argv: list[str] | None = None, session_factory=None) -> int:
             log(f"告警：{month} 销量数据已滞后 {days} 天，请人工检查数据源/门户发布情况")
         return 0
 
+    # 报告字段用 .get 兜底：抓取实现替换/降级时旧报告结构也能安全记录日志
+    rows = report.get("rows", 0)
+    source = report.get("source", "unknown")
+    pages = report.get("pages", 1)
+
     if args.dry_run:
-        log(f"dry-run：{month} 榜单已发布（{report['rows']} 行），未导入")
+        log(f"dry-run：{month} 榜单已发布（{rows} 行，来源 {source}），未导入")
         return 0
 
     if report.get("errors"):
         log(f"失败：导入报告 {len(report['errors'])} 条错误：{'；'.join(report['errors'][:5])}")
         return 2
+
+    if source == "page-fallback":
+        log("告警：榜单接口不可用，本次抓取回退页面首屏（仅 20 行）——请检查数据源接口是否变更")
 
     try:
         with factory() as db:
@@ -148,7 +156,10 @@ def main(argv: list[str] | None = None, session_factory=None) -> int:
     if after == 0:
         log("失败：导入完成但库内目标月仍无数据行，请人工检查 importer 日志")
         return 2
-    log(f"成功：{month} 数据到位，库内 {after} 行（新建 {report['created']}，更新 {report['updated']}）")
+    log(
+        f"成功：{month} 数据到位，库内 {after} 行（新建 {report.get('created', 0)}，"
+        f"更新 {report.get('updated', 0)}，榜单 {rows} 行 / 来源 {source} / 翻页 {pages}）"
+    )
     try:
         os.makedirs(os.path.dirname(FLAG_PATH) or ".", exist_ok=True)
         with open(FLAG_PATH, "w", encoding="utf-8") as fh:

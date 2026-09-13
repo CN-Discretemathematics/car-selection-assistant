@@ -10,12 +10,34 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 
 from app.sources.fetcher import DEFAULT_USER_AGENT, fetch_robots
 
+logger = logging.getLogger(__name__)
+
 RANK_URL_TEMPLATE = "https://www.autohome.com.cn/rank/1-1-0-0_9000-x-x-x/{month}.html"
+# 榜单数据接口（页面首屏只 SSR 20 行，完整榜单由该接口按 pageindex/pagesize 提供；
+# 2026-09 实测 pagesize=1000 一次返回 650 行 = 当月全部有销量的车系）。
+# 参数与页面自身请求一致（typeid=1 车系月销榜、subranktypeid=1、levelid=0 全部、price=0-9000 不限价）。
+RANK_API_URL = "https://www.autohome.com.cn/web-main/car/rank/getList"
+RANK_API_BASE_PARAMS = {
+    "from": "28",
+    "pm": "2",
+    "pluginversion": "11.75.8",
+    "model": "1",
+    "channel": "0",
+    "typeid": "1",
+    "subranktypeid": "1",
+    "levelid": "0",
+    "price": "0-9000",
+}
+# 每页行数：接口实测支持 1000；取 200 兼顾单次响应体大小与请求数（650 行 ≈ 4 次请求）
+RANK_API_PAGE_SIZE = 200
+# 翻页上限（防御：接口异常返回超大 pagecount 时不至于无限抓取）
+RANK_API_MAX_PAGES = 12
 PLACEHOLDER_BRAND = "待分类（汽车之家销量榜）"
 BASE_URL = "https://www.autohome.com.cn"
 
@@ -87,7 +109,12 @@ def build_payload(parsed: dict, page_url: str) -> dict:
 
 
 def fetch_rank_page(month: str) -> tuple[str, str]:
-    """robots 检查 → 抓取榜单页 → 返回 (html, url)。"""
+    """robots 检查 → 抓取榜单页 → 返回 (html, url)。
+
+    仅用于**判定门户当前公布的月份**（页面 SSR 的 initialValues.date）：门户未发布目标月时
+    接口会静默返回上一月数据，需要一个可信的月份信号（fetch_and_import_month 依赖它做
+    「未就绪则明日重试」）。完整榜单行走 fetch_rank_rows。
+    """
     policy = fetch_robots(BASE_URL)
     if not policy.allowed("/rank/", DEFAULT_USER_AGENT):
         raise PermissionError("robots.txt 禁止访问 /rank/，请人工确认条款后调整")
@@ -99,6 +126,103 @@ def fetch_rank_page(month: str) -> tuple[str, str]:
         html = resp.read().decode("utf-8", "replace")
     time.sleep(1.0)  # 礼貌抓取：频率下限 1 秒
     return html, url
+
+
+# ── 榜单接口（完整榜单）─────────────────────────────────────────────────
+
+def fetch_rank_api_page(
+    month: str, pageindex: int = 1, pagesize: int = RANK_API_PAGE_SIZE
+) -> dict:
+    """抓取榜单接口的一页，返回原始 JSON（含 result.pagecount 等分页元数据）。"""
+    import urllib.parse
+    import urllib.request
+
+    params = {
+        **RANK_API_BASE_PARAMS,
+        "date": month,
+        "pageindex": str(pageindex),
+        "pagesize": str(pagesize),
+    }
+    url = f"{RANK_API_URL}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Referer": RANK_URL_TEMPLATE.format(month=month),
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read().decode("utf-8", "replace"))
+    time.sleep(0.4)  # 礼貌抓取：翻页间隔
+    return payload
+
+
+def parse_rank_api(payload: dict) -> dict:
+    """把接口响应规范化为 {rows, pagecount, pageindex, pagesize}。
+
+    rows 结构与 parse_rank_page 一致（rank/external_id/seriesname/salecount），
+    以便下游 build_payload 完全复用；salecount 非数字的行（无销量/占位）跳过。
+    """
+    result = (payload or {}).get("result") or {}
+    rows = []
+    for item in result.get("list") or []:
+        count = item.get("salecount")
+        if count is None or not str(count).isdigit():
+            continue
+        rows.append(
+            {
+                "rank": item.get("rankNum") or item.get("rank"),
+                "external_id": str(item.get("seriesid") or ""),
+                "seriesname": item.get("seriesname") or "",
+                "salecount": int(count),
+            }
+        )
+    return {
+        "rows": rows,
+        "pagecount": int(result.get("pagecount") or 0),
+        "pageindex": int(result.get("pageindex") or 0),
+        "pagesize": int(result.get("pagesize") or 0),
+    }
+
+
+def fetch_rank_rows(
+    month: str,
+    *,
+    pagesize: int = RANK_API_PAGE_SIZE,
+    max_pages: int = RANK_API_MAX_PAGES,
+) -> dict:
+    """抓取目标月**完整**榜单（接口翻页），失败时回退到页面首屏。
+
+    返回 {rows, pages, total_pages, source}；source ∈ {"api", "page-fallback"}。
+    仅当接口整体不可用（网络/结构变化）才回退——回退只有 20 行，会显著降低覆盖率，
+    因此调用方应把 source 记入报告，便于发现数据源变化。
+    """
+    try:
+        first = fetch_rank_api_page(month, pageindex=1, pagesize=pagesize)
+        parsed = parse_rank_api(first)
+        rows = list(parsed["rows"])
+        total_pages = max(min(parsed["pagecount"], max_pages), 1)
+        for page in range(2, total_pages + 1):
+            parsed_page = parse_rank_api(fetch_rank_api_page(month, pageindex=page, pagesize=pagesize))
+            rows.extend(parsed_page["rows"])
+        if rows:
+            return {
+                "rows": rows,
+                "pages": total_pages,
+                "total_pages": parsed["pagecount"],
+                "source": "api",
+            }
+    except Exception:  # noqa: BLE001 - 接口异常回退页面首屏，不静默丢数据
+        logger.exception("榜单接口抓取失败，回退页面首屏（Top 20）")
+
+    html, _ = fetch_rank_page(month)
+    fallback = parse_rank_page(html)
+    return {
+        "rows": fallback["rows"],
+        "pages": 1,
+        "total_pages": 1,
+        "source": "page-fallback",
+    }
 
 
 # ── 车系详情页（品牌/级别/能源/指导价/图片，全部来自 seriesBaseInfo）────────
