@@ -60,3 +60,24 @@ python tools/fetch_autohome_series.py --ids <榜单带入的 seriesid 列表> --
 **补齐数据会放大下游**：首页榜单接口原先整体返回命中列表，数据补齐后单月 650 个车系会把
 首页 HTML 撑到 4.7MB。列表类接口一律带 `limit`（首页 `limit=20`，总数走 `X-Total-Count` 响应头），
 完整榜单交给带分页的 `/vehicles`。
+
+**导入销量后必须重建向量索引**（否则回答里的销量是旧的）：
+
+车系摘要切片文本含「YYYY-MM 月销量 N 辆」一句话（`app/rag/ingest.py`），所以销量数据变化后：
+
+```powershell
+# 稠密（Zilliz）：全量重灌，写入 .tmp/dense-build-meta.json 水位
+python tools/build_retrieval_index.py --target dense --smoke
+# 稀疏（BM25）：生产模式（RETRIEVAL_BACKEND=milvus）**不会**按数据量自动重建，
+# 必须显式重建，否则一直是进程启动时的那份索引
+curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"target":"sparse"}' localhost:8000/api/v1/admin/rag/reindex
+```
+
+**水位判断要同时看月份与规模**（2026-09 事故）：只比 `sales_month` 会漏掉「同月内补齐数据」
+——本次月销量行数由 20 补到 650、车系 908→1078，水位仍显示 `stale=false`。因此
+`dense-build-meta.json` 现在同时记录构建时的库内规模（`db_counts`），
+`/admin/rag/status` 会在规模漂移时给出 `车系 908→1078` 之类的 stale_reason。
+
+重建后按 `/admin/rag/status` 核对：`dense.chunks == sparse.chunks`，且摘要切片能被检索到
+（用 `get_dense_backend().search("秦PLUS 月销量")` 抽查命中文本是否含「月销量」）。

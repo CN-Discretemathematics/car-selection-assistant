@@ -93,6 +93,12 @@ def _counts(db: Session) -> tuple[int, int, int, int]:
     return docs, facts, series, variants
 
 
+def db_counts(db: Session) -> dict[str, int]:
+    """库内规模快照（供水位标记与 /admin/rag/status 共用，键名保持一致）。"""
+    docs, facts, series, variants = _counts(db)
+    return {"documents": docs, "facts": facts, "series": series, "variants": variants}
+
+
 def ensure_sparse_index(db: Session, reindex: bool = False) -> None:
     """保证稀疏（BM25）索引可用：开发模式按数据量快照自动重建；生产首用构建一次。"""
     global _indexed_counts, _sparse_built_at
@@ -309,13 +315,15 @@ def _as_yyyymm(value: Any) -> int | None:
 
 
 def annotate_dense_watermark(status: dict) -> None:
-    """给 status['dense'] 补水位对比字段：集合构建时的销量月份 vs 库内最新月份。
+    """给 status['dense'] 补水位对比字段：集合构建时的销量月份/数据规模 vs 库内现状。
 
-    stale=True 表示「集合可能滞后于库内数据」，三种情形都算：
+    stale=True 表示「集合可能滞后于库内数据」，四种情形都算：
     ① 标记里的销量月份 < 库内最新月份（确实落后一个月）；
     ② 标记文件缺失（旧版工具灌入或重建从未成功过）——无法证明新鲜，按需重建暴露；
-    ③ 标记有 built_at 但没写下销量月份（构建时那次查询失败）——同样无法证明新鲜。
-    只有 built_at 与 sales_month 都齐、且不落后时才是 stale=False。
+    ③ 标记有 built_at 但没写下销量月份（构建时那次查询失败）——同样无法证明新鲜；
+    ④ **月份相同但数据规模变了**（2026-09 实况：同月销量行数由 20 → 650、车系 908 → 1078，
+       摘要切片里的「X 月销量 N 辆」随之变化，而只比月份会误判为新鲜）。
+    只有 built_at / sales_month 齐全、月份不落后、且规模一致时才是 stale=False。
     """
     dense = status.get("dense")
     db_month = _as_yyyymm((status.get("db_counts") or {}).get("latest_sales_month"))
@@ -340,10 +348,34 @@ def annotate_dense_watermark(status: dict) -> None:
             "构建水位标记缺少销量月份，无法确认集合是否与库内数据同步" if db_month is not None else None
         )
         return
-    dense["stale"] = bool(db_month and month < db_month)
+    if db_month and month < db_month:
+        dense["stale"] = True
+        dense["stale_reason"] = f"集合构建于销量 {month}，库内已到 {db_month}，需重建稠密索引"
+        return
+    # 月份不落后：再比数据规模（摘要切片文本随销量/车系变化，只比月份会漏掉同月内的更新）
+    drift = _counts_drift(dense.get("build_counts"), status.get("db_counts"))
+    dense["stale"] = bool(drift)
     dense["stale_reason"] = (
-        f"集合构建于销量 {month}，库内已到 {db_month}，需重建稠密索引" if dense["stale"] else None
+        f"集合构建时的库内规模为 {drift}，需重建稠密索引" if drift else None
     )
+
+
+def _counts_drift(build_counts: object, db_counts: object) -> str | None:
+    """构建时与当前的库内规模差异（documents/facts/series/variants），一致时返回 None。
+
+    仅在两者都齐全时比较：旧版标记文件没有 build_counts，此时不做规模判断（保持原行为，
+    只靠月份水位，不误报）。
+    """
+    if not isinstance(build_counts, dict) or not isinstance(db_counts, dict):
+        return None
+    labels = {"documents": "来源文档", "facts": "参数事实", "series": "车系", "variants": "款型"}
+    diffs = []
+    for key, label in labels.items():
+        before, now = build_counts.get(key), db_counts.get(key)
+        if before is None or now is None or before == now:
+            continue
+        diffs.append(f"{label} {before}→{now}")
+    return "、".join(diffs) if diffs else None
 
 
 def dense_build_meta() -> dict:
@@ -358,6 +390,8 @@ def dense_build_meta() -> dict:
             "chunks": data.get("indexed") or data.get("chunks"),
             # 归一化为 YYYYMM 整数：响应模型该字段是 int，字符串会让 /ops/rag 直接 500
             "sales_month": _as_yyyymm(data.get("sales_month")),
+            # 构建时的库内规模（documents/facts/series/variants）：用于识别同月内的数据更新
+            "build_counts": data.get("db_counts"),
         }
     except (OSError, ValueError, AttributeError):
         # 文件缺失/半写/坏 JSON 时水位降级；刻意不吞 NameError 之类的编码错误

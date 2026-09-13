@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.common.database import get_session_factory  # noqa: E402
 from app.common.models import MonthlySales  # noqa: E402
 from app.rag.ingest import build_chunks  # noqa: E402
-from app.rag.service import get_dense_backend, run_reindex  # noqa: E402
+from app.rag.service import db_counts, get_dense_backend, run_reindex  # noqa: E402
 from app.retrieval.config import MAX_CHUNKS  # noqa: E402
 
 
@@ -44,8 +44,15 @@ def _latest_sales_month(db) -> str | None:
         return None
 
 
-def write_dense_build_marker(summary: dict, sales_month: str | None = None) -> None:
-    """dense 灌入成功后写构建元数据（.tmp 目录随 compose volume 持久化）。"""
+def write_dense_build_marker(
+    summary: dict, sales_month: str | None = None, db_counts: dict | None = None
+) -> None:
+    """dense 灌入成功后写构建元数据（.tmp 目录随 compose volume 持久化）。
+
+    除销量月份外还记录**构建时的库内规模**：车系摘要切片文本包含「X 月销量 N 辆」，
+    同月内补齐数据（2026-09 把月销量行数由 20 补到 650、车系 908→1078）同样会让集合过期，
+    只比月份的水位判断会漏掉这种情况（实测曾误判为「新鲜」）。
+    """
     try:
         meta_dir = Path(".tmp")
         meta_dir.mkdir(parents=True, exist_ok=True)
@@ -57,6 +64,7 @@ def write_dense_build_marker(summary: dict, sales_month: str | None = None) -> N
                     "indexed": summary.get("indexed"),
                     "by_kind": summary.get("by_kind"),
                     "sales_month": sales_month,  # 构建时库内最新销量月份（水位对比直接可用）
+                    "db_counts": db_counts or {},  # 构建时库内规模（识别同月内的数据更新）
                     "warnings": summary.get("warnings", [])[:3],
                 },
                 ensure_ascii=False,
@@ -110,7 +118,11 @@ def main(argv: list[str] | None = None) -> int:
         for w in summary.get("warnings") or []:
             print(f"警告：{w}")
         if args.target == "dense":
-            write_dense_build_marker(summary, sales_month=_latest_sales_month(db))
+            write_dense_build_marker(
+                summary,
+                sales_month=_latest_sales_month(db),
+                db_counts=db_counts(db),
+            )
 
         if args.smoke and args.target == "dense":
             print("检索冒烟…")
