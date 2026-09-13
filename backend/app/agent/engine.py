@@ -31,6 +31,7 @@ from app.agent.series_qa import (
 )
 from app.agent.session import SessionStore, get_session_store
 from app.agent.tools import citation_verifier, recommendation_tool, retrieval_search, safety_guard
+from app.catalog.brands import brand_series_overview, resolve_brand_mentions
 from app.catalog.series_index import display_name, resolve_series
 from app.common.enums import NEW_ENERGY_TYPES
 from app.common.llm import LLMClient, LLMError, get_llm_client
@@ -86,6 +87,21 @@ _UNLOCK_RE = re.compile(
 # 用户授权「宽松推荐」的口语表达（「没想好/不知道」表示信息缺失，不算授权）
 _GIVE_UP_RE = re.compile(r"(随便|无所谓|都可以|你看着办|你推荐|听你的|你来定|相信你)")
 
+# 品牌盘点类提问（用户实测：「奔驰都有哪些车型」「没有燃油的吗」）：
+# 必须读库给出完整盘点，而不是靠模型记忆列举几款——2026-09 实测中模型凭记忆答
+# 「我这边能确认的奔驰在售车型有 3 款，都是纯电」，而库里实际有 57 款、燃油 37 款。
+_BRAND_LINEUP_RE = re.compile(
+    r"(有哪些车型|都有哪些|有哪些车|都有什么车|有什么车型|车型有哪些|车型列表|全系|"
+    r"都有啥|有哪些系列|哪些型号)"
+)
+_ENERGY_AVAILABILITY_RE = re.compile(
+    r"((有|要|想看|看看)?(没有|有没有|有)?\s*(燃油|汽油|纯电|插混|增程|油混|新能源)(的|款|车)?\s*(吗|么|嘛|呢|没有)?)"
+)
+# 明确询问能源是否有货的说法（避免把「我要燃油的」当成盘点：那属于约束，走推荐链）
+_ENERGY_ASK_RE = re.compile(
+    r"(有(没有)?(燃油|汽油|纯电|插混|增程|油混|新能源)|(燃油|汽油|纯电|插混|增程|油混|新能源)(的)?(吗|么|嘛|呢)|没有(燃油|汽油|纯电|插混|增程|油混|新能源))"
+)
+
 
 def is_chatty(message: str) -> bool:
     return bool(_CHATTY_RE.match(message.strip()))
@@ -101,6 +117,29 @@ def asks_general_advice(message: str) -> bool:
 
 def gives_up_on_profile(message: str) -> bool:
     return bool(_GIVE_UP_RE.search(message))
+
+
+def asks_brand_lineup(message: str) -> bool:
+    """是否在问「某品牌有哪些车型 / 有没有燃油的」这类需要完整盘点的问题。
+
+    实测缺陷（2026-09）：这类问题此前落到通用对话，由模型凭记忆列举——答成
+    「奔驰在售就 3 款，都是纯电」，而库里是 57 款、燃油 37 款。
+    """
+    return bool(_BRAND_LINEUP_RE.search(message)) or bool(_ENERGY_ASK_RE.search(message))
+
+
+def energy_asked_in(message: str) -> list[str] | None:
+    """从「有没有燃油的」这类问法里解析能源类型，供盘点按能源筛选。
+
+    口径与约束链一致：出现「燃油/汽油」时统一为 `fuel`（含 ICE 与 HEV），
+    不再同时返回 ICE/HEV 具体枚举，避免筛选口径不一致。
+    """
+    low = message.lower()
+    found = [value for key, value in _ENERGY_HINTS.items() if key in low]
+    if "燃油" in message or "汽油" in message:
+        found = [t for t in found if t not in ("ICE", "HEV")]
+        found.append("fuel")
+    return sorted(set(found)) or None
 
 
 def profile_has_core_constraints(profile: UserProfile) -> bool:
@@ -164,6 +203,19 @@ def locked_series_conflict(db: Session, profile: UserProfile) -> bool:
     )
     if profile.body_type:
         stmt = stmt.where(VehicleVariant.body_type.in_(profile.body_type))
+    # 品牌硬约束与 recommendation_tool 保持一致（否则「锁定车系探测」会与推荐链口径不一致）
+    if profile.brand_ids:
+        stmt = stmt.where(
+            VehicleVariant.series_id.in_(
+                select(VehicleSeries.id).where(VehicleSeries.brand_id.in_(profile.brand_ids))
+            )
+        )
+    if profile.brand_exclude_ids:
+        stmt = stmt.where(
+            ~VehicleVariant.series_id.in_(
+                select(VehicleSeries.id).where(VehicleSeries.brand_id.in_(profile.brand_exclude_ids))
+            )
+        )
     allowed = _expand_energy_prefs(list(profile.energy_preference or []))
     if allowed:
         stmt = stmt.where(VehicleVariant.energy_type.in_(sorted(allowed)))
@@ -420,6 +472,16 @@ def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
         profile.body_type = hints["body_type"]
     if hints.get("energy_preference"):
         profile.energy_preference = hints["energy_preference"]
+    # 品牌硬约束（用户明确「只要奔驰」等）：并入而非覆盖——会话内多次提及取并集；
+    # 否定项优先：说了「不要奔驰」就不再把它当正向约束
+    if hints.get("brand_ids") or hints.get("brand_exclude_ids"):
+        labels = dict(zip(profile.brand_ids, profile.brand_labels))
+        labels.update(dict(zip(hints.get("brand_ids") or [], hints.get("brand_labels") or [])))
+        excluded = set(profile.brand_exclude_ids) | set(hints.get("brand_exclude_ids") or [])
+        kept_ids = (set(profile.brand_ids) | set(hints.get("brand_ids") or [])) - excluded
+        profile.brand_ids = sorted(kept_ids)
+        profile.brand_exclude_ids = sorted(excluded)
+        profile.brand_labels = [labels.get(bid, str(bid)) for bid in profile.brand_ids]
     if hints.get("usage"):
         profile.usage = hints["usage"]
     if hints.get("charging_tolerance") is not None:
@@ -498,6 +560,22 @@ class AgentEngine:
         #       「星愿和零跑A10选哪个」不含购车关键词，但提到具体车系，必须走确定性链路）
         wants_unlock = bool(_UNLOCK_RE.search(message))
         resolved = await run_in_threadpool(resolve_series, db, message)
+        # 品牌硬约束（「只要奔驰」）：需查库把品牌名解析成 brand_id；且必须结合车系解析结果
+        # 消歧——「银河星愿怎么样」里的「银河」属于车系名，不是品牌约束（2026-09 回归）。
+        brand_hints = await run_in_threadpool(
+            resolve_brand_mentions,
+            db,
+            message,
+            series_names=[s.name for s, _brand in resolved],
+            assume_constraint=asks_brand_lineup(message),
+        )
+        if brand_hints:
+            profile = merge_profile(profile, brand_hints)
+            # 品牌线索也算「结构化输入」：否则「我强调过了，只要奔驰」这类只重申约束、
+            # 不含购车意图词的消息会掉进通用对话分支，由模型凭记忆回答（实测又答成
+            # 「奔驰只有三款纯电」）——必须回到确定性链路，用累计画像重出推荐。
+            structured = True
+            await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         # 评审 m2：否定词**直接指向**已锁定车系（「我不买星愿了，想要15万的燃油车」）
         # 等同明确解锁——否则「锁定车系 ∩ 新硬约束」为空，推荐必然为空。
         # 只按近距离共现判定：「不想要SUV了，看看银河星愿」否定的是车身形式，
@@ -544,6 +622,12 @@ class AgentEngine:
 
         if resolved and should_answer(resolved, message):
             return await self._series_qa_reply(db, session_id, message, resolved)
+
+        # 0.7) 品牌盘点（「奔驰都有哪些车型」「没有燃油的吗」）→ 读库完整盘点。
+        #      必须在「无购车意图 → 普通对话」gate 之前：这类问句不一定是购车意图措辞，
+        #      但需要的是库内完整事实，不能交给模型记忆。
+        if profile.brand_ids and not resolved and asks_brand_lineup(message):
+            return await self._brand_overview_reply(db, session_id, profile, message)
 
         # 1) 无购车意图的普通对话（如「今天天气不错」「帮我算个题」）→ 自然回复
         if not (has_car_intent(message) or structured):
@@ -631,6 +715,8 @@ class AgentEngine:
             "body_type": profile.body_type,
             "energy_preference": profile.energy_preference,
             "passengers": profile.passengers,
+            # 品牌硬约束（「只要奔驰」）——对外暴露便于前端/调试确认口径
+            "brand_labels": profile.brand_labels,
             # 会话锁定的车系（用户点名过、尚未解锁）——对外暴露便于前端/调试确认口径
             "locked_series_ids": profile.locked_series_ids,
         }
@@ -723,7 +809,113 @@ class AgentEngine:
         await self._emit(session_id, explanation or "", out)
         return out
 
-    async def _plain_chat_reply(self, db: Session, session_id: str, message: str,
+    async def _brand_overview_reply(
+        self, db: Session, session_id: str, profile: UserProfile, message: str
+    ) -> AgentMessageOut:
+        """品牌盘点回复：车系总数、能源构成、预算内车系（含价格区间），全部来自数据库。"""
+        energy_filter = energy_asked_in(message)
+        overview = await run_in_threadpool(brand_series_overview, db, profile.brand_ids)
+        text = self._brand_overview_text(profile, overview, energy_filter)
+        citations: list[Citation] = []
+        source_ids = sorted({s for s in (i.get("source_id") for i in overview["series"]) if s})
+        if source_ids:
+            names = {
+                s.id: s.name
+                for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
+            }
+            for sid in source_ids[:3]:
+                citations.append(
+                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 车型数据")
+                )
+        out = AgentMessageOut(
+            session_id=session_id,
+            explanation=text,
+            citations=citations,
+            filters={
+                "brand_labels": profile.brand_labels,
+                "budget_max": profile.budget.max,
+                "energy_preference": energy_filter or profile.energy_preference,
+            },
+            recommended_series_ids=[i["series_id"] for i in overview["series"][:10]],
+        )
+        await self._emit(session_id, text, out)
+        return out
+
+    @staticmethod
+    def _brand_overview_text(
+        profile: UserProfile, overview: dict, energy_filter: list[str] | None
+    ) -> str:
+        """把品牌概览渲染成如实、可读的盘点（数字全部来自库内事实）。"""
+        brands = "、".join(overview.get("brand_names") or profile.brand_labels)
+        items = overview["series"]
+        if not items:
+            return f"我这边没有「{brands}」的在售车型数据。"
+
+        lines = [
+            f"{brands}在售车型共 {overview['series_count']} 款："
+            f"燃油（含油混）{overview['fuel_series_count']} 款，"
+            f"新能源 {overview['new_energy_series_count']} 款。"
+        ]
+
+        def matches(item: dict) -> bool:
+            if not energy_filter:
+                return True
+            if "fuel" in energy_filter:
+                return item["has_fuel"]
+            if "new_energy" in energy_filter:
+                return not item["has_fuel"] or any(
+                    t in ("BEV", "PHEV", "EREV") for t in item["energy_types"]
+                )
+            return any(t in item["energy_types"] for t in energy_filter)
+
+        subset = [i for i in items if matches(i)]
+        if energy_filter:
+            label = "、".join(
+                {"fuel": "燃油", "new_energy": "新能源", "BEV": "纯电", "PHEV": "插混",
+                 "EREV": "增程", "HEV": "油混", "ICE": "燃油"}.get(t, t)
+                for t in energy_filter
+            )
+            lines.append(f"其中{label}车型 {len(subset)} 款。")
+
+        budget_max = profile.budget.max
+        if budget_max:
+            in_budget = [
+                i for i in subset if i["price_min"] is not None and i["price_min"] <= budget_max
+            ]
+            lines.append(
+                f"按最低指导价在 {budget_max / 10000:g} 万元以内的有 {len(in_budget)} 款。"
+            )
+            shown = in_budget
+        else:
+            shown = subset
+
+        def price_text(item: dict) -> str:
+            lo, hi = item["price_min"], item["price_max"]
+            if lo is None:
+                return "官方指导价未披露"
+            if hi is None or hi == lo:
+                return f"{lo / 10000:g} 万元"
+            return f"{lo / 10000:g}~{hi / 10000:g} 万元"
+
+        if shown:
+            head = "预算内可看：" if budget_max else "例如："
+            listed = "、".join(
+                f"{i['series_name']}（{'燃油' if i['has_fuel'] else '新能源'} {price_text(i)}）"
+                for i in shown[:10]
+            )
+            more = f"，等 {len(shown)} 款" if len(shown) > 10 else ""
+            lines.append(f"{head}{listed}{more}。")
+        elif energy_filter or budget_max:
+            lines.append("在现有筛选条件下没有匹配车系。")
+
+        if overview["without_price"]:
+            lines.append(
+                f"另有 {overview['without_price']} 款暂无官方指导价数据，无法确认是否落在预算内。"
+            )
+        return "".join(lines)
+
+    async def _plain_chat_reply(
+        self, db: Session, session_id: str, message: str,
                                 topic: str = "", missing: str = "", resolved: list | None = None,
                                 locked_series_ids: list[int] | None = None) -> AgentMessageOut:
         """自然对话回复（无推荐卡片）：LLM+检索佐证；无 LLM 时按话题回退模板。"""
@@ -818,7 +1010,7 @@ class AgentEngine:
             filters={"series_id": series.id},
             recommended_series_ids=[series.id] if rows else [],
             recommended_variants=recommended,
-            reasons=[f"按数据库在售 SKU 列出 {series.name} 各版本官方指导价与差异项"],
+            reasons=[f"按数据库在售款型列出 {series.name} 各版本官方指导价与差异项"],
             citations=citations,
             official_links=[series.official_page_url] if series.official_page_url else [],
             explanation=text,
@@ -954,7 +1146,7 @@ class AgentEngine:
                                 "能干什么", "能干嘛", "怎么用", "如何使用", "怎么玩", "帮助", "help")):
             return (
                 "我是选车助手，能帮你：① 按预算/用途/人数/能源偏好推荐真实在售车型；"
-                "② 查看销量榜和车型详情；③ 对比不同 SKU 的配置；④ 解答购车常识（比如燃油和纯电怎么选）。"
+                "② 查看销量榜和车型详情；③ 对比不同款型的配置；④ 解答购车常识（比如燃油和纯电怎么选）。"
                 "比如告诉我「预算15万，家用5口人，想要新能源SUV」，我就能开始。"
             )
         if any(k in m for k in ("再见", "拜拜", "晚安")):
@@ -1008,7 +1200,7 @@ class AgentEngine:
         if profile.usage:
             reasons.append(f"用途：{'/'.join(profile.usage)}")
         reasons.append(
-            f"共 {result['count']} 个在售 SKU 满足硬条件，展示带来源的前 {len(result['variants'])} 名"
+            f"共 {result['count']} 个在售款型满足硬条件，展示带来源的前 {len(result['variants'])} 名"
         )
         return reasons
 
@@ -1058,12 +1250,21 @@ class AgentEngine:
     ) -> str:
         top = result["variants"]
         if not top:
+            brand_desc = f"「{'、'.join(profile.brand_labels)}」" if profile.brand_labels else ""
             budget_desc = ""
             if profile.budget.max is not None:
-                budget_desc = f"（预算不超过 {profile.budget.max / 10000:g} 万元）"
+                budget_desc = f"、预算不超过 {profile.budget.max / 10000:g} 万元"
+            energy_desc = ""
+            if profile.energy_preference:
+                label_map = {"BEV": "纯电", "PHEV": "插混", "EREV": "增程", "HEV": "油混",
+                             "ICE": "燃油", "new_energy": "新能源", "fuel": "燃油"}
+                energy_desc = "、能源 " + "/".join(
+                    label_map.get(t, t) for t in profile.energy_preference
+                )
             return (
-                f"没有找到完全满足条件{budget_desc}的在售 SKU，建议放宽预算、能源或车身类型后重试；"
-                "我们不会编造不存在的数据。"
+                f"没有找到同时满足条件（{brand_desc.strip('「」') or '当前条件'}"
+                f"{budget_desc}{energy_desc}）的在售款型，"
+                "建议放宽预算、能源或车身类型后重试；我们不会编造不存在的数据。"
             )
         first = top[0]
         names = "、".join(f"{v['brand_name']} {v['series_name']} {v['display_name']}" for v in top[:3])
@@ -1076,7 +1277,7 @@ class AgentEngine:
             snippets = "；".join(f"{e['text'][:60]}…" for e in evidence[:2])
             evidence_desc = f"官方资料佐证：{snippets}。"
         return (
-            f"为你推荐 {names} 等 {len(top)} 款在售 SKU{budget_desc}。"
+            f"为你推荐 {names} 等 {len(top)} 款在售款型{budget_desc}。"
             f"首选 {first['brand_name']} {first['series_name']}（官方指导价 {first['price_cny'] / 10000:g} 万元，"
             f"匹配项：{'、'.join(first['matched']) or '综合评分领先'}）。"
             f"注意妥协项：{'；'.join(first['tradeoffs'][:2]) or '无明显妥协'}。"

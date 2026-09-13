@@ -126,7 +126,7 @@ def admin_patch_series(series_id: int, payload: SeriesPatch, db: Session = Depen
 def admin_patch_variant(variant_id: int, payload: VariantPatch, db: Session = Depends(get_session)) -> dict:
     variant = db.get(VehicleVariant, variant_id)
     if variant is None:
-        raise not_found(f"SKU 不存在：{variant_id}")
+        raise not_found(f"款型不存在：{variant_id}")
     if payload.status is not None:
         _audit_admin_edit(db, "variant", variant.id, {"status": (variant.status, payload.status)}, payload.note)
         variant.status = payload.status

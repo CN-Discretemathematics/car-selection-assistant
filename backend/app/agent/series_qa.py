@@ -514,7 +514,7 @@ def build_variant_diff_answer(
             return text, []
 
     footer = (
-        "以上为数据库在售 SKU 的官方指导价与配置事实；标注「"
+        "以上为数据库在售款型的官方指导价与配置事实；标注「"
         + MISSING_VALUE_LABEL
         + "」表示暂未收录，不代表没有该配置。可在下方候选中点「加入对比」查看完整参数表。"
     )
