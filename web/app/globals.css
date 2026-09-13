@@ -65,7 +65,8 @@ h3 {
 :focus-visible {
   outline: 2px solid var(--color-apple);
   outline-offset: 2px;
-  border-radius: 6px;
+  /* 不再强制 border-radius：那会把 rounded-full 的输入框/下拉在获得焦点时改成 6px 方角。
+     现代浏览器的 outline 会跟随元素自身的圆角，形状因此保持一致。 */
 }
 
 /* ── 关键帧动画 ─────────────────────────────────────────────────── */

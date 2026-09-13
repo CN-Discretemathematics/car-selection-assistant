@@ -3,16 +3,14 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { trackFilterClear } from "@/lib/agentTriggers";
+import {
+  BODY_OPTIONS_WITH_PICKUP,
+  BRAND_OPTIONS,
+  BROWSE_SORT_OPTIONS,
+  ENERGY_OPTIONS,
+} from "@/lib/filterOptions";
+import FilterSelect from "./FilterSelect";
 import SearchBar from "./SearchBar";
-
-const BRAND_TYPES = [
-  { value: "domestic_nev", label: "国产新能源" },
-  { value: "luxury", label: "豪华" },
-  { value: "japanese", label: "日系" },
-  { value: "american", label: "美系" },
-  { value: "german", label: "德系" },
-  { value: "other_fuel", label: "其他燃油" },
-];
 
 /** 全部车型浏览页筛选（价格按万元展示，与后端（元）换算）。 */
 export default function BrowseFilters() {
@@ -53,7 +51,9 @@ export default function BrowseFilters() {
 
   return (
     <div
-      className="glass animate-fade-up rounded-[22px] border border-black/[0.05] p-3"
+      // relative z-20：.glass 的入场动画会残留 transform，从而创建层叠上下文；
+      // 不显式抬升的话，栏内的下拉浮层（z-50）会被下方卡片盖住
+      className="glass animate-fade-up relative z-20 rounded-[22px] border border-black/[0.05] p-3"
       style={{ animationDelay: "980ms" }}
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -63,46 +63,24 @@ export default function BrowseFilters() {
           </svg>
           筛选
         </span>
-        <select
-          aria-label="能源类型"
+        <FilterSelect
+          label="能源类型"
           value={form.energy_type}
-          onChange={(e) => apply({ ...form, energy_type: e.target.value })}
-          className={inputCls}
-        >
-          <option value="">能源：全部</option>
-          <option value="new_energy">新能源</option>
-          <option value="fuel">燃油（含油混）</option>
-          <option value="BEV">纯电</option>
-          <option value="PHEV">插混</option>
-          <option value="EREV">增程</option>
-          <option value="HEV">油混</option>
-          <option value="ICE">燃油</option>
-        </select>
-        <select
-          aria-label="车身类型"
+          options={ENERGY_OPTIONS}
+          onChange={(v) => apply({ ...form, energy_type: v })}
+        />
+        <FilterSelect
+          label="车身类型"
           value={form.body_type}
-          onChange={(e) => apply({ ...form, body_type: e.target.value })}
-          className={inputCls}
-        >
-          <option value="">车身：全部</option>
-          <option value="sedan">轿车</option>
-          <option value="suv">SUV</option>
-          <option value="mpv">MPV</option>
-          <option value="pickup">皮卡</option>
-        </select>
-        <select
-          aria-label="品牌类别"
+          options={BODY_OPTIONS_WITH_PICKUP}
+          onChange={(v) => apply({ ...form, body_type: v })}
+        />
+        <FilterSelect
+          label="品牌类别"
           value={form.brand_type}
-          onChange={(e) => apply({ ...form, brand_type: e.target.value })}
-          className={inputCls}
-        >
-          <option value="">品牌：全部</option>
-          {BRAND_TYPES.map((b) => (
-            <option key={b.value} value={b.value}>
-              {b.label}
-            </option>
-          ))}
-        </select>
+          options={BRAND_OPTIONS}
+          onChange={(v) => apply({ ...form, brand_type: v })}
+        />
         <div className="flex items-center gap-1">
           <input
             aria-label="最低价（万元）"
@@ -124,19 +102,15 @@ export default function BrowseFilters() {
             className={`${inputCls} w-28`}
           />
         </div>
-        <select
-          aria-label="排序"
+        <FilterSelect
+          label="排序"
           value={form.sort}
-          onChange={(e) => apply({ ...form, sort: e.target.value })}
-          className={inputCls}
-        >
-          <option value="sales_desc">销量从高到低</option>
-          <option value="price_asc">价格从低到高</option>
-          <option value="price_desc">价格从高到低</option>
-        </select>
+          options={BROWSE_SORT_OPTIONS}
+          onChange={(v) => apply({ ...form, sort: v })}
+        />
 
         {/* 搜索框固定放在排序右侧：回车即按关键词筛选本页列表 */}
-        <SearchBar variant="filter" placeholder="搜索车系/品牌" className="ml-auto sm:ml-0" />
+        <SearchBar placeholder="搜索车系/品牌" className="ml-auto sm:ml-0" />
         {searchParams.size > 0 && (
           <button
             type="button"

@@ -3,16 +3,9 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { trackFilterClear } from "@/lib/agentTriggers";
+import { BODY_OPTIONS, BRAND_OPTIONS, ENERGY_OPTIONS, HOME_SORT_OPTIONS } from "@/lib/filterOptions";
+import FilterSelect from "./FilterSelect";
 import SearchBar from "./SearchBar";
-
-const BRAND_TYPES = [
-  { value: "domestic_nev", label: "国产新能源" },
-  { value: "luxury", label: "豪华" },
-  { value: "japanese", label: "日系" },
-  { value: "american", label: "美系" },
-  { value: "german", label: "德系" },
-  { value: "other_fuel", label: "其他燃油" },
-];
 
 export default function HomeFilters() {
   const router = useRouter();
@@ -51,7 +44,9 @@ export default function HomeFilters() {
 
   return (
     <div
-      className="glass animate-fade-up rounded-[22px] border border-black/[0.05] p-3"
+      // relative z-20：.glass 的入场动画会残留 transform，从而创建层叠上下文；
+      // 不显式抬升的话，栏内的下拉浮层（z-50）会被下方卡片盖住
+      className="glass animate-fade-up relative z-20 rounded-[22px] border border-black/[0.05] p-3"
       style={{ animationDelay: "1150ms" }}
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -61,47 +56,26 @@ export default function HomeFilters() {
           </svg>
           筛选
         </span>
-        <select
-          aria-label="能源类型"
+        <FilterSelect
+          label="能源类型"
           value={form.energy_type}
-          onChange={(e) => apply({ ...form, energy_type: e.target.value })}
-          className={inputCls}
-        >
-          <option value="">能源：全部</option>
-          <option value="new_energy">新能源</option>
-          <option value="fuel">燃油（含油混）</option>
-          <option value="BEV">纯电</option>
-          <option value="PHEV">插混</option>
-          <option value="EREV">增程</option>
-          <option value="HEV">油混</option>
-          <option value="ICE">燃油</option>
-        </select>
+          options={ENERGY_OPTIONS}
+          onChange={(v) => apply({ ...form, energy_type: v })}
+        />
 
-        <select
-          aria-label="车身类型"
+        <FilterSelect
+          label="车身类型"
           value={form.body_type}
-          onChange={(e) => apply({ ...form, body_type: e.target.value })}
-          className={inputCls}
-        >
-          <option value="">车身：全部</option>
-          <option value="sedan">轿车</option>
-          <option value="suv">SUV</option>
-          <option value="mpv">MPV</option>
-        </select>
+          options={BODY_OPTIONS}
+          onChange={(v) => apply({ ...form, body_type: v })}
+        />
 
-        <select
-          aria-label="品牌类别"
+        <FilterSelect
+          label="品牌类别"
           value={form.brand_type}
-          onChange={(e) => apply({ ...form, brand_type: e.target.value })}
-          className={inputCls}
-        >
-          <option value="">品牌：全部</option>
-          {BRAND_TYPES.map((b) => (
-            <option key={b.value} value={b.value}>
-              {b.label}
-            </option>
-          ))}
-        </select>
+          options={BRAND_OPTIONS}
+          onChange={(v) => apply({ ...form, brand_type: v })}
+        />
 
         <div className="flex items-center gap-1">
           <input
@@ -125,18 +99,15 @@ export default function HomeFilters() {
           />
         </div>
 
-        <select
-          aria-label="排序"
+        <FilterSelect
+          label="排序"
           value={form.sort}
-          onChange={(e) => apply({ ...form, sort: e.target.value })}
-          className={inputCls}
-        >
-          <option value="desc">销量从高到低</option>
-          <option value="asc">销量从低到高</option>
-        </select>
+          options={HOME_SORT_OPTIONS}
+          onChange={(v) => apply({ ...form, sort: v })}
+        />
 
         {/* 搜索框固定放在排序右侧：回车即按关键词筛选本页榜单 */}
-        <SearchBar variant="filter" placeholder="搜索车系/品牌" className="ml-auto sm:ml-0" />
+        <SearchBar placeholder="搜索车系/品牌" className="ml-auto sm:ml-0" />
 
         {searchParams.size > 0 && (
           <button
