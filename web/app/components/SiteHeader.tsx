@@ -33,7 +33,7 @@ export default function SiteHeader() {
     >
       <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4 sm:px-6">
         <Link href="/" className="group flex items-center gap-2.5">
-          <span className="flex h-9 w-9 items-center justify-center rounded-[13px] bg-gradient-to-br from-[#0a84ff] via-apple to-[#5e5ce6] text-white shadow-md shadow-apple/30 transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:scale-105 group-hover:rotate-3 group-active:scale-95">
+          <span className="flex h-9 w-9 items-center justify-center rounded-[12px] bg-gradient-to-br from-[#0a84ff] via-apple to-[#5e5ce6] text-white shadow-md shadow-apple/30 transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:scale-105 group-hover:rotate-3 group-active:scale-95">
             <svg viewBox="0 0 24 24" fill="currentColor" className="h-[18px] w-[18px]">
               <path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v7.5c0 .83.67 1.5 1.5 1.5S6 20.33 6 19.5V19h12v.5c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5V12l-2.08-5.99ZM7.5 16.5A1.5 1.5 0 1 1 9 15a1.5 1.5 0 0 1-1.5 1.5Zm9 0a1.5 1.5 0 1 1 1.5-1.5 1.5 1.5 0 0 1-1.5 1.5ZM5.81 10l1.04-3h10.3l1.04 3H5.81Z" />
             </svg>

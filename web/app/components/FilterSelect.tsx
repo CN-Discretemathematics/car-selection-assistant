@@ -119,7 +119,7 @@ export default function FilterSelect({
           id={listId}
           role="listbox"
           aria-label={label}
-          className="animate-scale-in absolute left-0 top-[calc(100%+0.4rem)] z-50 max-h-[320px] min-w-full origin-top overflow-y-auto rounded-[20px] border border-black/[0.08] bg-white p-1.5 shadow-[0_22px_50px_-14px_rgba(0,0,0,0.32)]"
+          className="animate-scale-in absolute left-0 top-[calc(100%+0.4rem)] z-50 max-h-[320px] min-w-full origin-top overflow-y-auto rounded-[22px] border border-black/[0.08] bg-white p-1.5 shadow-[0_22px_50px_-14px_rgba(0,0,0,0.32)]"
         >
           {options.map((option, i) => {
             const isSelected = option.value === value;
@@ -131,7 +131,7 @@ export default function FilterSelect({
                 aria-selected={isSelected}
                 onMouseEnter={() => setActive(i)}
                 onClick={() => commit(i)}
-                className={`flex w-full items-center justify-between gap-4 whitespace-nowrap rounded-[14px] px-3 py-2 text-left text-[13px] transition-colors duration-200 ${
+                className={`flex w-full items-center justify-between gap-4 whitespace-nowrap rounded-[12px] px-3 py-2 text-left text-[13px] transition-colors duration-200 ${
                   i === active ? "bg-ice" : ""
                 } ${isSelected ? "font-medium text-apple" : "text-ink-soft"}`}
               >

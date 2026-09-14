@@ -202,7 +202,7 @@ function CompareTable({ data }: { data: ComparisonDetail }) {
         </Reveal>
       ) : (
         <Reveal
-          className="overflow-x-auto rounded-[26px] border border-black/[0.06] bg-white/80 shadow-[0_2px_20px_-8px_rgba(0,0,0,0.08)] backdrop-blur-xl"
+          className="nums overflow-x-auto rounded-[22px] border border-black/[0.06] bg-white/80 shadow-[0_2px_20px_-8px_rgba(0,0,0,0.08)] backdrop-blur-xl"
           delay={80}
         >
           <table className="w-full min-w-[720px] text-sm">
@@ -365,7 +365,7 @@ export default function ComparePage() {
           <div className="mx-auto max-w-6xl space-y-4 px-4 py-12 sm:px-6">
             <div className="mx-auto h-10 w-56 animate-pulse rounded-full bg-white/70" />
             <div className="mx-auto h-4 w-80 animate-pulse rounded-full bg-white/50" />
-            <div className="mt-8 h-64 animate-pulse rounded-[26px] bg-white/60" />
+            <div className="mt-8 h-64 animate-pulse rounded-[22px] bg-white/60" />
           </div>
         }
       >

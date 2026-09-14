@@ -1,20 +1,12 @@
 import Link from "next/link";
-import { BODY_LABELS, ENERGY_LABELS, formatPriceRange, SALES_TYPE_LABELS, type VehicleListItem } from "@/lib/api";
-
-const ENERGY_CHIP: Record<string, string> = {
-  BEV: "bg-ice text-apple ring-apple/12",
-  PHEV: "bg-[#f2f1fe] text-[#5e5ce6] ring-[#5e5ce6]/12",
-  EREV: "bg-[#fdf6ec] text-[#b25e09] ring-[#b25e09]/12",
-  HEV: "bg-[#edf9f1] text-[#1d7d3f] ring-[#1d7d3f]/12",
-  ICE: "bg-canvas text-ash ring-black/[0.06]",
-};
+import { BODY_LABELS, ENERGY_CHIP, ENERGY_LABELS, formatPriceRange, SALES_TYPE_LABELS, type VehicleListItem } from "@/lib/api";
 
 /** 全部车型浏览卡片（无排名；点进详情后可加对比）。 */
 export default function BrowseCard({ item }: { item: VehicleListItem }) {
   return (
     <Link
       href={`/vehicles/${item.series_id}`}
-      className="lift group flex h-full flex-col rounded-[26px] border border-black/[0.06] bg-white/85 p-5 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl hover:border-apple/25 hover:bg-white"
+      className="lift nums group flex h-full flex-col rounded-[22px] border border-black/[0.06] bg-white/85 p-5 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl hover:border-apple/25 hover:bg-white"
     >
       <div className="flex flex-1 gap-4">
         {item.thumbnail_url ? (

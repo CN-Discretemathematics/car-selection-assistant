@@ -113,6 +113,15 @@ export interface CompareVariantOut {
   facts: ComparisonFactOut[];
 }
 
+/** 能源徽标配色（单一真源）：纯电=蓝、插混=靛、增程=琥珀、油混=绿、燃油=灰。 */
+export const ENERGY_CHIP: Record<string, string> = {
+  BEV: "bg-ice text-apple ring-apple/12",
+  PHEV: "bg-[#f2f1fe] text-[#5e5ce6] ring-[#5e5ce6]/12",
+  EREV: "bg-[#fdf6ec] text-[#b25e09] ring-[#b25e09]/12",
+  HEV: "bg-[#edf9f1] text-[#1d7d3f] ring-[#1d7d3f]/12",
+  ICE: "bg-canvas text-ash ring-black/[0.06]",
+};
+
 export const SALES_TYPE_LABELS: Record<string, string> = {
   retail: "零售口径",
   wholesale: "批发口径",
