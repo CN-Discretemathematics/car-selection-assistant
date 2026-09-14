@@ -3,7 +3,7 @@
 /* ══════════════════════════════════════════════════════════════════
    Apple 风格设计系统
    参考：apple.com 产品页 / Liquid Glass 材质 / AI 建站 Hero 范式
-   色板：#f5f5f7 画布 · #1d1d1f 墨色 · #6e6e73 次级灰 · #0071e3 蓝
+   色板：#f5f5f7 画布 · #1d1d1f 墨色 · #63636a 次级灰 · #0071e3 蓝
    ══════════════════════════════════════════════════════════════════ */
 
 @theme {
@@ -14,7 +14,7 @@
 
   --color-ink: #1d1d1f;
   --color-ink-soft: #424245;
-  --color-ash: #6e6e73;
+  --color-ash: #63636a;
   --color-canvas: #f5f5f7;
   --color-hair: #d2d2d7;
   --color-apple: #0071e3;
@@ -414,6 +414,11 @@ h3 {
 }
 *::-webkit-scrollbar-thumb:hover {
   background-color: #a1a1a6;
+}
+
+/* 数字等宽：价格/销量/参数纵向对齐更利落（font-variant-numeric 可继承，加在容器上即可） */
+.nums {
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── 无障碍：尊重系统减弱动效偏好 ──────────────────────────────── */

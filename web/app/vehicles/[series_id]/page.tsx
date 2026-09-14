@@ -148,7 +148,7 @@ export default async function VehiclePage({
         {/* ── 关键数据三联卡 ─────────────────────────────────────────── */}
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <Reveal className="h-full">
-            <div className="lift glass h-full rounded-[24px] border border-black/[0.05] p-5">
+            <div className="lift glass h-full rounded-[22px] border border-black/[0.05] p-5">
               <p className="flex items-center gap-1.5 text-xs font-medium text-ash">
                 <span className="h-1.5 w-1.5 rounded-full bg-apple" />
                 官方指导价区间
@@ -162,7 +162,7 @@ export default async function VehiclePage({
             </div>
           </Reveal>
           <Reveal className="h-full" delay={90}>
-            <div className="lift glass h-full rounded-[24px] border border-black/[0.05] p-5">
+            <div className="lift glass h-full rounded-[22px] border border-black/[0.05] p-5">
               <p className="flex items-center gap-1.5 text-xs font-medium text-ash">
                 <span className="h-1.5 w-1.5 rounded-full bg-[#64d2ff]" />
                 月销量（{sales?.sales_type ? (SALES_TYPE_LABELS[sales.sales_type] ?? sales.sales_type) : "口径未标注"}）
@@ -176,7 +176,7 @@ export default async function VehiclePage({
             </div>
           </Reveal>
           <Reveal className="h-full" delay={180}>
-            <div className="lift glass h-full rounded-[24px] border border-black/[0.05] p-5">
+            <div className="lift glass h-full rounded-[22px] border border-black/[0.05] p-5">
               <p className="flex items-center gap-1.5 text-xs font-medium text-ash">
                 <span className="h-1.5 w-1.5 rounded-full bg-[#5e5ce6]" />
                 在售年款
@@ -226,7 +226,7 @@ export default async function VehiclePage({
               className="h-full"
             >
               <div
-                className={`lift h-full rounded-[26px] border bg-white/85 p-6 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl ${
+                className={`lift h-full rounded-[22px] border bg-white/85 p-6 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl ${
                   v.id === highlightVariant
                     ? "animate-ring border-apple/60 ring-2 ring-apple/15"
                     : "border-black/[0.06] hover:border-apple/25 hover:bg-white"

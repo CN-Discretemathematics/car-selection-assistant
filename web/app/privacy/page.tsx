@@ -17,7 +17,7 @@ export default function PrivacyPage() {
         </Reveal>
 
         <Reveal className="mt-10" delay={60}>
-          <div className="glass rounded-[26px] border border-black/[0.05] p-6 sm:p-8">
+          <div className="glass rounded-[22px] border border-black/[0.05] p-6 sm:p-8">
             <h2 className="text-[17px] font-semibold tracking-tight text-ink">1. 我们收集什么</h2>
             <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-7 text-ink-soft">
               <li>浏览、查看车型详情、款型对比、分享链接等功能无需注册，也不收集任何个人信息。</li>
@@ -31,7 +31,7 @@ export default function PrivacyPage() {
         </Reveal>
 
         <Reveal className="mt-4" delay={100}>
-          <div className="glass rounded-[26px] border border-black/[0.05] p-6 sm:p-8">
+          <div className="glass rounded-[22px] border border-black/[0.05] p-6 sm:p-8">
             <h2 className="text-[17px] font-semibold tracking-tight text-ink">2. 我们如何使用信息</h2>
             <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-7 text-ink-soft">
               <li>邮箱仅用于登录验证（发送验证码）与账号标识；</li>
@@ -42,7 +42,7 @@ export default function PrivacyPage() {
         </Reveal>
 
         <Reveal className="mt-4" delay={140}>
-          <div className="glass rounded-[26px] border border-black/[0.05] p-6 sm:p-8">
+          <div className="glass rounded-[22px] border border-black/[0.05] p-6 sm:p-8">
             <h2 className="text-[17px] font-semibold tracking-tight text-ink">3. 信息保存与删除</h2>
             <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-7 text-ink-soft">
               <li>登录状态与会话数据设有过期时间，过期自动清除；</li>
@@ -54,7 +54,7 @@ export default function PrivacyPage() {
         </Reveal>
 
         <Reveal className="mt-4" delay={180}>
-          <div className="glass rounded-[26px] border border-black/[0.05] p-6 sm:p-8">
+          <div className="glass rounded-[22px] border border-black/[0.05] p-6 sm:p-8">
             <h2 className="text-[17px] font-semibold tracking-tight text-ink">4. 数据来源与内容说明</h2>
             <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-7 text-ink-soft">
               <li>
@@ -69,7 +69,7 @@ export default function PrivacyPage() {
         </Reveal>
 
         <Reveal className="mt-4" delay={220}>
-          <div className="glass rounded-[26px] border border-black/[0.05] p-6 sm:p-8">
+          <div className="glass rounded-[22px] border border-black/[0.05] p-6 sm:p-8">
             <h2 className="text-[17px] font-semibold tracking-tight text-ink">5. 联系我们</h2>
             <p className="mt-3 text-sm leading-7 text-ink-soft">
               如对本政策有任何疑问，可通过站点上线时公布的客服邮箱与我们联系。

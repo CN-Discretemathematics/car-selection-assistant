@@ -71,7 +71,7 @@ export default function FavoritesPage() {
         ) : items === null ? (
           <div className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-2" aria-label="加载中">
             {[0, 1, 2, 3].map((i) => (
-              <div key={i} className="h-20 animate-pulse rounded-[24px] bg-white/60" />
+              <div key={i} className="h-20 animate-pulse rounded-[22px] bg-white/60" />
             ))}
           </div>
         ) : items.length === 0 ? (
@@ -101,7 +101,7 @@ export default function FavoritesPage() {
                 <Reveal key={`${item.kind}-${item.vehicle_id}`} delay={Math.min(index, 10) * 60} className="h-full">
                   <Link
                     href={href}
-                    className="lift group flex h-full items-center justify-between rounded-[24px] border border-black/[0.06] bg-white/85 p-4.5 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl hover:border-apple/25 hover:bg-white"
+                    className="lift group flex h-full items-center justify-between rounded-[22px] border border-black/[0.06] bg-white/85 p-4.5 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl hover:border-apple/25 hover:bg-white"
                   >
                     <div className="flex min-w-0 items-center gap-3.5">
                       <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-ice to-[#f2f1fe] text-lg shadow-inner shadow-apple/5 transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:scale-110">

@@ -206,7 +206,7 @@ export default function AgentChat() {
           {/* 消息区 */}
           <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto bg-canvas/40 px-4 py-4">
             {messages.length === 0 && (
-              <div className="msg-pop rounded-[20px] border border-apple/12 bg-ice/70 p-3.5 text-[13px] leading-6 text-ink-soft">
+              <div className="msg-pop rounded-[22px] border border-apple/12 bg-ice/70 p-3.5 text-[13px] leading-6 text-ink-soft">
                 💡 告诉我你的预算、用途和人数，例如：「预算15万，家庭用车，5口人，想要新能源SUV」。
               </div>
             )}
@@ -401,7 +401,7 @@ function ClarificationChips({
 
 function RecommendationCard({ variant }: { variant: RecommendedVariant }) {
   return (
-    <div className="lift msg-pop rounded-[20px] border border-black/[0.06] bg-white/95 p-3.5 text-left shadow-sm">
+    <div className="lift msg-pop rounded-[22px] border border-black/[0.06] bg-white/95 p-3.5 text-left shadow-sm">
       <Link
         href={`/vehicles/${variant.series_id}`}
         className="text-[13.5px] font-semibold tracking-tight text-ink transition-colors duration-300 hover:text-apple"

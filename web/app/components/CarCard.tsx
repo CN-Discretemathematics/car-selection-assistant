@@ -1,15 +1,7 @@
 import Link from "next/link";
-import { BODY_LABELS, ENERGY_LABELS, formatPriceRange, type HomeCard } from "@/lib/api";
+import { BODY_LABELS, ENERGY_CHIP, ENERGY_LABELS, formatPriceRange, type HomeCard } from "@/lib/api";
 
 const MISSING_SALES_LABEL = "暂无统一公开数据";
-
-const ENERGY_CHIP: Record<string, string> = {
-  BEV: "bg-ice text-apple ring-apple/12",
-  PHEV: "bg-[#f2f1fe] text-[#5e5ce6] ring-[#5e5ce6]/12",
-  EREV: "bg-[#fdf6ec] text-[#b25e09] ring-[#b25e09]/12",
-  HEV: "bg-[#edf9f1] text-[#1d7d3f] ring-[#1d7d3f]/12",
-  ICE: "bg-canvas text-ash ring-black/[0.06]",
-};
 
 const RANK_MEDAL: Record<number, string> = {
   1: "bg-gradient-to-br from-[#ffd60a] via-[#ffb800] to-[#ff9f0a] text-[#5c3d00] shadow-lg shadow-[#ffb800]/35",
@@ -36,7 +28,7 @@ export default function CarCard({
   return (
     <Link
       href={`/vehicles/${card.series_id}`}
-      className="lift group flex h-full flex-col rounded-[26px] border border-black/[0.06] bg-white/85 p-5 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl hover:border-apple/25 hover:bg-white"
+      className="lift nums group flex h-full flex-col rounded-[22px] border border-black/[0.06] bg-white/85 p-5 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl hover:border-apple/25 hover:bg-white"
     >
       <div className="flex flex-1 items-start gap-3.5">
         {/* 排名徽章：前三名奖牌样式 + 第 1 名皇冠；其余为简洁数字章 */}

@@ -261,7 +261,7 @@ function SearchBarInner({
                   aria-selected={i === active}
                   onMouseEnter={() => setActive(i)}
                   onClick={() => go(`/vehicles/${item.series_id}`)}
-                  className={`flex w-full items-center gap-3 rounded-[17px] px-2.5 py-2 text-left transition-colors duration-200 ${
+                  className={`flex w-full items-center gap-3 rounded-[16px] px-2.5 py-2 text-left transition-colors duration-200 ${
                     i === active ? "bg-ice" : "hover:bg-canvas"
                   }`}
                 >
@@ -302,7 +302,7 @@ function SearchBarInner({
                       ? applyInlineQuery(keyword)
                       : go(`/vehicles?q=${encodeURIComponent(keyword)}`)
                   }
-                  className="press mt-0.5 block w-full rounded-[17px] px-3 py-2 text-center text-xs font-medium text-apple hover:bg-ice"
+                  className="press mt-0.5 block w-full rounded-[16px] px-3 py-2 text-center text-xs font-medium text-apple hover:bg-ice"
                 >
                   查看全部 {total} 个结果 →
                 </button>
