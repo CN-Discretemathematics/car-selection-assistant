@@ -41,8 +41,9 @@ def vehicle_search(
     """
     stmt = select(VehicleSeries).where(VehicleSeries.active_status == "active")
     if query:
-        like = f"%{query}%"
-        stmt = stmt.where(VehicleSeries.name.like(like))
+        # 转义 LIKE 通配符：query 来自模型/用户，`%`/`_` 会被当作通配符放大匹配面
+        safe_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        stmt = stmt.where(VehicleSeries.name.like(f"%{safe_query}%", escape="\\"))
     if body_type:
         stmt = stmt.where(VehicleSeries.body_type == body_type)
     if brand_id:
@@ -55,6 +56,8 @@ def vehicle_search(
         if not ids:
             return []  # 品牌不在库内：如实返回空，不猜
         stmt = stmt.where(VehicleSeries.brand_id.in_(ids))
+    # limit 夹紧 1..200：模型给的 limit 可能是 10^9（放大成 N+1 查询）或负数
+    limit = max(1, min(int(limit), 200))
     series_list = db.scalars(stmt.limit(limit)).all()
 
     result = []
@@ -95,6 +98,9 @@ def sales_search(db: Session, month: str | None = None, limit: int = 20) -> list
     为汽车之家门户口径，硬编码 retail 会永远返回空）。默认月份回退到库内
     最新数据月（销量数据月中发布，月初按「最近完整自然月」取数会整体为空）。
     """
+    # limit 夹紧（模型可传 0/负数/超大值；2026-09-14 第三轮审查 L4）
+    # 注意：docstring 必须是函数首语句（用户文案门禁靠 AST 识别 docstring）
+    limit = max(1, min(int(limit), 50))
     target = month or catalog.latest_sales_month(db)
     rows = db.execute(
         select(MonthlySales, VehicleSeries, Brand)
