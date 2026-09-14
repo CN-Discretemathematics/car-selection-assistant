@@ -296,7 +296,8 @@ def _sales_text(db: Session, series: VehicleSeries) -> str:
     sales = catalog.latest_sales(db, series.id)
     if sales is None or sales.sales_count is None:
         return ""
-    label = "门户口径" if sales.sales_type == "portal" else "零售口径"
+    # 口径标签与前端一致：「门户口径」是内部叫法，用户看到的是「榜单口径」（2026-09-14）
+    label = "榜单口径" if sales.sales_type == "portal" else "零售口径"
     return f"；{sales.month} 月销量 {sales.sales_count:,} 辆（{label}）"
 
 

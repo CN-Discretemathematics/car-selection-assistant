@@ -57,6 +57,35 @@ python tools/fetch_autohome_series.py --ids <榜单带入的 seriesid 列表> --
 
 查占位车系（应为 0）：`select count(*) from vehicle_series s join brands b on b.id=s.brand_id where b.name like '待分类%';`
 
+**补了车系资料 ≠ 有款型（2026-09-14 用户实测「风云A9 有销量但没款型」）**：
+`fetch_autohome_series.py` 只写车系级字段（品牌/级别/价格区间/能源/车身），**SKU 与参数要靠
+`fetch_autohome_sku.py` 单独抓**。只跑前者 → 详情页「暂无在售款型数据」、配置表全空，
+但销量正常，很容易被误判为「汽车之家也没有数据」（实际有，实测风云A9 4 款、风云A9L 16 款）。
+
+```sql
+-- 每次大批导入后都查一遍：无在售款型的在售车系（应趋近 0）
+-- 口径必须与线上展示一致：品牌与车系都要 active（否则会算进 App 不展示的车系，指标不收敛）
+select count(*) from vehicle_series s join brands b on b.id = s.brand_id
+where s.active_status='active' and b.active_status='active'
+  and not exists (select 1 from vehicle_variants v where v.series_id=s.id and v.status='on_sale');
+```
+
+更省事的口径：直接跑 `backend/tools/export_series_gaps.py --report`（含
+`gap_with_autohome_ref` / `gap_without_autohome_ref` / `gap_placeholder_brand` 拆分，
+判据与上面一致）。
+
+**两条实测得到的教训（2026-09-14）**：
+
+1. **「批完成 / 退出码 0」不等于数据到位**：旧回补脚本跑完 9 批全部报完成，但缺口只从 201
+   降到 171——`fetch_autohome_sku.py` 各阶段恒返回 0，且抓到 0 款型也记 ok。判据必须落到
+   **数据库指标**（缺口数下降），每批校验、未下降即停。
+2. **抓取工具的 `--ids` 只在 A-Z 索引 scope 内过滤**：索引会漏车系（实测「凯美瑞」
+   seriesid=110 不在索引里，但接口正常返回 13 款型），导致这些车系每次都"待抓取 0 个"。
+   已修：显式 `--ids` 不受 scope 限制（元数据从库内补），抓到 0 款型记失败可重试。
+
+补法见 `docs/deployment.md` §7（`--report` 看缺口 → `carsel-sku-backfill.sh` 分批抓 → 重建索引）。
+2026-09-14 实测缺口 201 个车系（凯美瑞/途观L/海豹06 等在列），全部有汽车之家 id 可直接抓。
+
 **补齐数据会放大下游**：首页榜单接口原先整体返回命中列表，数据补齐后单月 650 个车系会把
 首页 HTML 撑到 4.7MB。列表类接口一律带 `limit`（首页 `limit=20`，总数走 `X-Total-Count` 响应头），
 完整榜单交给带分页的 `/vehicles`。

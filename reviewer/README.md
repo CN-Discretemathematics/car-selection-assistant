@@ -23,6 +23,19 @@ python reviewer/scan_secrets.py --json     # JSON 报告（便于程序化处理
 python reviewer/scan_secrets.py --path backend  # 只扫某个子目录
 ```
 
+### 2. 用户可见文案门禁（每次审查前必做）
+
+```powershell
+python reviewer/scan_ui_copy.py            # 退出码 0=干净，1=发现内部表述
+python reviewer/scan_ui_copy.py --verbose  # 逐条打印命中位置
+```
+
+拦两类东西：内部**术语**（SKU / §章节号 / 门户口径 / 范围内 / 幂等 / 落库…）与
+**实现说明措辞**（「不做猜测补全」「统一显示」等）。前端扫公开页面（`/ops` 与仅它使用的
+`web/lib/rag.ts` 除外）；后端用 `ast` 只看**非 docstring 的字符串字面量**——注释与 docstring
+里的技术术语是给维护者的，允许保留。**2026-09-14 事故**：详情页脚注整句实现说明漏过第一轮
+清理（当时只查固定术语表），用户再次反馈后入库为门禁。
+
 规则说明：
 
 - 覆盖 `sk-...`（DeepSeek/OpenAI）、`AKIA...`（AWS）、`ghp_...`（GitHub）、

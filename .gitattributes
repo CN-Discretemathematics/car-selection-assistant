@@ -1,0 +1,11 @@
+# 行尾规范（2026-09-14 事故沉淀）：
+# Windows 工作区因 core.autocrlf=true 会把 .sh 检出成 CRLF，直接 scp 到服务器后
+# bash 报 `syntax error near unexpected token $'in\r'` / `bad interpreter: /bin/bash^M`；
+# 而 `bash -n` 对 CRLF 与 LF **都**返回 0，抓不到这类问题（实测）。故显式固定：
+/.gitattributes text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.mjs text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

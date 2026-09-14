@@ -259,9 +259,6 @@ export default async function VehiclePage({
                     </div>
                   ))}
                 </div>
-                <p className="mt-3 text-[11px] text-ash">
-                  缺失数据统一显示「{MISSING_LABEL}」，不做猜测补全。
-                </p>
               </div>
             </Reveal>
           ))}

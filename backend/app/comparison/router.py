@@ -35,18 +35,18 @@ router = APIRouter(tags=["comparison"])
 def create_comparison(payload: ComparisonCreate, db: Session = Depends(get_session)) -> ComparisonSummaryOut:
     variant_ids = list(dict.fromkeys(payload.variant_ids))  # 去重保序
     if not variant_ids:
-        raise bad_request("至少需要 1 个 SKU")
+        raise bad_request("至少需要 1 个款型")
     if len(variant_ids) > COMPARISON_MAX_VARIANTS:
-        raise bad_request(f"最多同时对比 {COMPARISON_MAX_VARIANTS} 个 SKU")
+        raise bad_request(f"最多同时对比 {COMPARISON_MAX_VARIANTS} 个款型")
 
     variants = db.scalars(select(VehicleVariant).where(VehicleVariant.id.in_(variant_ids))).all()
     found = {v.id: v for v in variants}
     missing = [vid for vid in variant_ids if vid not in found]
     if missing:
-        raise not_found(f"SKU 不存在：{', '.join(map(str, missing))}")
+        raise not_found(f"款型不存在：{', '.join(map(str, missing))}")
     off_sale = [v.id for v in variants if v.status != "on_sale"]
     if off_sale:
-        raise bad_request(f"SKU 已停售，不能加入对比：{', '.join(map(str, off_sale))}")
+        raise bad_request(f"款型已停售，不能加入对比：{', '.join(map(str, off_sale))}")
 
     # 内容幂等（评审 P1）：同一组 SKU 的重复创建（分享链接反复打开）复用已有行
     content_hash = hashlib.sha256(",".join(map(str, sorted(variant_ids))).encode()).hexdigest()
