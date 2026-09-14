@@ -134,7 +134,7 @@ def vehicle_evidence(db: Session, variant_id: int) -> dict:
     """返回 SKU 的配置、价格与官方来源（回答中的事实依据）。"""
     variant = catalog.get_variant(db, variant_id)
     if variant is None:
-        return {"variant_id": variant_id, "error": "SKU 不存在"}
+        return {"variant_id": variant_id, "error": "未找到该款型"}
     series = db.get(VehicleSeries, variant.series_id)
     brand = db.get(Brand, series.brand_id) if series else None
     price = catalog.variant_current_price(db, variant_id)
@@ -640,7 +640,7 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "vehicle_evidence",
-            "description": "返回 SKU 的配置、价格与官方来源，作为事实依据。",
+            "description": "返回款型的配置、价格与官方来源，作为事实依据。",
             "parameters": {
                 "type": "object",
                 "properties": {"variant_id": {"type": "integer"}},
@@ -671,7 +671,7 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "recommendation_tool",
-            "description": "按用户画像执行硬条件筛选与软评分，返回候选 SKU。",
+            "description": "按用户画像执行硬条件筛选与软评分，返回候选款型。",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -352,7 +352,8 @@ def _summary_chunk_text(
         parts.append("核心参数：" + "；".join(head_parts) + "。")
     if sales:
         month, sales_count, sales_type = sales
-        label = "门户口径" if sales_type == "portal" else "零售口径"
+        # 切片文本会作为「数据佐证」展示给用户，口径标签与前端保持一致（2026-09-14）
+        label = "榜单口径" if sales_type == "portal" else "零售口径"
         parts.append(f"{month} 月销量 {sales_count:,} 辆（{label}）。")
     return " ".join(parts)
 

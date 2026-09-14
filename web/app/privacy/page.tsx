@@ -59,7 +59,8 @@ export default function PrivacyPage() {
             <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-7 text-ink-soft">
               <li>
                 本网站展示的价格均为<strong className="font-semibold text-ink">官方指导价</strong>
-                ，配置与销量数据均标注来源与更新时间；缺失数据显示「官方资料未披露」，不做猜测补全。
+                ，配置与销量数据均标注来源与更新时间；缺失的数据一律标注「官方资料未披露」，
+                我们不会用推测值填充。
               </li>
               <li>购车助手的推荐与解释由人工智能生成，仅供参考，不构成购买建议；请以品牌官网信息为准。</li>
               <li>本站不提供交易、询价、优惠与库存信息，相关服务请前往品牌官网。</li>

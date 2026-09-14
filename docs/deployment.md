@@ -171,7 +171,62 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $ADMIN_API_TO
   http://127.0.0.1:8000/api/v1/admin/rag/status   # 无 token 401、未配置 503
 ```
 
-## 7. 已知事项与后续改进
+## 7. 数据回补：有销量但没款型的车系
+
+**症状**：详情页显示「暂无在售款型数据」、配置表全空，但销量与价格区间正常
+（用户实测：风云A9）。
+
+**根因**：销量榜导入会给榜上车系创建**只有车系级信息**的存根（品牌/定位/能源/车身），
+SKU 需由 `tools/fetch_autohome_sku.py` 单独抓取；此前只回补过车系资料、没跑 SKU 阶段，
+于是 201 个在售车系（含凯美瑞、途观L、海豹06 等热门车型）没有款型。
+
+**① 看缺口（判据以数据库为准，工具已入库）**：
+
+```bash
+docker exec -w /srv/carsel/backend deploy-api-1 python tools/export_series_gaps.py --report
+# {"series_total":1078,"gap_series":201,"covered_series":877,
+#  "gap_with_autohome_ref":201,"gap_without_autohome_ref":0,"on_sale_variants":5132, ...}
+```
+
+`gap_without_autohome_ref` 的车系没有汽车之家 id，**无法按 id 抓取**，不在回补范围内。
+`gap_series` 是唯一验收指标（与线上展示口径一致：只看 active 品牌 + active 车系）。
+
+**② 安装并运行回补脚本**（幂等、可反复执行，缺口清空即结束）：
+
+```bash
+install -m 755 /srv/carsel/deploy/carsel-sku-backfill.sh /usr/local/bin/carsel-sku-backfill.sh
+/usr/local/bin/carsel-sku-backfill.sh --check                      # 只打印缺口报告
+nohup /usr/local/bin/carsel-sku-backfill.sh --save-raw > /tmp/backfill-nohup.log 2>&1 &
+tail -f /srv/carsel/logs/sku-backfill.log
+```
+
+脚本要点（依据 2026-09-14 独立审查 M1–M3、m6–m9 修订）：
+
+- 每批的 id **现查现取**（`export_series_gaps.py --ids --limit N`），补好的车系自然从缺口消失，
+  天然断点续跑，不依赖静态清单或「已完成」文件；
+- **每批校验缺口是否下降**，未下降立即停止并报错——`fetch_autohome_sku.py` 各阶段恒返回 0，
+  只看退出码会把失败记成完成（这正是本次事故同一类「静默缺数据」）；
+- 显式 `--stage sku`（默认 `all` 会每批重抓 26 个 A-Z 索引页）；需要刷新索引时用 `--refresh-index`；
+- `BATCH` 必须是正整数（`BATCH=0` 会死循环并触发全库重抓）；
+- `--save-raw` 落原始 SKU 快照（项目对来源留痕的要求），快照目录 `backend/snapshots/`。
+
+**③ 重建向量索引**（款型/参数/口径文案变化 → 切片内容变化）：
+
+```bash
+docker exec -w /srv/carsel/backend deploy-api-1 python tools/build_retrieval_index.py --target dense --smoke
+curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
+  -H 'Content-Type: application/json' -d '{"target":"sparse"}' localhost:8000/api/v1/admin/rag/reindex
+```
+
+**④ 复核**：`--report` 的 `gap_series` 应显著下降；抽查 2 个车系详情页款型数与配置表。
+抓取日志里的 `robots.txt 抓取失败（…404）` 是该工具既有提示（按默认允许处理），
+**不是抓取失败**；只有脚本自己打印的「本批缺口未下降」才是真失败。
+
+**为什么会有这种缺口**：销量榜覆盖 650 个车系，而 SKU 抓取是逐车系（含参数页）的慢操作，
+两者天然不同步——**每次大批导入销量后都要跑一次 ①的 `--report`**
+（见 `skills/data-import-validation.md`）。
+
+## 8. 已知事项与后续改进
 
 - **`web/public/` 曾被漏掉**：`deploy/frontend.Dockerfile` 会 `COPY .../web/public ./public`，
   但仓库此前未跟踪该目录——全新克隆构建必失败（服务器靠手工 `.gitkeep` 侥幸可用）。
@@ -180,6 +235,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $ADMIN_API_TO
   `/admin/rag/status` 在规模漂移时给出「车系 908→1078」式原因。旧标记（无 `db_counts`）
   退回只比月份，不误报。
 - **只部署 main 的代价**：未合并的改动不会上线（需要的验证放在 PR 阶段完成）。
-- **可选的 CI 门禁**：目前 PR 阶段没有自动跑测试（254 用例只在本地/手工执行）。
-  公开仓库可加 GitHub Actions 跑 `pytest` + `tsc`，让「自动部署 main」更有底气。
+- **可选的 CI 门禁**：目前 PR 阶段没有自动跑测试（284 用例与两道静态门禁
+  `reviewer/scan_secrets.py`、`reviewer/scan_ui_copy.py` 都只在本地/手工执行）。
+  公开仓库可加 GitHub Actions 跑 `pytest` + `tsc` + 两道门禁，让「自动部署 main」更有底气。
 - **通知**：脚本只写日志与状态文件；如需微信/邮件通知，可在脚本末尾追加钩子。

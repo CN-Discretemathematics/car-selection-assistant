@@ -57,6 +57,21 @@ python tools/fetch_autohome_series.py --ids <榜单带入的 seriesid 列表> --
 
 查占位车系（应为 0）：`select count(*) from vehicle_series s join brands b on b.id=s.brand_id where b.name like '待分类%';`
 
+**补了车系资料 ≠ 有款型（2026-09-14 用户实测「风云A9 有销量但没款型」）**：
+`fetch_autohome_series.py` 只写车系级字段（品牌/级别/价格区间/能源/车身），**SKU 与参数要靠
+`fetch_autohome_sku.py` 单独抓**。只跑前者 → 详情页「暂无在售款型数据」、配置表全空，
+但销量正常，很容易被误判为「汽车之家也没有数据」（实际有，实测风云A9 4 款、风云A9L 16 款）。
+
+```sql
+-- 每次大批导入后都查一遍：无在售款型的在售车系（应趋近 0）
+select count(*) from vehicle_series s
+where s.active_status='active'
+  and not exists (select 1 from vehicle_variants v where v.series_id=s.id and v.status='on_sale');
+```
+
+补法见 `docs/deployment.md` §7（导出缺口 id → `carsel-sku-backfill.sh` 分批抓 → 重建索引）。
+2026-09-14 实测缺口 201 个车系（凯美瑞/途观L/海豹06 等在列），全部有汽车之家 id 可直接抓。
+
 **补齐数据会放大下游**：首页榜单接口原先整体返回命中列表，数据补齐后单月 650 个车系会把
 首页 HTML 撑到 4.7MB。列表类接口一律带 `limit`（首页 `limit=20`，总数走 `X-Total-Count` 响应头），
 完整榜单交给带分页的 `/vehicles`。
