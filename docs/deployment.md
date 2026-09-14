@@ -117,7 +117,7 @@ carsel-nightly.sh --no-rebuild    # 只导入不重建（排障用）
    在运行中的 api 进程内重建。另起进程跑 `--target sparse` 建的索引会随子进程退出而丢弃
    （生产 `RETRIEVAL_BACKEND=milvus` 时，按数据量自动重建是关闭的）。
 5. **重建后核对**：脚本自动打印 `/admin/rag/status` 的稠密/稀疏切片数与
-   `stale/stale_reason`（月份 + 规模双比对，见 §7）。
+   `stale/stale_reason`（月份 + 规模双比对，见 §8）。
 6. **自更新**：仓库里的脚本变化后，下次运行自动安装到 `/usr/local/bin`。
 7. 日志：`logs/sales-cron.log`（任务级）与 `logs/rebuild-cron.log`（重建明细），自动截断保留 3000 行。
 8. **凭据**：脚本优先读 `/root/carsel-nightly-token.txt`（`ADMIN_API_TOKENS` 里 `nightly:` 那把），
@@ -235,7 +235,7 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
   `/admin/rag/status` 在规模漂移时给出「车系 908→1078」式原因。旧标记（无 `db_counts`）
   退回只比月份，不误报。
 - **只部署 main 的代价**：未合并的改动不会上线（需要的验证放在 PR 阶段完成）。
-- **可选的 CI 门禁**：目前 PR 阶段没有自动跑测试（284 用例与两道静态门禁
+- **可选的 CI 门禁**：目前 PR 阶段没有自动跑测试（289 用例与两道静态门禁
   `reviewer/scan_secrets.py`、`reviewer/scan_ui_copy.py` 都只在本地/手工执行）。
   公开仓库可加 GitHub Actions 跑 `pytest` + `tsc` + 两道门禁，让「自动部署 main」更有底气。
 - **通知**：脚本只写日志与状态文件；如需微信/邮件通知，可在脚本末尾追加钩子。

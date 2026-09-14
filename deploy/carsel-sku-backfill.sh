@@ -64,15 +64,30 @@ log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
 in_container() { docker exec -w "$WORKDIR" "$CONTAINER" "$@"; }
 
 gap_report() { in_container python tools/export_series_gaps.py --report 2>/dev/null; }
-gap_count() {
-  gap_report | python3 -c 'import json,sys; print(json.load(sys.stdin)["gap_series"])' 2>/dev/null
+# 缺口计数也在容器内解析（宿主机未必有 python3；此前用宿主 python3 会因其缺失而每批中止）
+gap_field() {
+  gap_report | in_container python -c \
+    "import json,sys; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null
 }
+# 回补目标 = 完全无款型的「真缺口」（有款型但全停售属数据完整，补不了也不需要补）
+gap_count() { gap_field gap_no_variants; }
 
 log "=========== 款型回补启动（batch=$BATCH, save_raw=$SAVE_RAW, max_batches=$MAX_BATCHES）==========="
-log "起始缺口报告：$(gap_report | tr -d '\n')"
+START_GAP=$(gap_count)
+if [ -z "$START_GAP" ]; then
+  log "错误：无法读取缺口报告（容器 $CONTAINER 或数据库不可达），未开始抓取"
+  echo "无法读取缺口报告（容器或数据库不可达）" >&2
+  exit 1
+fi
+log "起始缺口：$START_GAP"
 
 if [ "$CHECK_ONLY" = "1" ]; then
-  gap_report
+  report=$(gap_report)
+  if [ -z "$report" ]; then
+    echo "无法读取缺口报告（容器或数据库不可达）" >&2
+    exit 1
+  fi
+  printf '%s\n' "$report"
   exit 0
 fi
 
@@ -85,14 +100,34 @@ if [ "$REFRESH_INDEX" = "1" ]; then
 fi
 
 batch_no=0
-processed=0
 while :; do
-  BATCH_IDS=$(in_container python tools/export_series_gaps.py --ids --limit "$BATCH" --quiet 2>/dev/null)
-  if [ -z "$BATCH_IDS" ]; then
-    log "缺口已清空（本批无待处理车系），结束"
-    break
+  # 区分「工具失败」与「确实没有可回补 id」：失败必须报错退出，不能当成完成
+  # （第二轮审查 M2a：此前 docker exec 失败 → stdout 空 → 误报「缺口已清空」并退出 0）
+  IDS_OUT=$(in_container python tools/export_series_gaps.py --ids --limit "$BATCH" --quiet 2>>"$LOG")
+  IDS_RC=$?
+  if [ "$IDS_RC" -ne 0 ]; then
+    log "错误：导出缺口 id 失败（退出码 $IDS_RC），停止执行"
+    echo "导出缺口 id 失败（退出码 $IDS_RC）" >&2
+    exit 1
   fi
+  BATCH_IDS=$(printf '%s' "$IDS_OUT" | tr -d '\r\n')
   BEFORE=$(gap_count)
+  if [ -z "$BEFORE" ]; then
+    log "错误：无法读取缺口数，停止执行"
+    exit 1
+  fi
+  if [ -z "$BATCH_IDS" ]; then
+    # 没有可回补的 id：只有缺口真的归零才算成功（M2b：剩余缺口若都无汽车之家映射，
+    # 超出回补范围，但必须如实报出，不能宣称完成）
+    if [ "$BEFORE" -eq 0 ]; then
+      log "缺口已归零，回补完成"
+      break
+    fi
+    MISSING=$(gap_field gap_without_autohome_ref)
+    log "停止：真缺口（完全无款型）已无可回补的汽车之家 id（无映射 $MISSING 个）"
+    echo "真缺口无可回补 id（无汽车之家映射 $MISSING 个），需人工处理" >&2
+    exit 1
+  fi
   COUNT=$(awk -F, '{print NF}' <<< "$BATCH_IDS")
   batch_no=$((batch_no + 1))
   log "---- 第 $batch_no 批：$COUNT 个车系，处理前缺口 $BEFORE ----"
@@ -105,9 +140,8 @@ while :; do
 
   AFTER=$(gap_count)
   log "第 $batch_no 批结束：退出码 $RC，处理后缺口 $AFTER（本批 $COUNT 个）"
-  processed=$((processed + COUNT))
 
-  if [ -z "${AFTER:-}" ] || [ -z "${BEFORE:-}" ]; then
+  if [ -z "$AFTER" ]; then
     log "无法读取缺口数（数据库/容器异常），停止以免误判完成"
     exit 1
   fi
@@ -124,6 +158,9 @@ while :; do
   fi
 done
 
-log "=========== 款型抓取结束：处理 $processed 个车系，共 $batch_no 批 ==========="
-log "最终缺口报告：$(gap_report | tr -d '\n')"
+FINAL_GAP=$(gap_count)
+log "=========== 款型回补结束：$batch_no 批，缺口 $START_GAP → ${FINAL_GAP:-未知} ==========="
 log "请按脚本头部说明重建向量索引（稠密 + 稀疏）"
+if [ -n "$FINAL_GAP" ] && [ "$FINAL_GAP" -gt 0 ]; then
+  log "注意：仍有 $FINAL_GAP 个车系无在售款型（多为无汽车之家映射或上游无数据），未达 0"
+fi

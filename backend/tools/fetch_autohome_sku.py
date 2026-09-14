@@ -49,6 +49,62 @@ CHECKPOINT_PATH = os.path.join(SNAPSHOT_DIR, "autohome-sku-checkpoint.json")
 
 SLEEP_SECONDS = 1.2  # 礼貌限频（≥1s/请求）
 MAX_RETRIES = 3
+# 汽车之家来源名（external_series_refs 的唯一键是 (source_id, external_id)，不同来源的
+# external_id 可能重号，故按来源限定，避免将来接入第二个来源时抓到别的车系）
+AUTOHOME_SOURCE_NAME = "汽车之家"
+
+
+def _explicit_scope(ids: list[str], session=None) -> list[dict]:
+    """把 `--ids` 指定的 seriesid 变成 scope 同构条目（元数据从数据库补）。
+
+    为什么需要（2026-09-14 实测事故）：A-Z 索引会漏车系——「凯美瑞」（seriesid=110）
+    不在索引进而也不在 scope 里，但接口 `fetch_sku_config('110')` 正常返回 13 款型。
+    此前 `--ids` 只在 scope **内部**过滤，于是这些车系每次调用都是「待抓取 0 个」，
+    上层脚本看到退出码 0 就记成完成 → 171 个车系静默无款型。
+    `--ids` 的 id 来自库内 `external_series_refs`（与销量榜同源，已核对与配置页同一 id 空间），
+    本身可信，因此显式指定时不再受索引范围限制；元数据（品牌/类别/车系名/价格区间）回落数据库。
+    """
+    from sqlalchemy import select
+
+    from app.common.models import Brand, ExternalSeriesRef, Source, VehicleSeries
+    from app.common.database import get_session_factory
+
+    own_session = session is None
+    session = session or get_session_factory()()
+    entries: list[dict] = []
+    try:
+        for external_id in ids:
+            row = session.execute(
+                select(VehicleSeries, Brand)
+                .join(ExternalSeriesRef, ExternalSeriesRef.series_id == VehicleSeries.id)
+                .join(Source, Source.id == ExternalSeriesRef.source_id)
+                .join(Brand, VehicleSeries.brand_id == Brand.id)
+                .where(
+                    ExternalSeriesRef.external_id == external_id,
+                    Source.name == AUTOHOME_SOURCE_NAME,
+                )
+                .limit(1)
+            ).first()
+            if row is None:
+                print(f"  跳过 {external_id}：库里没有对应映射", file=sys.stderr)
+                continue
+            series, brand = row
+            entries.append(
+                {
+                    "external_id": external_id,
+                    "name": series.name,
+                    # 门户价格区间原文（库内已有则带上，缺失时留空由导入侧补）
+                    "price_note": series.price_range_note or "",
+                    "brand": brand.name,
+                    "brand_type": brand.brand_type,
+                    # 不编造收录理由：库里没有就留空，由导入侧按既有默认处理（第二轮审查 m2）
+                    "inclusion_reason": brand.inclusion_reason,
+                }
+            )
+    finally:
+        if own_session:
+            session.close()
+    return entries
 
 # 品牌注册表：纳入范围与品牌类别（类别可在管理后台再调整）
 IN_SCOPE_BRANDS: dict[str, dict] = {
@@ -303,18 +359,29 @@ def stage_index(_args) -> int:
 
 def stage_series(args) -> int:
     scope = _load_json(SCOPE_PATH)
-    if not scope:
-        print("先运行 --stage index", file=sys.stderr)
-        return 1
     cp = _load_checkpoint()
     detail_rows = _load_json(DETAIL_PATH, [])
     detail_map = {str(r["external_id"]): r for r in detail_rows}
-    pending = [s for s in scope if str(s["external_id"]) not in cp["series_pages_done"]]
     if args.ids:
-        want = {i.strip() for i in args.ids.split(",")}
-        pending = [s for s in pending if s["external_id"] in want]
+        # 与 stage_sku 同口径：显式 id 不受索引范围限制，元数据从库内补
+        want = [i.strip() for i in args.ids.split(",") if i.strip()]
+        known = {str(s["external_id"]): s for s in (scope or [])}
+        missing = [i for i in want if i not in known]
+        filled = {s["external_id"]: s for s in _explicit_scope(missing)} if missing else {}
+        resolved = [known.get(i) or filled.get(i) for i in want]
+        pending = [s for s in resolved if s and str(s["external_id"]) not in cp["series_pages_done"]]
+    else:
+        if not scope:
+            print("先运行 --stage index", file=sys.stderr)
+            return 1
+        pending = [s for s in scope if str(s["external_id"]) not in cp["series_pages_done"]]
     if args.limit:
         pending = pending[: args.limit]
+    # 显式指定了 id 却一个都没解析出来（库里无映射）→ 非 0，避免「待抓取 0 个 + 退出码 0」
+    # 被上层误读为完成（第二轮审查 m7）
+    if args.ids and not pending and want:
+        print(f"错误：--ids 指定的 {len(want)} 个车系均无有效映射或都已完成", file=sys.stderr)
+        return 1
     print(f"车系详情：待抓取 {len(pending)} 个（限频 {SLEEP_SECONDS}s/页）")
 
     # robots 合规：PC 车系详情页路径逐一核对（policy 本地判定，不额外发请求）
@@ -335,15 +402,21 @@ def stage_series(args) -> int:
             if not args.no_import:
                 payload = build_series_payload([row], f"https://www.autohome.com.cn/{sid}/")
                 # 品牌一律归一到范围清单中的标准品牌名（车系页 brandName 可能是子品牌
-                # 命名差异，如「北京越野」「奥迪AUDI」「上汽大通MAXUS」）
+                # 命名差异，如「北京越野」「奥迪AUDI」「上汽大通MAXUS」）。
+                # 注意：`--ids` 放开了索引范围后，库内品牌不一定在注册表里（如销量榜导入
+                # 产生的「待分类（汽车之家销量榜）」）——此时按车系页品牌原样导入，不做改写，
+                # 否则会 KeyError 导致整批失败（2026-09-14 第二轮审查 M1）。
                 canonical = s["brand"]
-                reg = IN_SCOPE_BRANDS[canonical]
-                for b in payload["brands"]:
-                    b["name"] = canonical
-                    b["brand_type"] = reg["brand_type"]
-                    b["inclusion_reason"] = reg["inclusion_reason"]
-                for s_cfg in payload["series"]:
-                    s_cfg["brand"] = canonical
+                reg = IN_SCOPE_BRANDS.get(canonical)
+                if reg:
+                    for b in payload["brands"]:
+                        b["name"] = canonical
+                        b["brand_type"] = reg["brand_type"]
+                        b["inclusion_reason"] = reg["inclusion_reason"]
+                    for s_cfg in payload["series"]:
+                        s_cfg["brand"] = canonical
+                else:
+                    print(f"  提示：品牌「{canonical}」不在收录注册表内，按车系页品牌原样导入")
                 _import_catalog_once(payload)
             cp["series_pages_done"][sid] = "ok"
             cp["failures"].pop(sid, None)
@@ -355,7 +428,8 @@ def stage_series(args) -> int:
         _save_checkpoint(cp)
         time.sleep(SLEEP_SECONDS)
     print(f"阶段 series 完成：{len(cp['series_pages_done'])} 成功 / {len(cp['failures'])} 失败")
-    return 0
+    # 退出码必须反映结果：全失败却返回 0 会让上层把失败记成完成（第二轮审查 M1）
+    return 1 if cp["failures"] else 0
 
 
 def _fetch_series_page_with_retry(sid: str) -> dict:
@@ -401,21 +475,32 @@ def _import_catalog_once(payload: dict) -> None:
 
 def stage_sku(args) -> int:
     scope = _load_json(SCOPE_PATH)
-    if not scope:
-        print("先运行 --stage index", file=sys.stderr)
-        return 1
     cp = _load_checkpoint()
     detail_map = {str(r["external_id"]): r for r in (_load_json(DETAIL_PATH) or [])}
     # robots 合规留痕：移动端参数配置接口 host（接口域 robots 不可达时按默认允许，
     # 结论与时间写入断点文件）
     for host in ("car-web-m.autohome.com.cn", "car.m.autohome.com.cn"):
         _record_compliance(cp, host, fetch_robots(f"https://{host}"))
-    pending = [s for s in scope if str(s["external_id"]) not in cp["sku_done"]]
     if args.ids:
-        want = {i.strip() for i in args.ids.split(",")}
-        pending = [s for s in pending if s["external_id"] in want]
+        # 显式指定 id：不受 A-Z 索引范围限制（索引会漏车系，见 _explicit_scope 注释），
+        # 元数据从数据库补齐；已完成的仍然跳过
+        want = [i.strip() for i in args.ids.split(",") if i.strip()]
+        known = {str(s["external_id"]): s for s in (scope or [])}
+        missing = [i for i in want if i not in known]
+        filled = {s["external_id"]: s for s in _explicit_scope(missing)} if missing else {}
+        resolved = [known.get(i) or filled.get(i) for i in want]
+        pending = [s for s in resolved if s and str(s["external_id"]) not in cp["sku_done"]]
+    else:
+        if not scope:
+            print("先运行 --stage index", file=sys.stderr)
+            return 1
+        pending = [s for s in scope if str(s["external_id"]) not in cp["sku_done"]]
     if args.limit:
         pending = pending[: args.limit]
+    # 同 stage_series：显式 id 全部无法解析时返回非 0（第二轮审查 m7）
+    if args.ids and not pending and want:
+        print(f"错误：--ids 指定的 {len(want)} 个车系均无有效映射或都已完成", file=sys.stderr)
+        return 1
     print(f"SKU 参数配置：待抓取 {len(pending)} 个车系（限频 {SLEEP_SECONDS}s/请求）")
 
     for i, s in enumerate(pending, 1):
@@ -443,9 +528,15 @@ def stage_sku(args) -> int:
             if not args.no_import:
                 _import_catalog_once(payload)
             n_variants = sum(len(y["variants"]) for y in payload["series"][0].get("model_years", []))
-            cp["sku_done"][sid] = "ok"
-            cp["failures"].pop(sid, None)
-            print(f"[{i}/{len(pending)}] {sid} {s['name']} ok（{n_variants} 款型）")
+            if n_variants <= 0:
+                # 抓到 0 款型**不得记为完成**：否则该车系被永久跳过（2026-09-14 事故：
+                # 171 个车系就是这样被标记完成的，缺口一直不收敛）
+                cp["failures"][sid] = "SKU 接口返回 0 款型"
+                print(f"[{i}/{len(pending)}] {sid} {s['name']} 抓到 0 款型，记为失败待重试")
+            else:
+                cp["sku_done"][sid] = "ok"
+                cp["failures"].pop(sid, None)
+                print(f"[{i}/{len(pending)}] {sid} {s['name']} ok（{n_variants} 款型）")
         except Exception as err:  # noqa: BLE001
             cp["failures"][sid] = f"{type(err).__name__}: {err}"
             print(f"[{i}/{len(pending)}] {sid} {s['name']} 失败：{err}")

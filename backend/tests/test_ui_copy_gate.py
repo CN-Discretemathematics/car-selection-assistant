@@ -66,6 +66,32 @@ def test_backend_flags_caliber_label(tmp_path: Path):
     assert any("门户口径" in h for h in scan(tmp_path))
 
 
+def test_backend_ast_handles_triple_quotes_and_desync(tmp_path: Path):
+    """第二轮审查 M3 的回归：行级三引号状态机曾有三类偏差，改用 ast 后都应正确。
+
+    - 源码里出现「三个双引号组成的字符串字面量」时会让状态机失步 → 该文件后续内容被
+      整段跳过（静默失守）；
+    - 用三引号书写的错误信息曾被整行跳过 → 漏放；
+    - 用三个单引号书写的 docstring 曾未被识别 → 误报。
+    """
+    _write(tmp_path, "backend/app/desync.py", (
+        "TRIPLE = '\"\"\"'\n"                       # 旧实现会在这里失步
+        "def f():\n"
+        "    '''返回 \"SKU 不存在\"（单引号 docstring，允许）'''\n"
+        "    raise ValueError('''SKU 不存在''')\n"  # 三引号字符串要拦
+    ))
+    hits = scan(tmp_path)
+    assert any("SKU 不存在" in h for h in hits), f"三引号字符串应被拦截：{hits}"
+    assert len(hits) == 1, f"单引号 docstring 不应误报：{hits}"
+
+
+def test_backend_flags_english_and_fstring_literals(tmp_path: Path):
+    """英文文案与 f-string 里的术语也要拦（旧实现只查「引号内中文串」会漏放）。"""
+    _write(tmp_path, "backend/app/msg.py",
+           'def f(x):\n    raise ValueError("Invalid SKU")\n    return f"{x} 个 SKU"\n')
+    assert len(scan(tmp_path)) == 2
+
+
 @pytest.mark.parametrize("term", ["SKU", "门户口径", "范围内"])
 def test_terms_are_flagged_in_frontend(tmp_path: Path, term: str):
     _write(tmp_path, "web/app/x/page.tsx", f'export default function P() {{ return <p>{term}</p>; }}\n')

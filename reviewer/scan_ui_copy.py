@@ -20,8 +20,8 @@ API 错误信息里仍有「SKU 不存在」（`comparison/router.py`）。
 """
 from __future__ import annotations
 
+import ast
 import pathlib
-import re
 import sys
 
 # ── 前端 ────────────────────────────────────────────────────────────────────
@@ -79,33 +79,32 @@ def _backend_hits(root: pathlib.Path) -> list[str]:
     base = root / BACKEND_ROOT
     if not base.is_dir():
         return hits
-    quoted = re.compile(r'"([^"]*)"|\'([^\']*)\'')
     for path in sorted(base.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
-        in_docstring = False
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError as err:
+            hits.append(f"{rel}: [SyntaxError] 无法解析：{err.msg}")
+            continue
+        # docstring 语义排除（module/class/function 的首个字符串表达式）
+        docstrings: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, "body", None)
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                    if isinstance(body[0].value.value, str):
+                        docstrings.add(id(body[0].value))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
                 continue
-            quotes = line.count('"""')
-            if in_docstring:
-                if quotes % 2 == 1:
-                    in_docstring = False
+            if id(node) in docstrings:
                 continue
-            if quotes:
-                if quotes % 2 == 1:
-                    in_docstring = True
-                continue  # 单行 """…""" 与开启行都跳过
-            for first, second in quoted.findall(line):
-                text = first or second
-                if not re.search(r"[\u4e00-\u9fff]", text):
-                    continue  # 无中文 → 不是用户文案（URL / 常量 / 键名）
-                matched = next((t for t in BACKEND_JARGON if t in text), None)
-                if matched is None:
-                    matched = next((p for p in BACKEND_PHRASES if p in text), None)
-                if matched is not None:
-                    hits.append(f"{rel}:{lineno}: [{matched}] {stripped[:110]}")
-                    break
+            text = node.value
+            matched = next((t for t in BACKEND_JARGON if t in text), None)
+            if matched is None:
+                matched = next((p for p in BACKEND_PHRASES if p in text), None)
+            if matched is not None:
+                hits.append(f"{rel}:{node.lineno}: [{matched}] {text.strip()[:110]}")
     return hits
 
 
