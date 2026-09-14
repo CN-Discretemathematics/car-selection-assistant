@@ -18,8 +18,10 @@ from app.common.database import get_session
 from app.common.enums import COMPARISON_MAX_VARIANTS, MISSING_VALUE_LABEL
 from app.common.errors import bad_request, not_found
 from app.common.models import Brand, Comparison, ComparisonItem, VehicleSeries, VehicleVariant
+from app.comparison.analysis import analyze_comparison
 from app.comparison.schemas import (
     CommonParamOut,
+    ComparisonAnalysisOut,
     ComparisonCreate,
     ComparisonDetailOut,
     ComparisonFactOut,
@@ -147,3 +149,20 @@ def get_comparison(comparison_id: int, db: Session = Depends(get_session)) -> Co
         variants=variants,
         common_params=common_params,
     )
+
+
+@router.post("/comparisons/analysis", response_model=ComparisonAnalysisOut)
+def comparison_analysis(
+    payload: ComparisonCreate,
+    db: Session = Depends(get_session),
+) -> ComparisonAnalysisOut:
+    """对 2~5 个款型做**差异分析**（不是参数罗列）。
+
+    与 `/comparisons/{id}` 的区别：那个返回原始参数与相同项，供表格渲染；
+    这个返回**决策相关的结论**——各维度谁领先、差距多大、贵在哪、缺哪些数据。
+    全部结论由库内事实确定性推导（比较/差值/阈值），不引入任何推测。
+    """
+    analysis = analyze_comparison(db, payload.variant_ids)
+    if "error" in analysis:
+        raise bad_request(analysis["error"])
+    return ComparisonAnalysisOut(**analysis)
