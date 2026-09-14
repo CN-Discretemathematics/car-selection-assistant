@@ -1,0 +1,83 @@
+# CI 门禁（2026-09-14 接入）：PR 与 main 的每次 push 都会执行
+#
+#   backend  —— 全量用例（vendor 不入库，按 requirements.txt 安装；Linux 下 PYTHONPATH 分隔符是冒号）
+#   gates    —— 两道静态门禁：密钥扫描 + 用户可见文案门禁（退出码必须为 0）
+#   web      —— tsc 类型检查 + next build
+#
+# 启用强制门禁：仓库 Settings → Branches → main 分支保护 →
+#   勾选 Require status checks → 选中 backend / gates / web 三个 check。
+# 部署不受影响：仍是服务器 05:00 拉 main（CI 只把关 PR 合入）。
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: 测试
+        env:
+          PYTHONPATH: 'vendor:.'        # Linux 分隔符是冒号（本地 Windows 为分号）
+          RETRIEVAL_BACKEND: inmemory
+        run: python -m pytest -q
+
+  gates:
+    name: gates (secrets + ui-copy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 密钥门禁（退出码必须 0）
+        run: python reviewer/scan_secrets.py
+      - name: 用户可见文案门禁（退出码必须 0）
+        run: python reviewer/scan_ui_copy.py
+
+  web:
+    name: web (tsc + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      # 前端用 pnpm（deploy/frontend.Dockerfile 同款：pnpm install --frozen-lockfile）
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'    # 与 deploy/frontend.Dockerfile 对齐（生产 node:22）
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsc --noEmit
+      - run: pnpm run build
