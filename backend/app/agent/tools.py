@@ -92,14 +92,15 @@ def vehicle_search(
 
 # ── 工具 2：sales_search ──────────────────────────────────────────────────────
 def sales_search(db: Session, month: str | None = None, limit: int = 20) -> list[dict]:
-    # limit 夹紧（模型可传 0/负数/超大值；2026-09-14 第三轮审查 L4）
-    limit = max(1, min(int(limit), 50))
     """查询指定月份（默认最近有销量数据的月份）的车型销量排行。
 
     口径与首页一致：零售优先，无零售时回退门户榜单口径（评审 M4——当前数据
     为汽车之家门户口径，硬编码 retail 会永远返回空）。默认月份回退到库内
     最新数据月（销量数据月中发布，月初按「最近完整自然月」取数会整体为空）。
     """
+    # limit 夹紧（模型可传 0/负数/超大值；2026-09-14 第三轮审查 L4）
+    # 注意：docstring 必须是函数首语句（用户文案门禁靠 AST 识别 docstring）
+    limit = max(1, min(int(limit), 50))
     target = month or catalog.latest_sales_month(db)
     rows = db.execute(
         select(MonthlySales, VehicleSeries, Brand)
