@@ -94,14 +94,39 @@ def test_tool_loop_step_cap_falls_back(client: TestClient, db_session: Session):
     _seed(db_session)
     endless = {"content": "", "tool_calls": [{"id": "x", "type": "function",
                "function": {"name": "sales_search", "arguments": "{}"}}]}
-    fake = _FakeLLM([endless] * (TOOL_LOOP_MAX_STEPS + 2))
+    fake = _FakeLLM([endless] * (TOOL_LOOP_MAX_STEPS + 4))
     restore = _client_with_llm(client, db_session, fake)
     try:
         sid = client.post("/api/v1/agent/sessions").json()["session_id"]
         out = client.post(f"/api/v1/agent/sessions/{sid}/messages",
                           json={"message": "解释一下这两年新能源为什么涨价"}).json()
         assert out.get("explanation"), "超步数后应有兜底回复"
-        assert len(fake.calls) <= TOOL_LOOP_MAX_STEPS + 1
+        # 步数上限 + 1（强制的最终回答调用）+ 1（回退路径自身的对话调用）
+        assert len(fake.calls) <= TOOL_LOOP_MAX_STEPS + 2
+        # 回退必须可观测（2026-09-15 新增：此前回退后 filters 为空，无法区分「没进循环」与「进过被拒」）
+        assert out["filters"].get("tool_loop") is False
+        assert out["filters"].get("tool_loop_fallback")
+    finally:
+        restore()
+
+
+def test_tool_loop_forced_final_answer(client: TestClient, db_session: Session):
+    """步数用尽后强制要一次最终回答：模型不再拿到工具，只能给答案。
+
+    实测（2026-09-15 人工复现）：模型会连续 4 轮调 8 次工具仍不给答案，
+    没有这一步整轮白跑、只能回退通用对话。
+    """
+    _seed(db_session)
+    endless = {"content": "", "tool_calls": [{"id": "x", "type": "function",
+               "function": {"name": "vehicle_search", "arguments": "{}"}}]}
+    fake = _FakeLLM([endless] * TOOL_LOOP_MAX_STEPS + [{"content": "库内共 1 款在售车型（来源见引用）。"}])
+    restore = _client_with_llm(client, db_session, fake)
+    try:
+        sid = client.post("/api/v1/agent/sessions").json()["session_id"]
+        out = client.post(f"/api/v1/agent/sessions/{sid}/messages",
+                          json={"message": "盘点一下现在有哪些车"}).json()
+        assert "1 款" in (out.get("explanation") or ""), "强制最终回答应被采用"
+        assert out["filters"].get("tool_loop") is True
     finally:
         restore()
 
