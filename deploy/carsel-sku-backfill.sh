@@ -64,9 +64,10 @@ log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
 in_container() { docker exec -w "$WORKDIR" "$CONTAINER" "$@"; }
 
 gap_report() { in_container python tools/export_series_gaps.py --report 2>/dev/null; }
-# 缺口计数也在容器内解析（宿主机未必有 python3；此前用宿主 python3 会因其缺失而每批中止）
+# 缺口计数：JSON 在容器内解析。必须带 `-i`（docker exec 默认不接 stdin，缺了会读到空输入
+# → 解析失败 → 被误判成「容器不可达」而拒绝启动，2026-09-14 实测踩到）
 gap_field() {
-  gap_report | in_container python -c \
+  gap_report | docker exec -i -w "$WORKDIR" "$CONTAINER" python -c \
     "import json,sys; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null
 }
 # 回补目标 = 完全无款型的「真缺口」（有款型但全停售属数据完整，补不了也不需要补）
