@@ -163,16 +163,10 @@ export default async function HomePage({
           </div>
         )}
 
-        <Reveal className="mt-12 space-y-2 pb-4 text-center" delay={80}>
+        {/* 免责与 AI 标识只在全局 footer（app/layout.tsx）出现一次，页面内不再重复 */}
+        <Reveal className="mt-12 pb-4 text-center" delay={80}>
           <p className="text-xs leading-6 text-ash">
             本站只展示新车官方指导价，交易、询价、优惠与库存信息请前往品牌官网车型页。
-          </p>
-          <p className="text-xs leading-6 text-ash">
-            <a href="/privacy" className="underline-offset-4 transition hover:text-apple hover:underline">
-              隐私政策
-            </a>
-            <span className="mx-1.5 text-hair">·</span>
-            购车助手内容由 AI 生成，仅供参考。
           </p>
         </Reveal>
       </main>
