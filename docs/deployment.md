@@ -235,7 +235,7 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
   `/admin/rag/status` 在规模漂移时给出「车系 908→1078」式原因。旧标记（无 `db_counts`）
   退回只比月份，不误报。
 - **只部署 main 的代价**：未合并的改动不会上线（需要的验证放在 PR 阶段完成）。
-- **可选的 CI 门禁**：目前 PR 阶段没有自动跑测试（289 用例与两道静态门禁
+- **可选的 CI 门禁**：目前 PR 阶段没有自动跑测试（313 用例与两道静态门禁
   `reviewer/scan_secrets.py`、`reviewer/scan_ui_copy.py` 都只在本地/手工执行）。
   公开仓库可加 GitHub Actions 跑 `pytest` + `tsc` + 两道门禁，让「自动部署 main」更有底气。
 - **通知**：脚本只写日志与状态文件；如需微信/邮件通知，可在脚本末尾追加钩子。
