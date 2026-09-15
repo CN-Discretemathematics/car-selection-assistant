@@ -223,16 +223,6 @@ function CompareTable({ data }: { data: ComparisonDetail }) {
                     <p className="mt-1 inline-block rounded-full bg-ice px-2 py-0.5 text-[11px] font-medium text-apple">
                       {ENERGY_LABELS[v.energy_type] ?? v.energy_type}
                     </p>
-                    {v.official_page_url && (
-                      <a
-                        href={v.official_page_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="mt-1 block text-xs font-normal text-apple underline-offset-4 hover:underline"
-                      >
-                        官方车型页 ↗
-                      </a>
-                    )}
                   </th>
                 ))}
               </tr>

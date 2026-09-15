@@ -37,7 +37,8 @@ class CompareVariantOut(BaseModel):
     energy_type: str
     body_type: str | None = None
     price_cny: float | None = None
-    official_page_url: str | None = None
+    # 刻意不返回官方车型页 / 来源页链接：对比场景不展示外部跳转入口
+    # （口径见 skills/sku-comparison.md；入口只在详情页，官方优先、缺失时回退数据来源）
     facts: list[ComparisonFactOut] = Field(default_factory=list)
 
 

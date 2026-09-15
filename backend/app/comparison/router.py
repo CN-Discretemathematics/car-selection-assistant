@@ -117,7 +117,6 @@ def get_comparison(comparison_id: int, db: Session = Depends(get_session)) -> Co
                 energy_type=variant.energy_type,
                 body_type=variant.body_type,
                 price_cny=float(price.price_cny) if price else None,
-                official_page_url=series.official_page_url if series else None,
                 facts=facts,
             )
         )

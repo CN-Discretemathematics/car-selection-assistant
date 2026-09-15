@@ -118,7 +118,7 @@ export interface CompareVariantOut {
   energy_type: string;
   body_type: string | null;
   price_cny: number | null;
-  official_page_url: string | null;
+  // 对比场景不返回外部跳转入口（官方车型页/来源页只在详情页展示）
   facts: ComparisonFactOut[];
 }
 
