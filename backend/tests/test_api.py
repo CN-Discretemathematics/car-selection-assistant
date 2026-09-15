@@ -6,7 +6,15 @@ from sqlalchemy.orm import Session
 
 from app.catalog.services import latest_full_month
 from app.common.models import MonthlySales, VehicleVariant
-from tests.seed import make_brand, make_sales, make_series, make_source, make_variant, make_year
+from tests.seed import (
+    make_brand,
+    make_external_ref,
+    make_sales,
+    make_series,
+    make_source,
+    make_variant,
+    make_year,
+)
 
 
 def test_health(client: TestClient):
@@ -104,6 +112,58 @@ def test_vehicle_detail(client: TestClient, db_session: Session):
     assert body["model_years"][0]["year_name"] == "2025款"
 
     assert client.get("/api/v1/vehicles/999999").status_code == 404
+
+
+def test_vehicle_detail_source_entry(client: TestClient, db_session: Session):
+    """跳转入口的优先级：官方车型页优先；官方缺失（线上真实形态）时回退数据来源页。
+
+    背景：线上 `official_page_url` 全为空（来源不提供该字段），官方链接按钮恒不渲染；
+    改为缺失时展示来源页入口——只认已知模板，未知来源/可疑 id 一律不给链接（不猜 URL）。
+    优先级放在后端判定，这条测试就是它的门禁（前端只按 kind 选标签）。
+    """
+    source = make_source(db_session, name="汽车之家", source_type="industry_data")
+    brand = make_brand(db_session, name="示例品牌", source=source)
+    official = make_series(db_session, brand, name="有官方链接", source=source)      # 种子带 example.com
+    fallback = make_series(db_session, brand, name="无官方链接", source=source)
+    none_at_all = make_series(db_session, brand, name="两者都无", source=source)
+    fallback.official_page_url = None       # 线上真实形态：官方链接为空
+    none_at_all.official_page_url = None
+    make_external_ref(db_session, official, external_id="220", source=source)
+    make_external_ref(db_session, fallback, external_id="110", source=source)
+
+    body = client.get(f"/api/v1/vehicles/{official.id}").json()
+    assert body["external_link"] == {
+        "kind": "official", "url": "https://example.com/series", "source_name": None
+    }, body["external_link"]
+
+    body = client.get(f"/api/v1/vehicles/{fallback.id}").json()
+    assert body["official_page_url"] is None
+    assert body["external_link"] == {
+        "kind": "source", "url": "https://www.autohome.com.cn/110/", "source_name": "汽车之家"
+    }, body["external_link"]
+
+    body = client.get(f"/api/v1/vehicles/{none_at_all.id}").json()
+    assert body["external_link"] is None
+
+    # 有映射但外部 id 形态可疑（全角数字）：同样不给链接，绝不猜 URL
+    suspicious = make_series(db_session, brand, name="id 可疑", source=source)
+    suspicious.official_page_url = None
+    make_external_ref(db_session, suspicious, external_id="１１０", source=source)
+    assert client.get(f"/api/v1/vehicles/{suspicious.id}").json()["external_link"] is None
+
+
+def test_source_page_url_only_for_known_sources_and_sane_ids():
+    """未知来源、缺参数、可疑外部 id 一律不给链接（不猜 URL）。"""
+    from app.sources.page_urls import source_page_url
+
+    assert source_page_url("汽车之家", "110") == "https://www.autohome.com.cn/110/"
+    assert source_page_url("某未知来源", "110") is None
+    assert source_page_url("汽车之家", None) is None
+    assert source_page_url("汽车之家", "") is None
+    assert source_page_url(None, "110") is None
+    # 形态可疑的 id 不拼链接（避免坏链接/越界路径）
+    assert source_page_url("汽车之家", "  110/ ../x  ") is None
+    assert source_page_url("汽车之家", "110x") is None
 
 
 def test_vehicle_variants(client: TestClient, db_session: Session):

@@ -234,13 +234,15 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
   同类）。根因是**唯一来源
   （汽车之家）不提供该字段**：已抓取接口的快照里没有 official/website 类字段（只有
   `car2.autoimg.cn` 缩略图），车系页 HTML（robots 允许 `/110/`、`/brand/`）出站链接全是
-  汽车之家自家域名，没有品牌官网入口。因此详情页 `official_page_url && …` 的条件渲染恒为假，
+  汽车之家自家域名，没有品牌官网入口。因此**改动前**详情页 `official_page_url && …` 的条件渲染恒为假，
   「查看品牌官网车型页」按钮、对比页与 Agent 回复里的官方链接都为空。
   补这一项需要**新增数据源**（品牌官网/官方车型页 URL 并逐条可验证），不能靠猜域名。
-  另有可立即使用的替代信息：`external_series_refs` 覆盖 **1078/1078** 车系
-  （`source_id=1` → `https://www.autohome.com.cn/{external_id}/`），如需「查看数据来源」
-  这类入口可直接由它派生（但要与「只做官方跳转」的产品口径一起定，见 `PROJECT_PLAN.md`
-  §2 产品边界）。
+  **当前采用的过渡方案**：详情页返回唯一跳转入口 `external_link`（`kind=official|source`，
+  官方优先，判定在后端、由 pytest 守），官方缺失时回退「查看数据来源」——
+  由 `external_series_refs` 的来源名 + 外部 id 确定性拼出
+  （`external_series_refs` 覆盖 **1078/1078** 车系，2026-09-16 只读核查 → `https://www.autohome.com.cn/{external_id}/`），
+  如实标注为数据来源、**不冒充品牌官网**。对比页与 Agent 回复
+  目前仍只显示官方链接（无来源兜底，属已知缺口）。
 
 - **`web/public/` 曾被漏掉**：`deploy/frontend.Dockerfile` 会 `COPY .../web/public ./public`，
   但仓库此前未跟踪该目录——全新克隆构建必失败（服务器靠手工 `.gitkeep` 侥幸可用）。

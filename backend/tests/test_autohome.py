@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.common.models import Brand, ExternalSeriesRef, MonthlySales, VehicleSeries
 from app.sources.autohome import (
+    AUTOHOME_SOURCE_NAME,
     build_payload,
     build_series_payload,
     fetch_rank_rows,
@@ -17,6 +18,7 @@ from app.sources.autohome import (
     parse_rank_api,
     parse_rank_page,
     parse_series_page,
+    series_page_url,
 )
 from app.sources.importer import import_catalog
 from tests.seed import make_brand, make_series, make_source, make_year
@@ -275,3 +277,27 @@ def test_home_portal_fallback(client, db_session: Session):
     assert len(cards) == 1
     assert cards[0]["sales_type"] == "portal"
     assert cards[0]["sales_count"] == 38654
+
+# ── 来源名常量与「数据来源」入口（改了会让入口静默消失，必须有测试钉住） ──────────────
+
+def test_source_name_constant_matches_stored_rows():
+    """来源名常量必须等于已入库的 sources.name（载荷写入的就是这个值）。
+
+    它同时是 `page_urls` 的模板键：改常量而不同步改历史数据，详情页的「查看数据来源」
+    入口会**静默消失**（查不到模板 → 返回 None），所以这里显式钉住取值。
+    """
+    assert AUTOHOME_SOURCE_NAME == "汽车之家"
+    payload = build_payload(
+        {"month": "2026-06",
+         "rows": [{"rank": 1, "external_id": "110", "seriesname": "示例车系", "salecount": 1000}]},
+        "https://www.autohome.com.cn/rank/1-1-0-0_9000-x-x-x/2026-06.html",
+    )
+    assert payload["source"]["name"] == AUTOHOME_SOURCE_NAME
+
+
+def test_series_page_url_rejects_suspicious_ids():
+    """来源页 URL 只接受 ASCII 纯数字 id——可疑形态宁可没有链接（不猜 URL）。"""
+    assert series_page_url("110") == "https://www.autohome.com.cn/110/"
+    assert series_page_url(" 110 ") == "https://www.autohome.com.cn/110/"
+    for bad in ("", "110x", "  110/ ../x  ", "１１０", "²", "../110"):
+        assert series_page_url(bad) is None, bad

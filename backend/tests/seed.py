@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.common.models import (
     Brand,
+    ExternalSeriesRef,
     MonthlySales,
     OfficialPrice,
     Source,
@@ -57,6 +58,20 @@ def make_series(
     db.add(series)
     db.flush()
     return series
+
+
+def make_external_ref(
+    db: Session, series: VehicleSeries, external_id: str = "110", source: Source | None = None
+) -> ExternalSeriesRef:
+    """外部来源（如汽车之家车系 id）到本站车系的映射——「数据来源」入口的取数依据。"""
+    ref = ExternalSeriesRef(
+        source_id=source.id if source else make_source(db, name="汽车之家", source_type="industry_data").id,
+        external_id=external_id,
+        series_id=series.id,
+    )
+    db.add(ref)
+    db.flush()
+    return ref
 
 
 def make_year(db: Session, series: VehicleSeries, year_name: str = "2025款") -> VehicleModelYear:

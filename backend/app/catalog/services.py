@@ -139,6 +139,33 @@ def brand_of_series(db: Session, series: VehicleSeries) -> Brand | None:
     return db.get(Brand, series.brand_id)
 
 
+def series_source_page(db: Session, series_id: int) -> tuple[str | None, str | None]:
+    """车系的「数据来源」入口：返回 (来源页 URL, 来源名)。
+
+    URL 由「来源名 + 外部车系 id」（`external_series_refs`）确定性拼出，只认已知模板；
+    没有映射记录时返回 `(None, None)`；来源没有模板或外部 id 形态可疑时返回 `(None, 来源名)`。
+    绝不猜 URL。官方车型页链接（`series.official_page_url`）存在时应优先展示官方链接。
+    """
+    from app.common.models import ExternalSeriesRef, Source
+    from app.sources.page_urls import source_page_url
+
+    rows = db.execute(
+        select(Source.name, ExternalSeriesRef.external_id)
+        .join(ExternalSeriesRef, ExternalSeriesRef.source_id == Source.id)
+        .where(ExternalSeriesRef.series_id == series_id)
+        # 车系改号后可能留下多条同来源映射，取最新一条（更可能仍然有效），
+        # 并继续向后找第一条有模板的（模板缺失/无映射都不猜 URL）
+        .order_by(ExternalSeriesRef.id.desc())
+    ).all()
+    fallback_name: str | None = None
+    for name, external_id in rows:
+        url = source_page_url(name, str(external_id))
+        if url:
+            return url, name
+        fallback_name = fallback_name or name
+    return None, fallback_name
+
+
 def variant_facts(db: Session, variant_id: int) -> list[SpecFact]:
     stmt = (
         select(SpecFact)
