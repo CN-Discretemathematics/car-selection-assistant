@@ -162,7 +162,8 @@ def comparison_analysis(
     这个返回**决策相关的结论**——各维度谁领先、差距多大、贵在哪、缺哪些数据。
     全部结论由库内事实确定性推导（比较/差值/阈值），不引入任何推测。
     """
-    analysis = analyze_comparison(db, payload.variant_ids)
+    unique_ids = list(dict.fromkeys(payload.variant_ids))  # 去重：重复 id 会让维度值出现重复款型
+    analysis = analyze_comparison(db, unique_ids)
     if "error" in analysis:
         raise bad_request(analysis["error"])
     return ComparisonAnalysisOut(**analysis)

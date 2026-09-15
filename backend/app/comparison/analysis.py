@@ -27,8 +27,10 @@ _UNIT_IN_KEY_RE = re.compile(r"[（(]([^）)]{1,14})[)）]\s*$")
 # 单值数字：整段只有一个数字才算（避免把「150-200」「5/7」这类区间误读成单一值）
 _SINGLE_NUMBER_RE = re.compile(r"^[^0-9]*(-?\d+(?:\.\d+)?)[^0-9]*$")
 # 布尔型配置的「有/无」表达
-_TRUE_WORDS = ("●", "有", "标配", "是", "支持", "－", "选配")
-_FALSE_WORDS = ("○", "无", "不配备", "否", "不支持", "-", "—")
+# 汽车之家配置表约定：●=标配 ○=选配 —=无（全角「－」与半角「—」都是“无”的写法，
+# 第三轮复审 m：原先把全角「－」放进 _TRUE_WORDS 是笔误）
+_TRUE_WORDS = ("●", "有", "标配", "是", "支持")
+_FALSE_WORDS = ("○", "无", "不配备", "否", "不支持", "-", "—", "－")
 _PRESENT = "有"
 _ABSENT = "无"
 
@@ -52,17 +54,24 @@ class Dimension:
     kind: str = "number"            # number | flag（有无型配置）
     why: str = ""                   # 业务含义（写给用户看的短句，不含任何数据）
     canonical_unit: str = ""        # 规范单位（不同写法换算后统一，避免跨单位比较）
+    exclude: tuple[str, ...] = ()   # 命中这些子串的事实键一律排除（如分电机功率）
 
     def matches(self, fact_key: str) -> bool:
-        return any(pat in fact_key for pat in self.patterns)
+        if not any(pat in fact_key for pat in self.patterns):
+            return False
+        return not any(pat in fact_key for pat in self.exclude)
 
 
 # 维度定义（键名均为生产库实测存在的键；覆盖率写在注释里）
 DIMENSIONS: tuple[Dimension, ...] = (
+    # 动力/扭矩必须排除「前/后电动机」分项键：子串匹配会命中它们（双电机款型
+    # 会被取到分电机值而非整车值，★ 判定失真——第三轮复审 BLOCKED）
     Dimension("power", "动力（最大功率）", ("最大功率(kW)",), "higher", 15.0,
-              why="决定加速与高速再加速能力"),
+              why="决定加速与高速再加速能力",
+              exclude=("前电动机", "后电动机")),
     Dimension("torque", "扭矩", ("最大扭矩(N·m)",), "higher", 30.0,
-              why="决定起步与爬坡的推力感"),
+              why="决定起步与爬坡的推力感",
+              exclude=("前电动机", "后电动机")),
     Dimension("range", "纯电续航", ("CLTC纯电续航里程", "WLTC纯电续航里程"), "higher", 50.0,
               why="决定日常通勤能否纯电覆盖（覆盖约 44% 款型）"),
     Dimension("range_total", "综合续航", ("CLTC综合续航", "WLTC综合续航"), "higher", 80.0,
@@ -85,10 +94,12 @@ DIMENSIONS: tuple[Dimension, ...] = (
               why="高速巡航余量"),
     Dimension("air_susp", "空气悬架", ("空气悬架",), kind="flag",
               why="影响滤震质感与车身高度调节"),
-    Dimension("side_airbag", "侧气帘", ("侧气帘", "侧安全气帘"), kind="flag",
-              why="后排乘员被动安全"),
-    Dimension("acc", "自适应巡航", ("自适应巡航",), kind="flag",
-              why="长途驾驶辅助的基础能力"),
+    # 侧气帘：生产库真实键为「前/后排头部气囊(气帘)」（覆盖 4,946 款型，84%）——
+    # 原模式（侧气帘/侧安全气帘）在生产数据上零命中，属于维度定义错误（第三轮复审 M）
+    Dimension("side_airbag", "头部气帘", ("前/后排头部气囊(气帘)",), kind="flag",
+              why="侧碰时保护前后排乘员头部"),
+    # 自适应巡航：生产库无稳定覆盖的键（仅 n=2 的「自适应巡航包」），如实移除该维度
+    # 而不是放一个永远空的维度（第三轮复审 M）
 )
 
 
@@ -202,6 +213,8 @@ def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
                     "display": flag or MISSING_VALUE_LABEL,
                     "raw": None,
                     "leader": False,
+                    "source_id": (fact or {}).get("source_id"),
+                    "fact_key": (fact or {}).get("fact_key"),
                 })
             present_ids = [val["variant_id"] for val in values if val["display"] == _PRESENT]
             partial_ids = [val["variant_id"] for val in values if val["display"] == "选配"]
@@ -237,6 +250,8 @@ def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
                             "display": f"{raw_display}{original_unit} ≈ {number:g}{unit}",
                             "raw": number,
                             "leader": False,
+                            "source_id": (fact or {}).get("source_id"),
+                            "fact_key": (fact or {}).get("fact_key"),
                         })
                         numeric[v.variant_id] = number
                         continue
@@ -249,6 +264,8 @@ def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
                     "display": f"{display} {display_unit}" if show_unit else str(display),
                     "raw": number,
                     "leader": False,
+                    "source_id": (fact or {}).get("source_id"),
+                    "fact_key": (fact or {}).get("fact_key"),
                 })
             if incomparable:
                 dimensions.append({
@@ -265,6 +282,20 @@ def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
                         "note": "可比数值不足，仅列示原始数据",
                     })
                 continue
+            # 工况一致性（第三轮复审 BLOCKED）：CLTC/WLTC/NEDC 不可直接比较——
+            # 各款型取到的fact 若工况不同（键名含不同工况词），只列示并标注，不输出差值
+            cycles = {
+                next((c for c in ("CLTC", "WLTC", "NEDC") if c in (picked[v.variant_id] or {}).get("fact_key", "")), "")
+                for v in variants
+                if v.variant_id in numeric
+            }
+            if len(cycles) > 1:
+                dimensions.append({
+                    "key": dim.key, "label": dim.label, "why": dim.why,
+                    "values": values, "significant": False, "gap": None,
+                    "note": "各款型工况不同（" + "/".join(sorted(c for c in cycles if c)) + "），不直接比较",
+                })
+                continue
             best_id = (max if dim.better == "higher" else min)(numeric, key=lambda k: numeric[k])
             worst_id = (min if dim.better == "higher" else max)(numeric, key=lambda k: numeric[k])
             delta = abs(numeric[best_id] - numeric[worst_id])
@@ -274,7 +305,9 @@ def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
                 if val["raw"] is not None:
                     allowed_numbers.add(round(float(val["raw"]), 3))
             allowed_numbers.add(round(delta, 3))
-            unit = _unit_of(picked[best_id] or {}) or ""
+            # gap 文案用**规范单位**：用领先者 fact 的原单位会在换算场景下输出错误单位
+            # （第三轮复审 BLOCKED：「0.68小时 ≈ 40.8分钟」的对比却写「低 13.4小时」）
+            unit = dim.canonical_unit or _unit_of(picked[best_id] or {}) or ""
             gap_text = None
             if significant:
                 leader = next(v for v in variants if v.variant_id == best_id)

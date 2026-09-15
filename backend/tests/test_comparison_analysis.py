@@ -105,6 +105,115 @@ def test_analysis_numbers_whitelist(db_session: Session):
     assert 2.0 in allowed                          # 差价（万元）
 
 
+def test_dual_motor_subkeys_are_excluded(db_session: Session):
+    """第三轮复审 BLOCKED：动力/扭矩的子串匹配会命中「前/后电动机功率」分项键。
+
+    双电机款型必须取**整车**最大功率；若另一款型只有分电机键，则该维度只列示不比较。
+    """
+    source = make_source(db_session, name="汽车之家")
+    brand = make_brand(db_session, name="测试品牌", source=source)
+    s1 = make_series(db_session, brand, name="双电机车系", energy_types=("BEV",), source=source)
+    s2 = make_series(db_session, brand, name="单电机车系", energy_types=("BEV",), source=source)
+    y1 = make_year(db_session, s1)
+    y2 = make_year(db_session, s2)
+    dual = make_variant(db_session, s1, y1, config_version="四驱", energy_type="BEV",
+                        price_cny="300000", source=source)
+    solo = make_variant(db_session, s2, y2, config_version="后驱", energy_type="BEV",
+                        price_cny="200000", source=source)
+    # 双电机款型：整车功率 + 前后分项（分项绝不能被取为整车值）
+    for key, value in (("最大功率(kW)", "400"), ("前电动机最大功率(kW)", "180"),
+                       ("后电动机最大功率(kW)", "220")):
+        db_session.add(SpecFact(variant_id=dual.id, category="参数信息", fact_key=key,
+                                fact_value=value, unit="kW", source_id=source.id))
+    # 单电机款型：只有分电机键（整车键缺失）→ 该维度对它不可比
+    db_session.add(SpecFact(variant_id=solo.id, category="参数信息", fact_key="后电动机最大功率(kW)",
+                            fact_value="150", unit="kW", source_id=source.id))
+    db_session.commit()
+
+    result = analyze_comparison(db_session, [dual.id, solo.id])
+    power = next(d for d in result["dimensions"] if d["key"] == "power")
+    by_variant = {v["variant_id"]: v for v in power["values"]}
+    assert by_variant[dual.id]["display"] == "400 kW", "必须取整车功率而不是分电机功率"
+    assert by_variant[solo.id]["display"] == "官方资料未披露"
+    assert power["significant"] is False and power["gap"] is None, "可比数值不足 → 只列示"
+
+
+def test_cross_cycle_not_compared(db_session: Session):
+    """第三轮复审 BLOCKED：CLTC 与 WLTC 工况不同 → 只列示并标注，不输出差值。
+
+    违背对比页脚注「不同工况的续航与油耗不直接比较」与 §7.3 工况口径纪律。
+    """
+    source = make_source(db_session, name="汽车之家")
+    brand = make_brand(db_session, name="测试品牌", source=source)
+    s1 = make_series(db_session, brand, name="甲车系", energy_types=("BEV",), source=source)
+    s2 = make_series(db_session, brand, name="乙车系", energy_types=("BEV",), source=source)
+    y1 = make_year(db_session, s1)
+    y2 = make_year(db_session, s2)
+    v1 = make_variant(db_session, s1, y1, config_version="CLTC版", energy_type="BEV",
+                      price_cny="200000", source=source)
+    v2 = make_variant(db_session, s2, y2, config_version="WLTC版", energy_type="BEV",
+                      price_cny="200000", source=source)
+    db_session.add(SpecFact(variant_id=v1.id, category="参数信息", fact_key="CLTC纯电续航里程(km)",
+                    fact_value="310", unit="km", cycle="CLTC", source_id=source.id))
+    db_session.add(SpecFact(variant_id=v2.id, category="参数信息", fact_key="WLTC纯电续航里程(km)",
+                    fact_value="500", unit="km", cycle="WLTC", source_id=source.id))
+    db_session.commit()
+
+    result = analyze_comparison(db_session, [v1.id, v2.id])
+    range_dim = next(d for d in result["dimensions"] if d["key"] == "range")
+    assert range_dim["significant"] is False, "跨工况不得比较"
+    assert "工况不同" in (range_dim["note"] or "")
+    assert range_dim["gap"] is None
+
+
+def test_fast_charge_converted_leader_gap_uses_canonical_unit(db_session: Session):
+    """第三轮复审 BLOCKED：换算款型成为领先者时，gap 文案必须用规范单位（分钟）。
+
+    A 写「0.68 小时」（=40.8 分钟，慢）、B 写「0.42 小时」（=25.2 分钟，快）——
+    B 领先且其 fact 的原单位是「小时」，gap 文案曾错误输出「低 13.4 小时」。
+    """
+    source = make_source(db_session, name="汽车之家")
+    brand = make_brand(db_session, name="测试品牌", source=source)
+    s1 = make_series(db_session, brand, name="慢充车系", energy_types=("BEV",), source=source)
+    s2 = make_series(db_session, brand, name="快充车系", energy_types=("BEV",), source=source)
+    y1 = make_year(db_session, s1)
+    y2 = make_year(db_session, s2)
+    v1 = make_variant(db_session, s1, y1, config_version="慢充", energy_type="BEV",
+                      price_cny="200000", source=source)
+    v2 = make_variant(db_session, s2, y2, config_version="快充", energy_type="BEV",
+                      price_cny="200000", source=source)
+    db_session.add(SpecFact(variant_id=v1.id, category="参数信息", fact_key="电池快充时间(小时)",
+                    fact_value="0.68", unit=None, source_id=source.id))
+    db_session.add(SpecFact(variant_id=v2.id, category="参数信息", fact_key="电池快充时间(小时)",
+                    fact_value="0.42", unit=None, source_id=source.id))
+    db_session.commit()
+
+    result = analyze_comparison(db_session, [v1.id, v2.id])
+    fast = next(d for d in result["dimensions"] if d["key"] == "fast_charge")
+    assert "小时" not in (fast["gap"] or ""), f"gap 必须用规范单位（分钟）：{fast['gap']}"
+    assert "分钟" in (fast["gap"] or "")
+
+
+def test_values_carry_source_id(db_session: Session):
+    """第三轮复审 Major：分析结果必须带 source_id，否则 Agent 引用永远为空。"""
+    source = make_source(db_session, name="汽车之家")
+    brand = make_brand(db_session, name="测试品牌", source=source)
+    series = make_series(db_session, brand, name="甲车系", energy_types=("ICE",), source=source)
+    year = make_year(db_session, series)
+    v1 = make_variant(db_session, series, year, config_version="1.5T", energy_type="ICE",
+                      price_cny="150000", source=source)
+    v2 = make_variant(db_session, series, year, config_version="2.0T", energy_type="ICE",
+                      price_cny="180000", source=source)
+    for vid, power in ((v1.id, "130"), (v2.id, "162")):
+        db_session.add(SpecFact(variant_id=vid, category="参数信息", fact_key="最大功率(kW)",
+                                fact_value=power, unit="kW", source_id=source.id))
+    db_session.commit()
+
+    result = analyze_comparison(db_session, [v1.id, v2.id])
+    power_dim = next(d for d in result["dimensions"] if d["key"] == "power")
+    assert all(v.get("source_id") == source.id for v in power_dim["values"])
+
+
 def test_render_text_is_deterministic(db_session: Session):
     a_id, b_id = _seed_pair(db_session)
     text = render_analysis_text(analyze_comparison(db_session, [a_id, b_id]))
