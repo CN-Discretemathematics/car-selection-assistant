@@ -68,6 +68,146 @@ function useComparison(): { data: ComparisonDetail | null; error: string | null 
   return { data, error };
 }
 
+/** 差异分析结果（后端确定性推导：谁领先、差多少、贵在哪、缺什么数据）。 */
+interface AnalysisValue {
+  variant_id: number;
+  display: string;
+  raw: number | null;
+  leader: boolean;
+}
+interface AnalysisDimension {
+  key: string;
+  label: string;
+  why: string;
+  values: AnalysisValue[];
+  significant: boolean;
+  gap: string | null;
+  note: string | null;
+}
+interface ComparisonAnalysis {
+  variants: { variant_id: number; label: string; price: number | null; leaders: string[]; trails: string[] }[];
+  price: AnalysisDimension | null;
+  dimensions: AnalysisDimension[];
+  tradeoffs: string[];
+  summary: string[];
+  gaps: { dimension: string; missing: string[] }[];
+}
+
+/** 取差异分析（对比页专用端点；与参数表并存，不是替代）。 */
+function useAnalysis(variantIds: number[]): ComparisonAnalysis | null {
+  const [analysis, setAnalysis] = useState<ComparisonAnalysis | null>(null);
+  const key = variantIds.join(",");
+
+  useEffect(() => {
+    if (variantIds.length < 2) {
+      setAnalysis(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/v1/comparisons/analysis", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ variant_ids: variantIds }),
+        });
+        if (!res.ok) return; // 分析失败不影响参数表（页面仍可用）
+        const body = (await res.json()) as ComparisonAnalysis;
+        if (!cancelled) setAnalysis(body);
+      } catch {
+        /* 静默降级：参数表仍在 */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  return analysis;
+}
+
+/** 差异分析面板：只呈现有决策意义的差异，缺数据如实标注。 */
+function AnalysisPanel({ analysis, names }: { analysis: ComparisonAnalysis; names: Map<number, string> }) {
+  const significant = analysis.dimensions.filter((d) => d.significant);
+  const notes = analysis.dimensions.filter((d) => !d.significant && d.note);
+  return (
+    <Reveal className="mt-6" delay={60}>
+      <div className="glass nums rounded-[22px] border border-apple/15 p-5 sm:p-6">
+        <h2 className="flex items-center gap-2 text-[18px] font-semibold tracking-tight text-ink">
+          差异分析
+          <span className="rounded-full bg-apple/10 px-2 py-0.5 text-[11px] font-semibold text-apple">
+            基于库内参数自动比较
+          </span>
+        </h2>
+
+        <ul className="mt-3 space-y-1.5 text-[13.5px] leading-6 text-ink-soft">
+          {analysis.summary.map((line) => (
+            <li key={line} className="flex gap-2">
+              <span className="text-apple">·</span>
+              <span>{line}</span>
+            </li>
+          ))}
+        </ul>
+
+        {significant.length > 0 && (
+          <div className="mt-4 overflow-x-auto">
+            <table className="w-full min-w-[560px] text-[13px]">
+              <thead>
+                <tr className="border-b border-black/[0.06] text-left text-ash">
+                  <th className="py-2 font-medium">维度</th>
+                  {analysis.variants.map((v) => (
+                    <th key={v.variant_id} className="py-2 font-medium">
+                      {names.get(v.variant_id) ?? `款型 ${v.variant_id}`}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {significant.map((dim) => (
+                  <tr key={dim.key} className="border-b border-black/[0.04]">
+                    <td className="py-2 pr-3">
+                      <span className="font-medium text-ink">{dim.label}</span>
+                      {dim.why && <span className="block text-[11px] text-ash">{dim.why}</span>}
+                    </td>
+                    {dim.values.map((val) => (
+                      <td key={val.variant_id} className="py-2 pr-3">
+                        <span className={val.leader ? "font-semibold text-apple" : "text-ink-soft"}>
+                          {val.display}
+                          {val.leader && " ★"}
+                        </span>
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {analysis.tradeoffs.length > 0 && (
+          <div className="mt-4 space-y-1.5">
+            <p className="text-[13px] font-semibold text-ink">取舍</p>
+            {analysis.tradeoffs.map((line) => (
+              <p key={line} className="text-[13px] leading-6 text-ink-soft">
+                {line}
+              </p>
+            ))}
+          </div>
+        )}
+
+        {(analysis.gaps.length > 0 || notes.length > 0) && (
+          <p className="mt-3 text-[12px] leading-5 text-ash">
+            信息缺口：
+            {analysis.gaps.map((g) => `${g.dimension}（${g.missing.length} 个款型无数据）`).join("、")}
+            {notes.length > 0 && (analysis.gaps.length > 0 ? "；" : "") + notes.map((n) => `${n.label}：${n.note}`).join("；")}
+          </p>
+        )}
+      </div>
+    </Reveal>
+  );
+}
+
 interface FactRow {
   category: string;
   fact_key: string;
@@ -102,6 +242,8 @@ function CompareTable({ data }: { data: ComparisonDetail }) {
   );
   // 参数分类多选（null=全部）；自动过滤已随数据集变化失效的旧选择
   const [picked, setPicked] = useState<string[] | null>(null);
+  // 差异分析：与参数表并行取数（分析失败时静默降级，参数表照常可用）
+  const analysis = useAnalysis(data.variants.map((v) => v.variant_id));
   const activePicked = useMemo(() => {
     if (!picked) return null;
     const valid = picked.filter((c) => categories.includes(c));
@@ -279,6 +421,12 @@ function CompareTable({ data }: { data: ComparisonDetail }) {
           对比对象为具体款型；不同工况（CLTC/NEDC/WLTC）的续航与油耗不直接比较。
         </p>
       </Reveal>
+      {analysis && (
+        <AnalysisPanel
+          analysis={analysis}
+          names={new Map(data.variants.map((v) => [v.variant_id, `${v.brand_name} ${v.series_name}`]))}
+        />
+      )}
     </div>
   );
 }
@@ -308,13 +456,16 @@ function CompareContent() {
               <button
                 type="button"
                 onClick={() => {
-                  // §12.1：对比页「帮我分析差异」→ 悬浮 Agent 介入，带上当前对比车系
+                  // §12.1：对比页「帮我分析差异」→ 悬浮 Agent 介入。
+                  // 带上**款型 ID**：Agent 据此跑确定性差异分析，而不是靠模型自由发挥
+                  // （数字全部来自库内参数，并过数字白名单校验）。
                   const names = [...new Set(data.variants.map((v) => `${v.brand_name} ${v.series_name}`))];
-                  const text =
+                  const ids = data.variants.map((v) => v.variant_id).join("、");
+                  const ask =
                     names.length === 1
                       ? `帮我分析一下 ${names[0]} 这款车怎么样、适合什么人。`
-                      : `请帮我分析这些车型的差异，帮我选一台适合我的：${names.join("、")}。`;
-                  askAgent(text);
+                      : `请从专业角度分析这几个款型的差异、帮我选一台适合我的：${names.join("、")}（款型ID：${ids}）。`;
+                  askAgent(ask);
                 }}
                 className="press glass inline-flex items-center gap-1.5 rounded-full border border-apple/25 px-5 py-2.5 text-sm font-semibold text-apple shadow-md shadow-apple/10 hover:border-apple/45 hover:bg-ice/70"
               >

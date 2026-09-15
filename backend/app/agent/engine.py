@@ -48,6 +48,7 @@ from app.catalog.series_index import display_name, normalize_name, resolve_serie
 from app.common.enums import NEW_ENERGY_TYPES
 from app.common.llm import LLMClient, LLMError, get_llm_client
 from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, VehicleVariant
+from app.comparison.analysis import analyze_comparison, render_analysis_text
 
 # 预算/座位正则唯一定义在 series_constraints（评审 C2：流水线约束解析复用同一实现），
 # 此处按原内部名导入，行为不变。
@@ -138,6 +139,40 @@ def asks_brand_lineup(message: str) -> bool:
     「奔驰在售就 3 款，都是纯电」，而库里是 57 款、燃油 37 款。
     """
     return bool(_BRAND_LINEUP_RE.search(message)) or bool(_ENERGY_ASK_RE.search(message))
+
+
+# 对比页「帮我分析差异」会带上具体款型 ID（前端拼接），Agent 据此做确定性差异分析。
+# 两种写法都认：「（款型ID：11、12、13）」与「variant_ids=11,12,13」。
+_COMPARE_IDS_RE = re.compile(r"(?:款型\s*ID|variant_ids)\s*[:：=]\s*([0-9、,，\s]+)", re.IGNORECASE)
+
+
+def extract_comparison_variant_ids(message: str) -> list[int]:
+    """从消息里解析对比款型 ID（缺失则返回空列表，调用方据此决定是否走差异分析）。"""
+    match = _COMPARE_IDS_RE.search(message)
+    if not match:
+        return []
+    ids: list[int] = []
+    for token in re.findall(r"\d+", match.group(1)):
+        value = int(token)
+        if value not in ids:
+            ids.append(value)
+    return ids
+
+
+def answer_numbers_allowed(answer: str, allowed: set[float] | list[float]) -> tuple[bool, str | None]:
+    """答案数字校验：回答里的每个数字都必须能在分析结果的数值集合里找到（防编造）。
+
+    用**数值集合 + 容差**比较，不用子串匹配——子串会把「200km」误判为命中「20000」
+    （实测踩过）。比 `citation_verifier` 更严：后者校验「引用是否来自证据集」，
+    这里校验**数字本身**；模型凭空补一个数会立刻被拦下，改用确定性文案。
+    """
+    pool = {round(float(v), 3) for v in allowed}
+    for token in re.findall(r"\d+(?:\.\d+)?", answer):
+        value = float(token)
+        if any(abs(value - candidate) < 0.01 for candidate in pool):
+            continue
+        return False, f"答案包含分析结果之外的数字：{token}"
+    return True, None
 
 
 def energy_asked_in(message: str) -> list[str] | None:
@@ -752,6 +787,14 @@ class AgentEngine:
             if target is not None:
                 return await self._variant_diff_reply(db, session_id, target[0], target[1], message)
 
+        # 0.6) 对比差异分析（对比页「帮我分析差异」会带上款型 ID）→ 确定性分析 + LLM 措辞。
+        #      必须排在**车系档案问答之前**：那句话里同时含车系名，早先会被车系问答截走，
+        #      结果退化成「参数罗列」（用户反馈的原问题）。
+        #      结论全部来自库内事实，LLM 只负责把结论讲清楚，且答案数字过白名单校验。
+        compare_ids = extract_comparison_variant_ids(message)
+        if len(compare_ids) >= 2:
+            return await self._comparison_analysis_reply(db, session_id, message, compare_ids)
+
         if resolved and should_answer(resolved, message):
             return await self._series_qa_reply(db, session_id, message, resolved)
 
@@ -760,6 +803,14 @@ class AgentEngine:
         #      但需要的是库内完整事实，不能交给模型记忆。
         if profile.brand_ids and not resolved and asks_brand_lineup(message):
             return await self._brand_overview_reply(db, session_id, profile, message)
+
+        # 0.71) 对比差异分析（对比页「帮我分析差异」会带上款型 ID）→ 确定性分析 + LLM 措辞。
+        #      必须排在**车系档案问答与工具循环之前**：那句话里同时含车系名，早先会被
+        #      车系问答截走并退化成「参数罗列」（用户反馈的原问题）。
+        #      结论全部来自库内事实，LLM 只负责把结论讲清楚，且答案数字过白名单校验。
+        compare_ids = extract_comparison_variant_ids(message)
+        if len(compare_ids) >= 2:
+            return await self._comparison_analysis_reply(db, session_id, message, compare_ids)
 
         # 0.75) 盘点/对比/解释类自由提问 → LLM 工具调用循环（步数受限、全程审计）。
         #       两个前置条件（第二轮审查）：
@@ -967,6 +1018,84 @@ class AgentEngine:
             explanation=explanation,
         )
         await self._emit(session_id, explanation or "", out)
+        return out
+
+    async def _comparison_analysis_reply(
+        self, db: Session, session_id: str, message: str, variant_ids: list[int]
+    ) -> AgentMessageOut:
+        """对比差异分析：确定性分析结果 → LLM 只做措辞，数字必须来自分析结果。
+
+        为什么不让 LLM 自由分析：参数对比的每个结论（谁领先、差多少、贵在哪）都必须可追溯到
+        库内事实。这里先由 `analyze_comparison` 做确定性推导，LLM 只是把这些结论讲成人话；
+        它的输出还要过 `answer_numbers_allowed`（数字白名单），任何凭空数字都会被拦下并
+        改用确定性文案——即「宁可话糙，不编数据」。
+        """
+        analysis = await run_in_threadpool(analyze_comparison, db, variant_ids)
+        if "error" in analysis:
+            return await self._plain_chat_reply(db, session_id, message, locked_series_ids=[])
+
+        fallback_text = render_analysis_text(analysis)
+        payload = json.dumps(
+            {
+                "variants": analysis["variants"],
+                "price": analysis["price"],
+                "dimensions": [d for d in analysis["dimensions"] if d["significant"] or d.get("note")],
+                "tradeoffs": analysis["tradeoffs"],
+                "gaps": analysis["gaps"],
+            },
+            ensure_ascii=False,
+        )
+        text = fallback_text
+        if self._llm.available:
+            system = (
+                "你是汽车选购顾问。下面给你一份**已经算好的对比分析结果**（JSON），"
+                "请把它讲成给普通用户看的结论，要求：\n"
+                "1) 只能使用 JSON 里的数据，**不得引入任何新的数字**（包括百分比、差值、续航等）；\n"
+                "2) 说清「谁在哪方面更强、差多少、贵在哪、缺哪些数据」，并给出适合人群的取舍建议；\n"
+                "3) 不要罗列全部参数，只讲有决策意义的差异；中文，200 字以内；\n"
+                "4) 不谈优惠、库存、成交价；数据缺失就照实说「官方资料未披露」。"
+            )
+            try:
+                resp = await self._llm.chat(
+                    [{"role": "system", "content": system}, {"role": "user", "content": payload}],
+                    temperature=0.2,
+                )
+                candidate = (resp["choices"][0]["message"].get("content") or "").strip()
+                ok, reason = answer_numbers_allowed(candidate, analysis["allowed_numbers"])
+                if ok and candidate:
+                    text = candidate
+                else:
+                    logging.getLogger("app.agent.compare").info("对比分析措辞被拦（%s），改用确定性文案", reason)
+            except (LLMError, KeyError, TypeError, IndexError, ValueError):
+                pass  # 回退确定性文案（原则 7）
+
+        citations: list[Citation] = []
+        source_ids = sorted(
+            {
+                f.get("source_id")
+                for dim in analysis["dimensions"]
+                for v in dim["values"]
+                for f in [v]
+                if f.get("source_id")
+            }
+        )
+        if source_ids:
+            names = {
+                s.id: s.name for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
+            }
+            for sid in source_ids[:3]:
+                citations.append(
+                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 配置数据")
+                )
+        out = AgentMessageOut(
+            session_id=session_id,
+            explanation=text,
+            citations=citations,
+            recommended_variants=[],
+            filters={"comparison_analysis": True, "variant_ids": variant_ids},
+            reasons=[f"基于 {len(analysis['variants'])} 个款型的库内参数做确定性差异分析"],
+        )
+        await self._emit(session_id, text, out)
         return out
 
     async def _brand_overview_reply(

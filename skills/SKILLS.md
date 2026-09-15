@@ -16,3 +16,4 @@ Agent 沉淀可复用工作流。每条 skill 记录用途、来源、适用阶�
 | [constraint-integrity](constraint-integrity.md) | 约束完整性：用户声明的硬约束不得丢、盘点类问题必须读库 | 2026-09-14 品牌约束事故复盘 | 7（Agent）/ 9（迭代） | 2026-09 |
 | [e2e-verification](e2e-verification.md) | 端到端验证流程（冒烟/压测/审查） | 阶段 8 沉淀 | 8（评测上线） | 2026-09 |
 | [git-branch-sync](git-branch-sync.md) | 分支同步 / 叠放分支变基 + 命令与密钥卫生 | 2026-09 分支拆分与事故复盘 | 全阶段（交付流程） | 2026-09 |
+| [doc-sync](doc-sync.md) | 代码更新后文档自动核对与对齐（含可执行检查 doc_sync_check.py） | 2026-09-15 文档对齐轮（计数漂移/悬空引用/口径冲突/UTF-16 事故） | 全阶段（交付流程） | 2026-09 |
