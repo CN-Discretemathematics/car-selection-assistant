@@ -264,10 +264,9 @@ export default async function VehiclePage({
           ))}
         </div>
 
+        {/* 只保留 footer 未覆盖的独有承诺；「不提供站内交易入口 / 价格以官网为准」已在全局 footer 出现 */}
         <Reveal className="mt-12 pb-4" delay={60}>
-          <p className="text-xs leading-6 text-ash">
-            本站不提供站内交易入口，也不跳转第三方经销商；价格与配置以品牌官网为准。
-          </p>
+          <p className="text-xs leading-6 text-ash">本站不跳转第三方经销商。</p>
         </Reveal>
       </main>
     </div>
