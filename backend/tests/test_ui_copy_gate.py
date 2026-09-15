@@ -96,3 +96,180 @@ def test_backend_flags_english_and_fstring_literals(tmp_path: Path):
 def test_terms_are_flagged_in_frontend(tmp_path: Path, term: str):
     _write(tmp_path, "web/app/x/page.tsx", f'export default function P() {{ return <p>{term}</p>; }}\n')
     assert scan(tmp_path), f"{term} 应被拦截"
+
+
+# ── footer 文案重复（2026-09 第三次文案事故的回归） ─────────────────────────────
+
+FOOTER_LAYOUT = (
+    "export default function L({ children }: { children: React.ReactNode }) {\n"
+    "  return (\n"
+    "    <body>\n"
+    "      {children}\n"
+    "      <footer>\n"
+    "        <p>\n"
+    "          <a href=\"/privacy\">隐私政策</a>\n"
+    "          <span>|</span>\n"
+    "          数据均带来源与更新时间\n"
+    "          <span>|</span>\n"
+    "          购车助手内容由 AI 生成，仅供参考\n"
+    "        </p>\n"
+    "        <p>本站不提供站内交易入口；价格与配置以品牌官网为准。</p>\n"
+    "      </footer>\n"
+    "    </body>\n"
+    "  );\n"
+    "}\n"
+)
+
+
+def test_footer_clauses_are_clean_sentences(tmp_path: Path):
+    """从 footer 抽出的必须是完整子句（标签/表达式不能粘进子句，否则判不出重复）。"""
+    from reviewer.scan_ui_copy import footer_clauses
+
+    _write(tmp_path, "web/app/layout.tsx", FOOTER_LAYOUT)
+    clauses = footer_clauses(tmp_path)
+    assert "购车助手内容由AI生成" in clauses, clauses
+    assert "本站不提供站内交易入口" in clauses, clauses
+    assert "价格与配置以品牌官网为准" in clauses, clauses
+    assert all("{" not in c and "\x00" not in c for c in clauses), clauses
+    assert "隐私政策" not in clauses, "短词不应进入判重集合"
+
+
+def test_footer_duplicate_in_page_is_flagged(tmp_path: Path):
+    """页面正文把 footer 的话再说一遍 → FAIL（首页 AI 标识 / 详情页交易入口声明两处事故）。"""
+    _write(tmp_path, "web/app/layout.tsx", FOOTER_LAYOUT)
+    _write(tmp_path, "web/app/page.tsx",
+           'export default function P() { return <p>购车助手内容由 AI 生成，仅供参考。</p>; }\n')
+    _write(tmp_path, "web/app/vehicles/[id]/page.tsx",
+           'export default function P() { return <p>本站不提供站内交易入口；价格与配置以品牌官网为准。</p>; }\n')
+    hits = scan(tmp_path)
+    assert any("购车助手内容由AI生成" in h for h in hits), hits
+    assert any("本站不提供站内交易入口" in h for h in hits), hits
+    assert any("价格与配置以品牌官网为准" in h for h in hits), hits
+    assert all("[footer 重复]" in h for h in hits), hits
+
+
+def test_footer_duplicate_split_by_tags_is_flagged(tmp_path: Path):
+    """同一句被标签切开也要拦（唯一拦截手段是抹平边界后的比对，变异测试显示它曾无覆盖）。"""
+    _write(tmp_path, "web/app/layout.tsx", FOOTER_LAYOUT)
+    _write(tmp_path, "web/app/x/page.tsx",
+           'export default function P() { return <p>购车助手内容由 <b>AI</b> 生成，仅供参考。</p>; }\n')
+    hits = scan(tmp_path)
+    assert any("购车助手内容由AI生成" in h for h in hits), hits
+
+
+def test_footer_duplicate_in_lib_constant_is_flagged(tmp_path: Path):
+    """文案抽到 lib 常量里被多处复用，同样算重复（检查范围不止 app/page.tsx）。"""
+    _write(tmp_path, "web/app/layout.tsx", FOOTER_LAYOUT)
+    _write(tmp_path, "web/lib/copy.ts", 'export const NOTE = "数据均带来源与更新时间";\n')
+    assert any("数据均带来源与更新时间" in h for h in scan(tmp_path))
+
+
+def test_footer_comment_mention_is_not_flagged(tmp_path: Path):
+    """注释里提到 footer 口径不算用户看到两遍（`//` 行注释与 `{/* */}` 都要跳过）。"""
+    _write(tmp_path, "web/app/layout.tsx", FOOTER_LAYOUT)
+    _write(tmp_path, "web/app/x/page.tsx",
+           "// 免责口径见全局 footer：购车助手内容由 AI 生成，仅供参考\n"
+           "{/* 同上：数据均带来源与更新时间 */}\n"
+           "export default function P() { return <p>正文</p>; }\n")
+    assert scan(tmp_path) == []
+
+
+def test_footer_short_clause_is_not_flagged(tmp_path: Path):
+    """短词（隐私政策/仅供参考）天然会重复，不得误报，否则门禁会被噪声淹没。"""
+    _write(tmp_path, "web/app/layout.tsx", FOOTER_LAYOUT)
+    _write(tmp_path, "web/app/favorites/page.tsx",
+           'export default function P() { return <p>登录后查看收藏（隐私政策）。</p>; }\n')
+    assert scan(tmp_path) == []
+
+
+def test_footer_found_when_refactored_into_component(tmp_path: Path):
+    """footer 被拆成子组件时，按 `<footer` 标签自动定位仍然生效（不静默空转）。"""
+    _write(tmp_path, "web/app/layout.tsx",
+           'export default function L() { return <body><SiteFooter /></body>; }\n')
+    _write(tmp_path, "web/app/components/SiteFooter.tsx",
+           FOOTER_LAYOUT.replace("export default function L", "export default function SiteFooter"))
+    _write(tmp_path, "web/app/page.tsx",
+           'export default function P() { return <p>本站不提供站内交易入口；价格与配置以品牌官网为准。</p>; }\n')
+    hits = scan(tmp_path)
+    assert any("本站不提供站内交易入口" in h for h in hits), hits
+
+
+def test_footer_duplicate_in_attribute_string_is_flagged(tmp_path: Path):
+    """文案写在标签属性里（dangerouslySetInnerHTML / title）同样算重复，不得 fail-open。"""
+    _write(tmp_path, "web/app/layout.tsx", FOOTER_LAYOUT)
+    _write(tmp_path, "web/app/x/page.tsx",
+           "export default function P() {\n"
+           "  return <div title=\"购车助手内容由 AI 生成，仅供参考\" dangerouslySetInnerHTML="
+           "{{ __html: \"数据均带来源与更新时间\" }} />;\n"
+           "}\n")
+    hits = scan(tmp_path)
+    assert any("购车助手内容由AI生成" in h for h in hits), hits
+    assert any("数据均带来源与更新时间" in h for h in hits), hits
+
+
+def test_footer_multiline_jsx_comment_is_not_flagged(tmp_path: Path):
+    """多行 JSX 注释（续行不以 * 开头）也不该被判成正文——块注释要整体剔除。"""
+    _write(tmp_path, "web/app/layout.tsx", FOOTER_LAYOUT)
+    _write(tmp_path, "web/app/x/page.tsx",
+           "{/* 免责口径：\n"
+           "    购车助手内容由 AI 生成，仅供参考\n"
+           "    数据均带来源与更新时间\n"
+           "*/\n"
+           "export default function P() { return <p>正文</p>; }\n")
+    assert scan(tmp_path) == []
+
+
+def test_footer_text_after_closing_tag_is_not_a_clause(tmp_path: Path):
+    """footer 区间截止到 `</footer>`：其后（如备案信息）不算 footer 文案，不得据此判重。"""
+    layout = FOOTER_LAYOUT.replace(
+        "      </footer>\n", "      </footer>\n      <p>备案与合规信息由运维统一维护</p>\n"
+    )
+    _write(tmp_path, "web/app/layout.tsx", layout)
+    _write(tmp_path, "web/app/x/page.tsx",
+           'export default function P() { return <p>备案与合规信息由运维统一维护</p>; }\n')
+    assert scan(tmp_path) == []
+
+
+def test_footer_body_duplicate_in_layout_is_flagged(tmp_path: Path):
+    """footer 文件自己的正文里再写一遍也算重复——只排除 footer 区间，不排除整个文件。"""
+    layout = FOOTER_LAYOUT.replace(
+        "    <body>\n", "    <body>\n      <p>购车助手内容由 AI 生成，仅供参考</p>\n"
+    )
+    _write(tmp_path, "web/app/layout.tsx", layout)
+    assert any("购车助手内容由AI生成" in h for h in scan(tmp_path))
+
+
+def test_footer_source_ignores_footer_string_in_ts_file(tmp_path: Path):
+    """`const TPL = "<footer>…"` 这种字符串不能当真源，否则会抽出伪子句、误报无关页面。"""
+    from reviewer.scan_ui_copy import _footer_source
+
+    _write(tmp_path, "web/app/layout.tsx", 'export default function L() { return <div>无 footer</div>; }\n')
+    _write(tmp_path, "web/app/tpl.ts", 'export const TPL = "<footer>本站不提供站内交易入口</footer>";\n')
+    rel, why = _footer_source(tmp_path)
+    assert rel is None, (rel, why)
+
+
+def test_footer_check_fails_when_footer_missing(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    """定位不到 footer 时不得静默通过：退出码 2，且不能打印「无重复」的 OK 结论。"""
+    from reviewer.scan_ui_copy import main
+
+    _write(tmp_path, "web/app/layout.tsx", 'export default function L() { return <div>无 footer</div>; }\n')
+    code = main([], root=tmp_path)
+    captured = capsys.readouterr()
+    assert code == 2, captured
+    assert "[FAIL]" in captured.err and "无法判定" in captured.err, captured
+    assert "[OK]" not in captured.out, captured
+
+
+def test_footer_incomplete_structure_reports_clearly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """只有 `<footer` 没有 `</footer>`：要报「结构不完整」，而不是含混的「找不到」。"""
+    from reviewer.scan_ui_copy import main
+
+    _write(tmp_path, "web/app/layout.tsx",
+           'export default function L() { return <footer><p>本站不提供站内交易入口</p>; }\n')
+    code = main([], root=tmp_path)
+    captured = capsys.readouterr()
+    assert code == 2, captured
+    assert "结构不完整" in captured.err, captured

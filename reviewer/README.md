@@ -8,8 +8,9 @@
 
 | 文件 | 用途 |
 |---|---|
-| `REVIEWER_AGENT.md` | 审查员身份定义、密钥红线、触发时机、审查流程、规范清单、报告模板。主 Agent 完成任务后，将本文件全文作为 prompt 交给子 Agent 运行即完成一次独立审查。 |
+| `REVIEWER_AGENT.md` | 审查员身份定义、密钥红线、触发时机、审查流程、规范清单、报告模板。主 Agent 完成任务后，将本文件全文作为 prompt 交给子 Agent 运行即完成一次独立审查。（该文件按 `.gitignore:68` 的约定**只保留在本地**，新克隆不可见。） |
 | `scan_secrets.py` | 密钥扫描器：扫描仓库内文本文件中的 API Key、口令、Token、私钥、带凭据的数据库 URL 等机密字面量。审查前**必须**运行。 |
+| `scan_ui_copy.py` | 用户可见文案门禁：拦「内部术语/实现说明泄漏到界面」与「全局 footer 文案在页面正文重复一遍」。审查前**必须**运行。 |
 
 ## 快速使用
 
@@ -23,29 +24,41 @@ python reviewer/scan_secrets.py --json     # JSON 报告（便于程序化处理
 python reviewer/scan_secrets.py --path backend  # 只扫某个子目录
 ```
 
-### 2. 用户可见文案门禁（每次审查前必做）
-
-```powershell
-python reviewer/scan_ui_copy.py            # 退出码 0=干净，1=发现内部表述
-python reviewer/scan_ui_copy.py --verbose  # 逐条打印命中位置
-```
-
-拦两类东西：内部**术语**（SKU / §章节号 / 门户口径 / 范围内 / 幂等 / 落库…）与
-**实现说明措辞**（「不做猜测补全」「统一显示」等）。前端扫公开页面（`/ops` 与仅它使用的
-`web/lib/rag.ts` 除外）；后端用 `ast` 只看**非 docstring 的字符串字面量**——注释与 docstring
-里的技术术语是给维护者的，允许保留。**2026-09-14 事故**：详情页脚注整句实现说明漏过第一轮
-清理（当时只查固定术语表），用户再次反馈后入库为门禁。
-
 规则说明：
 
 - 覆盖 `sk-...`（DeepSeek/OpenAI）、`AKIA...`（AWS）、`ghp_...`（GitHub）、
   `AIza...`（Google）、`xoxb-...`（Slack）、私钥块、带凭据的数据库 URL、JWT、
   密钥类变量直接赋值等模式；
 - 自动忽略 `.git`、`node_modules`、`.next`、`.venv`、`.deps`、构建产物等；
-- `.env` 等真实环境变量文件会被标记为 HIGH（仅允许 `.env.example` 等占位模板）；
+- `.env` 等真实环境变量文件会被标记为 HIGH（仅允许 `.env.example` 等占位模板），
+  位于 gitignored 路径的命中按 `[INFO]` 呈现、不计入退出码；
 - 占位符值（`your-...`、`xxx`、`<...>`、`example` 等）不会被误报。
 
-### 2. 触发审查
+### 2. 用户可见文案门禁（每次审查前必做）
+
+```powershell
+python reviewer/scan_ui_copy.py            # 退出码 0=干净，1=发现文案问题
+python reviewer/scan_ui_copy.py --verbose  # 逐条打印命中位置
+```
+
+拦两类东西：
+
+1. **内部表述**：术语（SKU / §章节号 / 门户口径 / 范围内 / 幂等 / 落库…）与实现说明措辞
+   （「不做猜测补全」「统一显示」等）。前端扫公开页面（`/ops` 与仅它使用的
+   `web/lib/rag.ts` 除外）；后端用 `ast` 只看**非 docstring 的字符串字面量**——注释与
+   docstring 里的技术术语是给维护者的，允许保留。
+2. **footer 文案重复**：以全局 footer 为唯一真源（默认 `web/app/layout.tsx`，实际按 `<footer`
+   标签自动定位，所以拆成 `SiteFooter.tsx` 也认），把它切成子句后回查其余前端文件，逐字重复
+   即 FAIL（判「同一句话出现两遍」，不做近义改写判断；长度 < 8 字的短词如「隐私政策」不判，
+   避免噪声）。**定位不到唯一 footer 时退出码 2**——「无法判定」不等于「通过」，否则重构后
+   门禁会静默空转。
+
+**三次事故对应两条规则**：① 2026-09-14 详情页脚注整句实现说明 + 后端错误信息里的内部叫法，
+漏过第一轮固定术语表；② 2026-09 首页与详情页把 footer 的免责/AI 标识又说了一遍。前两次
+都是用户看到才发现；② 之后补上第 2 条检查，并由 `backend/tests/test_ui_copy_gate.py`
+的 footer 用例 + 变异测试守着。
+
+### 3. 触发审查
 
 主 Agent 完成代码任务后：
 

@@ -228,6 +228,20 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
 
 ## 8. 已知事项与后续改进
 
+- **官方车型页链接（PROJECT_PLAN §10-14）目前拿不到数据，前端按钮不渲染**：线上实测
+  `vehicle_series.official_page_url` 为 **0/1078**、`brands.official_site` 为 **0/132**；
+  代码里只有 `backend/tools/seed_dev.py` 写过占位示例（example.com，测试夹具 `backend/tests/seed.py`
+  同类）。根因是**唯一来源
+  （汽车之家）不提供该字段**：已抓取接口的快照里没有 official/website 类字段（只有
+  `car2.autoimg.cn` 缩略图），车系页 HTML（robots 允许 `/110/`、`/brand/`）出站链接全是
+  汽车之家自家域名，没有品牌官网入口。因此详情页 `official_page_url && …` 的条件渲染恒为假，
+  「查看品牌官网车型页」按钮、对比页与 Agent 回复里的官方链接都为空。
+  补这一项需要**新增数据源**（品牌官网/官方车型页 URL 并逐条可验证），不能靠猜域名。
+  另有可立即使用的替代信息：`external_series_refs` 覆盖 **1078/1078** 车系
+  （`source_id=1` → `https://www.autohome.com.cn/{external_id}/`），如需「查看数据来源」
+  这类入口可直接由它派生（但要与「只做官方跳转」的产品口径一起定，见 `PROJECT_PLAN.md`
+  §2 产品边界）。
+
 - **`web/public/` 曾被漏掉**：`deploy/frontend.Dockerfile` 会 `COPY .../web/public ./public`，
   但仓库此前未跟踪该目录——全新克隆构建必失败（服务器靠手工 `.gitkeep` 侥幸可用）。
   现已补 `web/public/.gitkeep` 入库；rsync 排除清单里的 `web/public/.gitkeep` 可一并移除。
@@ -235,7 +249,9 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
   `/admin/rag/status` 在规模漂移时给出「车系 908→1078」式原因。旧标记（无 `db_counts`）
   退回只比月份，不误报。
 - **只部署 main 的代价**：未合并的改动不会上线（需要的验证放在 PR 阶段完成）。
-- **可选的 CI 门禁**：目前 PR 阶段没有自动跑测试（313 用例与两道静态门禁
-  `reviewer/scan_secrets.py`、`reviewer/scan_ui_copy.py` 都只在本地/手工执行）。
-  公开仓库可加 GitHub Actions 跑 `pytest` + `tsc` + 两道门禁，让「自动部署 main」更有底气。
+- **CI 门禁已接入（仍未设强制）**：`.github/workflows/ci.yml` 在 PR 与 main push 上跑三个 job——
+  backend（全量 pytest）、gates（`reviewer/scan_secrets.py` + `reviewer/scan_ui_copy.py`，
+  退出码必须 0；文案门禁定位不到唯一 footer 时返回 **2**，同样算失败）、
+  web（`tsc --noEmit` + `next build`）。要真正拦住合并，需在仓库 Settings → Branches →
+  main 分支保护里勾 Require status checks 并选中这三个 check；部署不受影响（服务器仍定时拉 main）。
 - **通知**：脚本只写日志与状态文件；如需微信/邮件通知，可在脚本末尾追加钩子。
