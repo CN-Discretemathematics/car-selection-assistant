@@ -1,7 +1,9 @@
 # RAG 设计与运维（LangGraph 版）
 
-> 本文是 `` §16 的实现级展开：架构、最终选型与量化依据、评测规范、运维入口。
-> 权威约束（事实只来自数据库、密钥不落仓库、本地无云依赖可运行）。
+> 本文是 [PROJECT_PLAN.md](PROJECT_PLAN.md) §16「RAG 设计（LangGraph 编排）」的实现级展开：
+> 架构、最终选型与量化依据、评测规范、运维入口；技术选型对比与逐轮实测数据另见
+> [RAG_TECH_SELECTION.md](RAG_TECH_SELECTION.md)。
+> 权威约束（事实只来自数据库、密钥不落仓库、本地无云依赖可运行）见 README「设计原则」。
 
 ## 1. 总览
 
@@ -221,6 +223,7 @@ graph TD;
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `RETRIEVAL_BACKEND` | `inmemory` | `milvus` 时启用稠密召回路 |
+| `RETRIEVAL_TOKENIZER` | `bigram` | 稀疏分词器：`bigram`（默认，A/B 实测最优）/ `jieba` / `hybrid` |
 | `MILVUS_URI` / `MILVUS_TOKEN` / `MILVUS_COLLECTION` / `MILVUS_DIM` | - | Zilliz Cloud（密钥经 .env 注入，不入仓库） |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_API_KEY` / `EMBEDDING_DIMENSIONS` | - | OpenAI 兼容 `/v1/embeddings` |
 | `RETRIEVAL_EMBED_CACHE` | 空（关） | 稠密灌库流式 JSONL 向量缓存（断点续跑、低内存） |
@@ -229,8 +232,10 @@ graph TD;
 | `RETRIEVAL_FACTS_PER_VARIANT` | 30 | 每款型入索引的去重后事实条数（SQL 窗口去重 + 配额截断） |
 | `RETRIEVAL_MAX_CHUNKS` | 60000 | 全库切片上限 |
 | `RETRIEVAL_RRF_K` | 60 | RRF 平滑常数 |
+| `RETRIEVAL_RRF_WEIGHT_SPARSE` / `RETRIEVAL_RRF_WEIGHT_DENSE` | 0.6 / 0.4 | 两路名次贡献权重（统一权重，不按查询类型分路） |
 | `RERANK_PROVIDER` | 空（lexical） | `api` 启用 Cross-Encoder（仅 semantic/recommend 实际调用） |
-| `RERANK_BASE_URL` / `RERANK_MODEL` / `RERANK_API_KEY` / `RERANK_TIMEOUT_SECONDS` | - | 如硅基流动 + BAAI/bge-reranker-v2-m3 |
+| `RERANK_BASE_URL` / `RERANK_MODEL` / `RERANK_API_KEY` / `RERANK_TIMEOUT_SECONDS` | - | 如硅基流动 + BAAI/bge-reranker-v2-m3；Key 留空回退 `EMBEDDING_API_KEY` |
+| `RERANK_API_PATH` | 空（自动探测） | 显式指定重排 API 路径（默认按 base_url 探测 DashScope 原生 / OpenAI 兼容 /rerank） |
 | `RETRIEVAL_RELEVANCE_THRESHOLD` | 0（关） | >0 时仅对 Cross-Encoder 绝对分生效 |
 | `RETRIEVAL_LEXICAL_BOOST` / `RETRIEVAL_LEXICAL_CAP` | 0.05 / 0.25 | lexical 重排加分步长/封顶 |
 | `RAG_RUN_LOG_SIZE` | 50 | 运行轨迹环形缓冲长度 |
