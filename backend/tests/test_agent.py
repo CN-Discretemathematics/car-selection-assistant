@@ -100,7 +100,9 @@ def test_agent_recommendation_with_sources(client: TestClient, db_session: Sessi
     assert body["citations"], "必须有来源引用"
     for v in variants:
         assert db_session.get(VehicleVariant, v["variant_id"]) is not None
-    assert body["official_links"], "必须返回官方车型页链接"
+    # 官方车型页链接已删除（数据无法从现有来源获得）：Agent 侧不得再返回任何外部跳转
+    assert "official_links" not in body
+    assert all("official_page_url" not in v for v in variants)
     assert body["filters"]["budget_max"] == 150000
     # §13 混合检索证据：官方资料片段进入解释佐证
     assert "官方资料佐证" in (body["explanation"] or "")

@@ -46,8 +46,10 @@ def test_recommendations_hard_filters_and_shape(client: TestClient, db_session: 
     assert got <= {ids["suv"], ids["sedan"]}, "超出预算的燃油轿车（17.98万）应被硬约束排除"
     assert all(v["price_cny"] <= 130000 for v in body["variants"])
     first = body["variants"][0]
-    for key in ("score", "matched", "display_name", "series_name", "official_page_url"):
+    for key in ("score", "matched", "display_name", "series_name"):
         assert key in first
+    # 官方车型页链接已删除：推荐结果里不得再带任何外部跳转字段
+    assert "official_page_url" not in first
     assert set(body["weights_used"]) >= {"budget", "space", "power"}
     assert body["count"] >= len(body["variants"])
     # §15.3：响应应为纯数据（无内部对象泄漏）

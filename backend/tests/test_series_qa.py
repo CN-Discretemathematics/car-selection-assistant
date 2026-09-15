@@ -267,6 +267,9 @@ def test_engine_comparison_answer(client: TestClient, db_session: Session):
     assert "腾势Z9GT" in text and "卡罗拉锐放" in text
     assert "官方指导价" in text and "万元" in text
     assert "参数对比" in text and "动力" in text
+    # 官方车型页链接已删除（2026-09-16）：同级别小结不得再引导用户去品牌官网看配置表
+    # （footer 里「具体以品牌官网为准」是免责声明，保留；这里只拦"去看配置表"这类指向）
+    assert "到品牌官网查看" not in text
     assert body["citations"], "应带来源引用"
     assert body["recommended_series_ids"]  # 命中车系对外暴露
 
@@ -493,7 +496,7 @@ def test_variant_diff_includes_partial_coverage_facts(db_session: Session):
 
 
 def test_variant_diff_answer_without_variant_data(db_session: Session):
-    """库内无在售款型时如实说明并给官网入口，绝不编造版本差异。"""
+    """库内无在售款型时如实说明，绝不编造版本差异；也不再给官方/来源入口。"""
     source = make_source(db_session, name="汽车之家")
     brand = make_brand(db_session, name="银河", source=source)
     series = make_series(db_session, brand, name="星愿", body_type="sedan",
@@ -502,7 +505,9 @@ def test_variant_diff_answer_without_variant_data(db_session: Session):
     text, rows = build_variant_diff_answer(db_session, series, brand, "星愿不同版本有什么区别")
     assert rows == []
     assert "暂未收录该车型的款型数据" in text
-    assert "example.com/series" in text
+    # 官方车型页链接已删除（数据无法从现有来源获得）：说明文案里不得再出现官网/来源链接
+    assert "example.com/series" not in text
+    assert "品牌官网" not in text
 
 
 def test_variant_diff_archived_series_shows_off_sale_rows(db_session: Session):

@@ -402,7 +402,7 @@ def build_series_qa_answer(
     if same_class:
         blocks.append(
             "小结：两款车同属「" + first.positioning + "」级别，但价格与动力总成差异决定了买点不同；"
-            "可以按用车场景（通勤/家庭/长途）和预算取舍，或到品牌官网查看具体款型配置表。"
+            "可以按用车场景（通勤/家庭/长途）和预算取舍——告诉我你的预算和主要用途，我按库内参数帮你细比。"
         )
     else:
         blocks.append(
@@ -487,7 +487,8 @@ def build_variant_diff_answer(
     """同一车系内「版本差异」确定性回答。
 
     返回 (文本, 版本行)。版本行供前端渲染候选卡片与「加入对比」动作。
-    事实全部来自在售 SKU 的 SpecFact / OfficialPrice；无数据时如实说明并给出官网入口。
+    事实全部来自在售 SKU 的 SpecFact / OfficialPrice；无数据时如实说明（不提供外部跳转，
+    官方车型页链接已于 2026-09-16 删除，见 docs/deployment.md §8）。
     """
     name = display_name(series, brand)
     rows: list[tuple[VehicleVariant, float | None]] = []
@@ -506,10 +507,9 @@ def build_variant_diff_answer(
         rows.sort(key=lambda r: (r[1] is None, r[1] if r[1] is not None else 0.0))
         archived = True
         if not rows:  # 连款型都没有（极少数）：保留原说明
-            official = f"：{series.official_page_url}" if series.official_page_url else "。"
             text = (
                 f"【{name}】库内暂未收录该车型的款型数据。"
-                f"可能原因：数据源尚未收录。可先到品牌官网查看配置表{official}\n"
+                "可能原因：数据源尚未收录。\n"
                 + "以上口径：只陈列数据库既有事实，绝不编造。"
             )
             return text, []
@@ -613,7 +613,6 @@ def build_variant_diff_answer(
             "display_name": variant.display_name,
             "energy_type": variant.energy_type,
             "price_cny": price,
-            "official_page_url": series.official_page_url,
             "source_id": variant.source_id,
         }
         for variant, price in shown

@@ -83,7 +83,6 @@ def vehicle_search(
                     "min": float(price_min) if price_min is not None else None,
                     "max": float(price_max) if price_max is not None else None,
                 },
-                "official_page_url": series.official_page_url,
                 "source_id": series.source_id,
             }
         )
@@ -164,21 +163,7 @@ def vehicle_evidence(db: Session, variant_id: int) -> dict:
         "energy_type": variant.energy_type,
         "official_price": float(price.price_cny) if price else None,
         "facts": facts,
-        "official_page_url": series.official_page_url if series else None,
         "source_id": variant.source_id,
-    }
-
-
-# ── 工具 4：official_link_tool ────────────────────────────────────────────────
-def official_link_tool(db: Session, series_id: int) -> dict:
-    """返回经过验证的官方车型页链接。"""
-    series = catalog.get_series(db, series_id)
-    if series is None:
-        return {"series_id": series_id, "error": "车型系列不存在"}
-    return {
-        "series_id": series.id,
-        "series_name": series.name,
-        "official_page_url": series.official_page_url,
     }
 
 
@@ -393,7 +378,7 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
              "unit": f.unit, "cycle": f.cycle, "source_id": f.source_id}
         )
 
-    # 批量：系列/品牌（展示与官方页）
+    # 批量：系列/品牌（用于展示名与对比行的品牌信息）
     series_map = {
         s.id: s
         for s in db.scalars(
@@ -549,7 +534,6 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
                     "score": round(score, 4),
                     "matched": matched,
                     "tradeoffs": tradeoffs,
-                    "official_page_url": series.official_page_url if series else None,
                     "source_id": variant.source_id,
                 },
             )
@@ -689,18 +673,6 @@ TOOL_SCHEMAS: list[dict] = [
                     "usage": {"type": "array", "items": {"type": "string"}},
                     "limit": {"type": "integer", "default": 5},
                 },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "official_link_tool",
-            "description": "返回车型系列的官方车型页链接。",
-            "parameters": {
-                "type": "object",
-                "properties": {"series_id": {"type": "integer"}},
-                "required": ["series_id"],
             },
         },
     },

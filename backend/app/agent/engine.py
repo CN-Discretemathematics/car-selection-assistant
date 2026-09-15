@@ -35,7 +35,6 @@ from app.agent.tools import (
     TOOL_SCHEMAS,
     comparison_tool,
     citation_verifier,
-    official_link_tool,
     recommendation_tool,
     retrieval_search,
     safety_guard,
@@ -175,7 +174,7 @@ _TOOL_LOOP_SYSTEM = (
     "5) 不谈优惠、库存、成交价，不提供购买链接。"
 )
 # 工具白名单（recommendation_tool 需要 UserProfile，属确定性链内部工具，不对模型开放）
-_TOOL_LOOP_NAMES = ("vehicle_search", "sales_search", "vehicle_evidence", "retrieval_search", "official_link_tool")
+_TOOL_LOOP_NAMES = ("vehicle_search", "sales_search", "vehicle_evidence", "retrieval_search")
 _TOOL_LOOP_SCHEMAS = [s for s in TOOL_SCHEMAS if s["function"]["name"] in _TOOL_LOOP_NAMES]
 
 
@@ -267,8 +266,6 @@ def _dispatch_tool(db: Session, name: str, arguments: dict) -> dict:
             return vehicle_evidence(db, **kwargs)
         if name == "retrieval_search":
             return {"results": retrieval_search(db, **kwargs)}
-        if name == "official_link_tool":
-            return official_link_tool(db, **kwargs)
     except Exception as err:  # noqa: BLE001 — 工具异常回灌给模型，让它换参数或如实说明
         return {"error": f"{type(err).__name__}: {str(err)[:160]}"}
     return {"error": f"工具未实现：{name}"}
@@ -935,8 +932,6 @@ class AgentEngine:
 
         explanation = await self._explain(profile, result, source_names, evidence)
 
-        official_links = list(dict.fromkeys(v["official_page_url"] for v in top if v.get("official_page_url")))
-
         recommended = [
             RecommendedVariant(
                 variant_id=v["variant_id"],
@@ -949,7 +944,6 @@ class AgentEngine:
                 score=v["score"],
                 matched=v["matched"],
                 tradeoffs=[t for t in (v["tradeoffs"] or []) if not any(n in t for n in internal_notes)],
-                official_page_url=v["official_page_url"],
             )
             for v in top
         ]
@@ -963,7 +957,6 @@ class AgentEngine:
             reasons=reasons,
             tradeoffs=tradeoffs,
             citations=citations,
-            official_links=official_links,
             explanation=explanation,
         )
         await self._emit(session_id, explanation or "", out)
@@ -1300,7 +1293,6 @@ class AgentEngine:
                 score=0.0,
                 matched=["同车系版本对比"],
                 tradeoffs=[],
-                official_page_url=r.get("official_page_url"),
             )
             for r in rows
         ]
@@ -1312,7 +1304,6 @@ class AgentEngine:
             recommended_variants=recommended,
             reasons=[f"按数据库在售款型列出 {series.name} 各版本官方指导价与差异项"],
             citations=citations,
-            official_links=[series.official_page_url] if series.official_page_url else [],
             explanation=text,
         )
         await self._emit(session_id, text or "", out)
@@ -1347,9 +1338,6 @@ class AgentEngine:
             explanation=answer,
             citations=citations,
             recommended_series_ids=[s.id for s, _ in resolved],
-            official_links=list(
-                dict.fromkeys(s.official_page_url for s, _ in resolved if s.official_page_url)
-            ),
         )
         await self._emit(session_id, answer, out)
         return out

@@ -11,7 +11,6 @@ from app.agent.session import MAX_MESSAGES, SessionStore
 from app.agent.tools import (
     TOOL_SCHEMAS,
     comparison_tool,
-    official_link_tool,
     retrieval_search,
     sales_search,
     vehicle_search,
@@ -108,18 +107,12 @@ def test_comparison_tool_common_params(db_session: Session):
     assert ("电池和续航", "range_km") not in keys  # 605 vs 755 不同
 
 
-def test_official_link_tool(db_session: Session):
-    _seed(db_session)
-    from app.common.models import VehicleSeries
-
-    series_id = db_session.query(VehicleSeries).first().id
-    link = official_link_tool(db_session, series_id)
-    assert link["official_page_url"] == "https://example.com/series"
-    assert official_link_tool(db_session, 999999)["error"]
-
-
 def test_tool_schemas_valid():
-    assert len(TOOL_SCHEMAS) >= 6
+    # 5 个工具：官方车型页链接工具已删除（数据无法从现有来源获得，
+    # 口径：Agent 不提供任何官方/来源跳转，见 docs/deployment.md §8）
+    assert len(TOOL_SCHEMAS) == 5
+    names = {schema["function"]["name"] for schema in TOOL_SCHEMAS}
+    assert "official_link_tool" not in names
     for schema in TOOL_SCHEMAS:
         assert schema["type"] == "function"
         fn = schema["function"]

@@ -243,9 +243,12 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
   （`external_series_refs` 覆盖 **1078/1078** 车系，2026-09-16 只读核查 → `https://www.autohome.com.cn/{external_id}/`），
   如实标注为数据来源、**不冒充品牌官网**。**对比场景不展示任何外部跳转入口**
   （对比接口 `CompareVariantOut` 已不返回 `official_page_url`，对比表也不渲染链接；
-  用户 2026-09-16 的口径：对比时避免提及这类信息）。Agent 侧仍保留 `official_links` 字段与
-  推荐卡片的 `official_page_url` 条件渲染代码（数据恒空 → 当前不渲染；上游补到官方 URL 后
-  会自动出现，是否纳入「不提及」口径属**待产品确认项**，见 `skills/sku-comparison.md`）。
+  用户 2026-09-16 的口径：对比时避免提及这类信息）。**Agent 侧的官方链接已按同一口径删除**
+  （`official_link_tool` 工具、`AgentMessageOut.official_links`、`RecommendedVariant.official_page_url`
+  与推荐卡片里的「官方车型页 ↗」链接，以及 `build_variant_diff_answer` 与同级别小结里
+  两处「到品牌官网查看配置表」的指向）：判断依据是「官方链接无法从现有来源轻松获得」
+  （本节前半段的实测证据），因此以汽车之家与已入库数据为准，不再向用户承诺官方入口。
+  详情页的 `external_link` 保留（数据驱动：库内一旦有官方 URL 则优先展示，否则回退来源页）。
 
 - **`web/public/` 曾被漏掉**：`deploy/frontend.Dockerfile` 会 `COPY .../web/public ./public`，
   但仓库此前未跟踪该目录——全新克隆构建必失败（服务器靠手工 `.gitkeep` 侥幸可用）。

@@ -67,7 +67,8 @@ class RecommendedVariant(BaseModel):
     score: float
     matched: list[str] = Field(default_factory=list)
     tradeoffs: list[str] = Field(default_factory=list)
-    official_page_url: str | None = None
+    # 不再有 official_page_url：官方车型页链接无法从现有来源获得（docs/deployment.md §8），
+    # Agent 侧不提供任何官方/来源跳转（口径：以汽车之家与已入库数据为准）
 
 
 class AgentMessageOut(BaseModel):
@@ -82,5 +83,4 @@ class AgentMessageOut(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     tradeoffs: list[str] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
-    official_links: list[str] = Field(default_factory=list)
     explanation: str | None = None
