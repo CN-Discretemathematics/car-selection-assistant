@@ -9,9 +9,14 @@
 
 ## 功能特性
 
-- **对话式选车 Agent**：预算 / 能源类型 / 车身形式 / 座位数等硬约束确定性解析；指定车系
-  锁定与追问澄清；新硬约束与锁定车系冲突时自动解锁并**在同一次回复中告知**
+- **对话式选车 Agent**：预算 / 能源类型 / 车身形式 / 座位数 / 品牌等硬约束确定性解析；
+  指定车系锁定与追问澄清；新硬约束与锁定车系冲突时自动解锁并**在同一次回复中告知**；
+  盘点类问题（「奔驰都有哪些车型」）走确定性读库路径，不靠模型记忆；支持「新对话」
+  一键重置会话记忆
 - **确定性推荐引擎**：硬约束下推 SQL（宁可少推不可推错）、确定性评分、候选卡片带匹配置信说明
+- **跨车系对比与差异分析**：SKU 级对比表（隐藏相同参数）之外，「分析差异」输出**决策相关的
+  确定性结论**——各维度谁领先、差距多大（低于阈值记「无明显差异」）、贵在哪、缺哪些数据
+  （统一标注「官方资料未披露」）；结论全部由库内事实推导，回答数字受白名单校验
 - **同车系版本差异问答**：按官方指导价列出在售款型、只列差异项并隐藏相同参数，
   部分款型独有的配置同样入列，缺失一律标注「官方资料未披露」；无在售款型的车系
   自动降级展示归档数据并标注停售
@@ -201,14 +206,14 @@ python tools/import_data.py payload.json --dry-run
 | `RETRIEVAL_BACKEND` | RAG 稠密召回后端：`inmemory`（默认）/ `milvus` |
 | `RETRIEVAL_TOKENIZER` | 稀疏分词器：`bigram`（默认）/ `jieba` / `hybrid` |
 | `RERANK_PROVIDER` | 重排器：空（默认，保持融合序）/ `lexical` / `api` |
-| `ADMIN_API_TOKEN` | 管理后台独立凭据（≥16 位随机值；留空 = 管理接口禁用） |
+| `ADMIN_API_TOKEN` / `ADMIN_API_TOKENS` | 管理后台凭据：后者支持 `label:token` 逗号分隔多标签（可单独吊销、审计区分操作者），旧单值变量兼容（标签 `legacy`）；留空 = 管理接口禁用 |
 | `OSS_*` | 网页快照 / 图片原始文件存储（可选） |
 
 ## 测试
 
 ```powershell
 cd backend
-python -m pytest -q                   # 289 用例（随迭代增长，以实际输出为准）
+python -m pytest -q                   # 313 用例（随迭代增长，以实际输出为准）
 cd ..\web
 npx tsc --noEmit                      # 前端类型检查
 ```
@@ -218,12 +223,18 @@ npx tsc --noEmit                      # 前端类型检查
 ```
 backend/
   app/
-    agent/        # 对话引擎：约束解析、车系锁定与追问、版本差异问答
+    admin/        # 管理后台 API（数据导入审计 / 质量冲突 / RAG 运维）+ 操作审计中间件
+    agent/        # 对话引擎：约束解析、车系锁定与追问、版本差异问答、对比差异分析
+    auth/         # 注册 / 登录 / 验证码（Redis 或进程内存储）
+    brands/       # 品牌注册表与品牌盘点
     catalog/      # 车系索引与锁定
-    comparison/   # 跨车系对比（内容哈希幂等）
+    common/       # 配置 / 数据库 / LLMClient 适配层 / 模型定义 / 限流 / Redis 客户端
+    comparison/   # 跨车系对比（内容哈希幂等）+ 确定性差异分析
+    images/       # 图片代理（域名白名单）
     rag/          # LangGraph 双流水线（查询 / 摄取）+ 同义扩展
     recommendation/  # 确定性推荐（硬约束下推 SQL + 评分）
     retrieval/    # BM25 / 稠密召回后端、分词器、重排配置、领域词表
+    sales/        # 月度销量接口
     sources/      # 数据源适配与导入（汽车之家 SKU、能源类型判定）
     vehicles/     # 车型查询 / 车系搜索接口
     variants/     # 参数归一化（单位 / 工况 / 缺失值）
@@ -231,13 +242,13 @@ backend/
   tools/          # 数据抓取 / 导入 / 评测 / 运维脚本
   tests/          # pytest 用例
 web/
-  app/            # Next.js 页面（选车 / 对比 / 详情 / 管理后台 / ops）
-  lib/            # API 客户端与触发词
-skills/           # 开发工作流沉淀（数据校验 / 参数归一化 / 端到端验证 / 分支同步）
-deploy/           # Docker Compose、前后端 Dockerfile、Nginx 反向代理配置
-reviewer/         # 独立代码审查 Agent（密钥扫描器 + 审查规范）
+  app/            # Next.js 页面（首页 / 车型列表与详情 / 对比 / 收藏 / 隐私与 AI 声明 / ops 运维）
+  lib/            # API 客户端、Agent 触发词、认证与筛选工具
+skills/           # 开发工作流沉淀（数据校验 / 参数归一化 / 端到端验证 / 文档同步等）
+deploy/           # Docker Compose、前后端 Dockerfile、Nginx 配置、自动部署 / 夜间任务 / 缺口回补脚本
+reviewer/         # 独立代码审查 Agent（密钥扫描器 + UI 文案门禁 + 审查规范）
 docs/             # 运维手册（部署与自动更新 / 阿里云控制台运维 / 凭据轮换）
-RAG.md            # RAG 子系统设计与运维文档
+RAG.md            # RAG 子系统设计与运维文档（技术选型对比见 RAG_TECH_SELECTION.md）
 ```
 
 ## 生产部署（Docker Compose + Nginx）
@@ -279,12 +290,16 @@ nginx -t && systemctl reload nginx
 **凭据与密钥**
 - 密钥只经服务器 `.env`（权限 600）或平台环境变量注入；仓库只保留 `.env.example` 占位模板
 - `.dockerignore` 从构建上下文排除 `.env` / 私钥 / 本地数据——密钥不进镜像层与构建缓存
-- 仓库自带密钥扫描器（`reviewer/scan_secrets.py`）；`.gitignore` 覆盖 `*.pem` / `*.key` 等私钥模式
+- 仓库自带两道静态门禁：密钥扫描器（`reviewer/scan_secrets.py`）与 UI 文案门禁
+  （`reviewer/scan_ui_copy.py`，拦截用户界面的内部术语与实现说明）；`.gitignore` 覆盖
+  `*.pem` / `*.key` 等私钥模式
 - 轮换流程见 [docs/credential-rotation.md](docs/credential-rotation.md)（先建新 → 再切换 → 最后废旧）；
   轮换后用 `deploy/verify_credentials.py` 在容器内跑六类凭据的只读验收
 
 **访问控制**
-- 管理后台独立 Bearer 凭据（≥32 位 CSPRNG，由运维注入），不开放注册；缺失返回 503、无效返回 401，
+- 管理后台独立 Bearer 凭据（CSPRNG 随机值，由运维注入），不开放注册；支持多标签
+  `ADMIN_API_TOKENS`（`label:token` 逗号分隔，可单独吊销、审计区分操作者；旧单值
+  `ADMIN_API_TOKEN` 兼容，标签 `legacy`）；缺失返回 503、无效返回 401，
   比较使用 `secrets.compare_digest`（常量时间）
 - 交互式 API 文档（`/docs`、`/openapi.json`）**默认关闭**（`DOCS_ENABLED=true` 可开）——它们会枚举全部管理端点
 - 限流按**真实客户端 IP**：容器以 `--proxy-headers --forwarded-allow-ips=127.0.0.1` 启动，
