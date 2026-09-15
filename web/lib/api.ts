@@ -48,6 +48,13 @@ export interface ModelYearOut {
   launch_status: string;
 }
 
+export interface ExternalLink {
+  /** official = 品牌官网车型页；source = 数据来源页（官方链接缺失时的兜底，不冒充官网）。 */
+  kind: "official" | "source";
+  url: string;
+  source_name: string | null;
+}
+
 export interface VehicleDetail {
   id: number;
   name: string;
@@ -57,6 +64,8 @@ export interface VehicleDetail {
   positioning: string | null;
   energy_types: string[];
   official_page_url: string | null;
+  /** 唯一跳转入口（官方优先，缺失时回退数据来源）；优先级由后端判定。 */
+  external_link: ExternalLink | null;
   thumbnail_url: string | null;
   active_status: string;
   price_range: PriceRange;
