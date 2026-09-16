@@ -203,8 +203,12 @@ export default function AgentChat() {
             </div>
           </div>
 
-          {/* 消息区 */}
-          <div ref={listRef} className="flex-1 space-y-3 overflow-y-auto bg-canvas/40 px-4 py-4">
+          {/* 消息区：异步回复对读屏播报（aria-live） */}
+          <div
+            ref={listRef}
+            aria-live="polite"
+            className="flex-1 space-y-3 overflow-y-auto bg-canvas/40 px-4 py-4"
+          >
             {messages.length === 0 && (
               <div className="msg-pop rounded-[22px] border border-apple/12 bg-ice/70 p-3.5 text-[13px] leading-6 text-ink-soft">
                 💡 告诉我你的预算、用途和人数，例如：「预算15万，家庭用车，5口人，想要新能源SUV」。
@@ -255,7 +259,7 @@ export default function AgentChat() {
                   if (e.key === "Enter" && !e.nativeEvent.isComposing) send(input);
                 }}
                 placeholder="描述你的购车需求…"
-                className="min-w-0 flex-1 rounded-full border border-transparent bg-canvas px-4 py-2.5 text-[13.5px] text-ink transition-all duration-300 placeholder:text-ash/70 focus:border-apple/50 focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12"
+                className="min-w-0 flex-1 rounded-full border border-transparent bg-canvas px-4 py-2.5 text-[13.5px] text-ink transition-[border-color,background-color,box-shadow] duration-300 placeholder:text-ash/70 focus:border-apple/50 focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12"
               />
               <button
                 type="button"

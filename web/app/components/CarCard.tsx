@@ -1,15 +1,27 @@
 import Link from "next/link";
-import { BODY_LABELS, ENERGY_CHIP, ENERGY_LABELS, formatPriceRange, type HomeCard } from "@/lib/api";
+import {
+  BODY_LABELS,
+  ENERGY_CHIP,
+  ENERGY_LABELS,
+  formatCount,
+  formatPriceRange,
+  type HomeCard,
+} from "@/lib/api";
 
 const MISSING_SALES_LABEL = "暂无统一公开数据";
 
+// 前三名奖牌色：金银铜本身编码名次信息，不是装饰
 const RANK_MEDAL: Record<number, string> = {
   1: "bg-gradient-to-br from-[#ffd60a] via-[#ffb800] to-[#ff9f0a] text-[#5c3d00] shadow-lg shadow-[#ffb800]/35",
   2: "bg-gradient-to-br from-[#e8e8ed] via-[#c7c7cc] to-[#a1a1a6] text-[#3a3a3c] shadow-lg shadow-[#a1a1a6]/30",
   3: "bg-gradient-to-br from-[#f5d9c0] via-[#e0a96d] to-[#c77f3e] text-[#4d2f10] shadow-lg shadow-[#c77f3e]/30",
 };
 
-/** 首页车型卡片。maxCount 为列表内销量最大值（可视化基准）。 */
+/**
+ * 首页车型卡片。maxCount 为列表内销量最大值（可视化基准）。
+ * 设计约定（frontend-design 轮）：关键数字「仪表读数」化——大号、tabular-nums、紧字距；
+ * 价格与销量是本卡的两个读数，其余元素保持安静。
+ */
 export default function CarCard({
   card,
   index = 0,
@@ -24,36 +36,35 @@ export default function CarCard({
     card.sales_count > 0
       ? Math.max(4, Math.round((card.sales_count / Math.max(maxCount, 1)) * 100))
       : 0;
+  const priceDisplay =
+    card.price_range.min === null && card.price_range.max === null && card.price_range_note
+      ? card.price_range_note
+      : formatPriceRange(card.price_range);
 
   return (
     <Link
       href={`/vehicles/${card.series_id}`}
       className="lift nums group flex h-full flex-col rounded-[22px] border border-black/[0.06] bg-white/85 p-5 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl hover:border-apple/25 hover:bg-white"
     >
-      <div className="flex flex-1 items-start gap-3.5">
-        {/* 排名徽章：前三名奖牌样式 + 第 1 名皇冠；其余为简洁数字章 */}
+      <div className="flex flex-1 items-start gap-4">
+        {/* 排名章：金银铜渐变 + 纯数字；其余为简洁数字章（不放全大写小标签） */}
         {card.rank <= 3 ? (
           <span
-            className={`relative mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-full font-black transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:scale-110 ${RANK_MEDAL[card.rank]}`}
+            className={`mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-[17px] font-black transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:scale-110 ${RANK_MEDAL[card.rank]}`}
           >
-            {card.rank === 1 && <span className="absolute -top-2.5 text-sm drop-shadow">👑</span>}
-            <span className="text-base">{card.rank}</span>
-            <span className="absolute -bottom-1.5 rounded-full bg-white/95 px-1 text-[9px] font-bold leading-3 text-ash shadow-sm">
-              名
-            </span>
+            {card.rank}
           </span>
         ) : (
-          <span className="mt-0.5 flex h-11 w-11 shrink-0 flex-col items-center justify-center rounded-2xl bg-canvas ring-1 ring-black/[0.05] transition-colors duration-300 group-hover:bg-ice">
-            <span className="text-[15px] font-semibold leading-4 text-ink-soft">
+          <span className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-canvas ring-1 ring-black/[0.05] transition-colors duration-300 group-hover:bg-ice">
+            <span className="text-[15px] font-semibold text-ink-soft">
               {String(card.rank).padStart(2, "0")}
             </span>
-            <span className="mt-0.5 text-[9px] font-medium leading-3 tracking-wide text-ash">RANK</span>
           </span>
         )}
 
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-2">
-            <h3 className="truncate text-[17px] font-semibold tracking-tight text-ink transition-colors duration-300 group-hover:text-apple">
+            <h3 className="truncate text-[18px] font-semibold tracking-tight text-ink transition-colors duration-300 group-hover:text-apple">
               {/* 部分车系名自带品牌前缀（如「腾势Z9GT」），避免「腾势 腾势Z9GT」重复 */}
               {!card.series_name.startsWith(card.brand_name) && (
                 <span className="mr-1.5 text-sm font-normal text-ash">{card.brand_name}</span>
@@ -65,17 +76,19 @@ export default function CarCard({
             </span>
           </div>
 
-          <div className="mt-3.5 flex gap-4">
+          <div className="mt-3 flex gap-4">
             {card.thumbnail_url ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={card.thumbnail_url}
                 alt={card.series_name}
-                className="h-20 w-28 shrink-0 rounded-2xl border border-black/[0.04] bg-canvas object-contain p-1 transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:scale-[1.06]"
+                width={128}
+                height={96}
+                className="h-24 w-32 shrink-0 rounded-2xl border border-black/[0.04] bg-canvas object-contain p-1 transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:scale-[1.06]"
                 loading="lazy"
               />
             ) : (
-              <div className="brand-tile flex h-20 w-28 shrink-0 items-center justify-center rounded-2xl text-2xl font-semibold text-apple/30">
+              <div className="brand-tile flex h-24 w-32 shrink-0 items-center justify-center rounded-2xl text-2xl font-semibold text-apple/30">
                 {card.series_name.slice(0, 2)}
               </div>
             )}
@@ -90,11 +103,19 @@ export default function CarCard({
                   </span>
                 ))}
               </div>
+
+              {/* 读数一：官方指导价（购车用户的第一关注点，升为主视觉） */}
+              <p className="mt-2.5 text-[12px] leading-4 text-ash">官方指导价</p>
+              <p className="truncate text-[21px] font-semibold leading-7 tracking-tight text-ink">
+                {priceDisplay}
+              </p>
+
+              {/* 读数二：月销量 + 相对条（条宽编码真实相对销量） */}
               <p className="mt-2 flex items-baseline gap-1 text-[13px] text-ash">
                 {card.month} 月销量
                 {card.sales_count != null ? (
                   <span className="text-[17px] font-semibold tracking-tight text-ink">
-                    {card.sales_count.toLocaleString()}
+                    {formatCount(card.sales_count)}
                     <span className="ml-0.5 text-xs font-normal text-ash">辆</span>
                   </span>
                 ) : (
@@ -114,11 +135,6 @@ export default function CarCard({
                   </div>
                 </div>
               )}
-              <p className="mt-2.5 text-sm font-medium text-ink-soft">
-                {card.price_range.min === null && card.price_range.max === null && card.price_range_note
-                  ? `官方指导价：${card.price_range_note}`
-                  : formatPriceRange(card.price_range)}
-              </p>
             </div>
           </div>
         </div>
@@ -135,7 +151,8 @@ export default function CarCard({
             <svg
               viewBox="0 0 20 20"
               fill="currentColor"
-              className="h-3.5 w-3.5 -translate-x-1 text-apple opacity-0 transition-all duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)] group-hover:translate-x-0 group-hover:opacity-100"
+              aria-hidden="true"
+              className="h-3.5 w-3.5 -translate-x-1 text-apple opacity-0 transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)] group-hover:translate-x-0 group-hover:opacity-100"
             >
               <path
                 fillRule="evenodd"

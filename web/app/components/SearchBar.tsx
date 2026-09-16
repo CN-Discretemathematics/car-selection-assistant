@@ -190,6 +190,9 @@ function SearchBarInner({
       <input
         ref={inputRef}
         type="search"
+        name="q"
+        autoComplete="off"
+        spellCheck={false}
         value={value}
         onChange={(e) => {
           setValue(e.target.value);
@@ -203,7 +206,7 @@ function SearchBarInner({
         role="combobox"
         aria-expanded={showPanel}
         aria-controls="series-search-results"
-        className={`w-full rounded-full border border-black/[0.08] bg-white/85 py-2 pl-9 pr-9 text-[13.5px] text-ink shadow-sm transition-all duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)] placeholder:text-ash/70 hover:border-apple/35 hover:bg-white focus:border-apple focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12 [&::-webkit-search-cancel-button]:hidden h-9 py-0 pl-8 pr-8 text-[13px]`}
+        className={`w-full rounded-full border border-black/[0.08] bg-white/85 py-2 pl-9 pr-9 text-[13.5px] text-ink shadow-sm transition-[border-color,background-color,box-shadow] duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)] placeholder:text-ash/70 hover:border-apple/35 hover:bg-white focus:border-apple focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12 [&::-webkit-search-cancel-button]:hidden h-9 py-0 pl-8 pr-8 text-[13px]`}
       />
       {loading && (
         <span

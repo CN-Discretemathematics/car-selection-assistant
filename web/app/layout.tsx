@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
 import AgentChat from "./components/AgentChat";
@@ -10,10 +10,22 @@ export const metadata: Metadata = {
     "浏览车型、查看详情、款型级对比。按月销量排序，只展示官方指导价，全部数据带来源与更新时间。",
 };
 
+// 浅色主题下让移动端浏览器状态栏/边框与画布同色（Web Interface Guidelines: theme-color）
+export const viewport: Viewport = {
+  themeColor: "#f5f5f7",
+};
+
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="zh-CN">
       <body className="min-h-screen pb-24">
+        {/* 跳转链接：键盘用户可直达主内容（Web Interface Guidelines: skip link） */}
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-full focus:bg-apple focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-white focus:shadow-lg"
+        >
+          跳到主要内容
+        </a>
         {children}
         <footer className="mt-16 border-t border-black/[0.07] bg-white/55 py-8 text-center text-xs leading-6 text-ash backdrop-blur-xl">
           <p className="mx-auto max-w-3xl px-4">

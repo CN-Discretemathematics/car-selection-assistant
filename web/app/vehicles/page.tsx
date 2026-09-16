@@ -59,7 +59,7 @@ export default async function BrowsePage({
           <h1 className="text-[32px] font-semibold leading-tight tracking-tight text-ink sm:text-[42px]">
             <RiseText text={keyword ? "搜索结果" : "全部车型"} startDelay={120} />
             <RiseText text="，" startDelay={420} />
-            <RiseText text={keyword ? `「${keyword}」` : "一览无余"} gradient startDelay={520} />
+            <RiseText text={keyword ? `「${keyword}」` : "一览无余"} startDelay={520} />
           </h1>
           <p
             className="animate-fade-up mx-auto mt-4 max-w-xl text-sm leading-6 text-ash sm:text-[15px]"
@@ -89,7 +89,7 @@ export default async function BrowsePage({
         </div>
       </section>
 
-      <main className="mx-auto max-w-6xl px-4 sm:px-6">
+      <main id="main-content" className="mx-auto max-w-6xl px-4 sm:px-6">
         <Suspense
           fallback={
             <div className="h-16 animate-pulse rounded-3xl bg-white/60" aria-label="加载筛选器" />
