@@ -98,6 +98,12 @@ class AnalysisKeyPointOut(BaseModel):
     gap: str
 
 
+class AnalysisAiCommentOut(BaseModel):
+    """LLM 一句话点评：只复述确定性事实；LLM 不可用/越界时为 None（前端回退 verdict）。"""
+
+    ai_comment: str | None = None
+
+
 class ComparisonAnalysisOut(BaseModel):
     """差异分析结果：全部字段都是库内事实的确定性推导（无推测、无编造）。"""
 

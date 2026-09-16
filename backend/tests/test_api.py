@@ -272,6 +272,25 @@ def test_comparison_lifecycle_and_common_params(client: TestClient, db_session: 
     assert resp.status_code == 400
 
 
+def test_comparison_ai_comment_shape(client: TestClient, db_session: Session, monkeypatch):
+    """AI 点评端点契约：LLM 不可用/越界时 `ai_comment=None`（前端回退确定性 verdict）。"""
+    import app.comparison.router as router_mod
+
+    _, _, series, _, v_low, v_high = _seed_catalog(db_session)
+    async def _none(analysis):
+        return None
+
+    monkeypatch.setattr(router_mod, "ai_comment_for", _none)
+    resp = client.post("/api/v1/comparisons/analysis/ai-comment",
+                       json={"variant_ids": [v_low.id, v_high.id]})
+    assert resp.status_code == 200
+    assert resp.json() == {"ai_comment": None}
+
+    # 款型不足 2 个 → 400（与分析主端点同口径）
+    resp = client.post("/api/v1/comparisons/analysis/ai-comment", json={"variant_ids": [v_low.id]})
+    assert resp.status_code == 400
+
+
 def test_source_get(client: TestClient, db_session: Session):
     source = make_source(db_session, name="乘联会")
     db_session.commit()

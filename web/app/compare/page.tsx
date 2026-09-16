@@ -98,8 +98,7 @@ interface ComparisonAnalysis {
 }
 
 /** 取差异分析（对比页专用端点；与参数表并存，不是替代）。 */
-function useAnalysis(variantIds: number[]): { analysis: ComparisonAnalysis | null; loading: boolean } {
-  const [analysis, setAnalysis] = useState<ComparisonAnalysis | null>(null);
+function useAnalysis(variantIds: number[]): { analysis: ComparisonAnalysis | null; loading: boolean } {  const [analysis, setAnalysis] = useState<ComparisonAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
   const key = variantIds.join(",");
 
@@ -136,8 +135,48 @@ function useAnalysis(variantIds: number[]): { analysis: ComparisonAnalysis | nul
   return { analysis, loading };
 }
 
+/** 取 LLM 一句话点评（独立端点，随后台补充；后端不可用/越界时返回 null，面板回退确定性结论）。 */
+function useAiComment(variantIds: number[], enabled: boolean): { aiComment: string | null } {
+  const [aiComment, setAiComment] = useState<string | null>(null);
+  const key = variantIds.join(",");
+
+  useEffect(() => {
+    setAiComment(null);
+    if (!enabled || variantIds.length < 2) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/v1/comparisons/analysis/ai-comment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ variant_ids: variantIds }),
+        });
+        if (!res.ok) return; // 静默降级：点评缺失时面板仍显示确定性结论
+        const body = (await res.json()) as { ai_comment: string | null };
+        if (!cancelled && body.ai_comment) setAiComment(body.ai_comment);
+      } catch {
+        /* 静默降级 */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, enabled]);
+
+  return { aiComment };
+}
+
 /** 差异分析面板：先给一句话结论与关键差异，细节默认折叠（缺数据如实标注）。 */
-function AnalysisPanel({ analysis, names }: { analysis: ComparisonAnalysis; names: Map<number, string> }) {
+function AnalysisPanel({
+  analysis,
+  aiComment,
+  names,
+}: {
+  analysis: ComparisonAnalysis;
+  aiComment: string | null;
+  names: Map<number, string>;
+}) {
   const significant = analysis.dimensions.filter((d) => d.significant);
   const notes = analysis.dimensions.filter((d) => !d.significant && d.note);
   // 跳转高亮：✨按钮触发「dsh:flash-analysis」，短暂高亮面板让用户知道该看哪
@@ -166,8 +205,17 @@ function AnalysisPanel({ analysis, names }: { analysis: ComparisonAnalysis; name
           </span>
         </h2>
 
+        {aiComment && (
+          <p className="mt-3 text-[15.5px] leading-7 text-ink">
+            <span className="mr-2 inline-block rounded-full bg-apple/10 px-2 py-0.5 align-middle text-[11px] font-semibold text-apple">
+              AI 点评
+            </span>
+            {aiComment}
+          </p>
+        )}
+
         {analysis.verdict && (
-          <p className="mt-3 border-l-2 border-apple/40 pl-3 text-[15.5px] font-medium leading-7 text-ink">
+          <p className="mt-3 border-l-2 border-apple/40 pl-3 text-[13.5px] leading-6 text-ink-soft">
             {analysis.verdict}
           </p>
         )}
@@ -302,6 +350,7 @@ function CompareTable({ data }: { data: ComparisonDetail }) {
   const [picked, setPicked] = useState<string[] | null>(null);
   // 差异分析：与参数表并行取数（分析失败时静默降级，参数表照常可用）
   const { analysis, loading } = useAnalysis(data.variants.map((v) => v.variant_id));
+  const { aiComment } = useAiComment(data.variants.map((v) => v.variant_id), analysis !== null);
   const activePicked = useMemo(() => {
     if (!picked) return null;
     const valid = picked.filter((c) => categories.includes(c));
@@ -483,6 +532,7 @@ function CompareTable({ data }: { data: ComparisonDetail }) {
       {analysis && (
         <AnalysisPanel
           analysis={analysis}
+          aiComment={aiComment}
           names={new Map(data.variants.map((v) => [v.variant_id, `${v.brand_name} ${v.series_name}`]))}
         />
       )}

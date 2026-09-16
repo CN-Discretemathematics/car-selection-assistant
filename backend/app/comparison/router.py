@@ -10,6 +10,7 @@ import hashlib
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,8 +19,10 @@ from app.common.database import get_session
 from app.common.enums import COMPARISON_MAX_VARIANTS, MISSING_VALUE_LABEL
 from app.common.errors import bad_request, not_found
 from app.common.models import Brand, Comparison, ComparisonItem, VehicleSeries, VehicleVariant
+from app.comparison.ai_summary import ai_comment_for
 from app.comparison.analysis import analyze_comparison
 from app.comparison.schemas import (
+    AnalysisAiCommentOut,
     CommonParamOut,
     ComparisonAnalysisOut,
     ComparisonCreate,
@@ -166,3 +169,22 @@ def comparison_analysis(
     if "error" in analysis:
         raise bad_request(analysis["error"])
     return ComparisonAnalysisOut(**analysis)
+
+
+@router.post("/comparisons/analysis/ai-comment", response_model=AnalysisAiCommentOut)
+async def comparison_analysis_ai_comment(
+    payload: ComparisonCreate,
+    db: Session = Depends(get_session),
+) -> AnalysisAiCommentOut:
+    """差异分析的 **LLM 一句话点评**（独立端点：面板先秒出确定性结论，点评随后补充）。
+
+    纪律：只允许复述确定性分析的事实（prompt 显式给定）、点评里不得出现任何数字、
+    LLM 未配置/超时/越界一律 `ai_comment=None`（前端回退确定性 verdict）——
+    宁可没有点评，不可编造。失败对用户不可见（面板照常可用）。
+    """
+    unique_ids = list(dict.fromkeys(payload.variant_ids))
+    analysis = await run_in_threadpool(analyze_comparison, db, unique_ids)
+    if "error" in analysis:
+        raise bad_request(analysis["error"])
+    comment = await ai_comment_for(analysis)
+    return AnalysisAiCommentOut(ai_comment=comment)

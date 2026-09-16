@@ -68,9 +68,10 @@ def test_compare_button_jumps_to_analysis_panel():
     assert 'id="analysis-panel"' in source, "分析面板必须有稳定的跳转锚点"
     assert "scrollIntoView" in source and "dsh:flash-analysis" in source, "应平滑滚动并高亮"
     assert "查看差异分析" in source, "按钮文案应反映「跳转」而非「询问 Agent」"
-    # 呈现口径：先结论（verdict/key_points）后明细（默认折叠、可展开）
+    # 呈现口径：先结论（verdict/key_points）后明细（默认折叠、可展开）；AI 点评随后台补充
     assert "analysis.verdict" in source and "analysis.key_points" in source
     assert "展开全部" in source and "收起明细" in source
+    assert "useAiComment" in source and "AI 点评" in source
     assert "askAgent" in source, "分析不可用时的 Agent 兜底应保留"
 
 
