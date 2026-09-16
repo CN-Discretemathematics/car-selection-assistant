@@ -70,7 +70,10 @@ git push --force-with-lease origin <branch>     # 历史被重写后用它，不
 
 1. `git commit -m "……"` 里含引号 / 反引号 / 中文标点会被拆成多个参数：
    `error: pathspec 'docker' did not match any file(s) known to git`。
-   → **长提交信息写文件，用 `git commit -F <file>`**（本仓库的 `.tools/commit-msg.txt` 即为此用）。
+   → **长提交信息写文件，用 `git commit -F <file>`**；文件名必须**按提交独立**
+   （`.tools/commit-msg-<branch>-<hhmm>.txt`，用完可删），严禁共用固定的
+   `.tools/commit-msg.txt`——并行会话曾因共用它把别人的提交信息顶包推上远端
+   （见下节与根目录 AGENTS.md）。
 2. `ssh host "… $(cmd) …"`：`$(...)` 会在**本地**展开；且 PowerShell 的 `curl` 是
    `Invoke-WebRequest` 别名，`-s` / `-o` 会被当成它自己的参数报
    `Missing an argument for parameter 'SessionVariable'`。
@@ -85,6 +88,21 @@ git push --force-with-lease origin <branch>     # 历史被重写后用它，不
 
 判断口诀：**命令里出现引号嵌套、`$()`、括号、反引号时，不要再拼字符串，直接落成脚本文件。**
 **改文件不要经过 PowerShell 的字符串管道。**
+
+## 并行会话提交卫生（2026-09 实测串台事故）
+
+- `.tools/commit-msg.txt` 是**共享文件**：两个会话并行工作时，后提交的一方会把先写进
+  该文件的信息原样带走（实测：美化提交的信息被 compare 功能提交顶包，且随同一次
+  push 一起上了远端）。→ **每次提交把信息复制到独立文件**（如
+  `.tools/commit-msg-<branch>-<hhmm>.txt`）再用 `-F`，用完可删。
+- 开工时若发现工作区有**不属于自己**的未暂存改动（别的会话的工作现场），只 `git add`
+  自己的文件清单，绝不 `add -A` / `add .`；push 前用 `git log origin/<branch>..HEAD`
+  核对将被推上去的每个提交，发现不属于自己信息的提交先停下来查。
+- **push 门禁已固化**（2026-09-16）：`.githooks/pre-push`（`git config core.hooksPath .githooks`）
+  在每次 push 时自动运行 `tools/pre-push-guard.py`，机械核对「提交信息 scope ↔ 实际改动文件」，
+  越界/同批重复标题即拦截。事故回归探针：`python tools/pre-push-guard.py 10e42c8..de7985a`
+  应 FAIL（顶包提交）。确属跨切面的合法提交用 `PUSH_GUARD_ALLOW=1` 或 `git push --no-verify`
+  显式放行；新 scope 要登记进脚本的 `SCOPE_PATHS`。
 
 ## 前端/构建类环境陷阱（同期实测）
 

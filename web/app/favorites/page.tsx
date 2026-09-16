@@ -53,7 +53,7 @@ export default function FavoritesPage() {
         </div>
       </section>
 
-      <main className="mx-auto max-w-6xl px-4 pb-8 sm:px-6">
+      <main id="main-content" className="mx-auto max-w-6xl px-4 pb-8 sm:px-6">
         {!token ? (
           <Reveal className="glass rounded-[28px] border border-black/[0.05] p-14 text-center">
             <span className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-ice text-4xl shadow-inner shadow-apple/10">
@@ -116,7 +116,7 @@ export default function FavoritesPage() {
                         </p>
                       </div>
                     </div>
-                    <span className="text-gradient ml-3 shrink-0 text-[15px] font-semibold tracking-tight">
+                    <span className="nums ml-3 shrink-0 text-[15px] font-semibold tracking-tight text-ink">
                       {item.price_cny != null ? formatPrice(item.price_cny) : "暂无"}
                     </span>
                   </Link>

@@ -10,7 +10,7 @@ export default function PrivacyPage() {
   return (
     <div>
       <SiteHeader />
-      <main className="mx-auto max-w-3xl px-4 py-12 sm:px-6">
+      <main id="main-content" className="mx-auto max-w-3xl px-4 py-12 sm:px-6">
         <Reveal>
           <h1 className="text-[30px] font-semibold tracking-tight text-ink sm:text-[34px]">隐私政策</h1>
           <p className="mt-2 text-xs text-ash">生效日期：以页面实际发布时间为准。</p>

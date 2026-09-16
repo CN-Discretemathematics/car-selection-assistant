@@ -1,0 +1,13 @@
+#!/bin/sh
+# pre-push 门禁：核对将推送的每个提交「信息 scope ↔ 实际改动文件」是否一致，
+# 防并行会话提交信息串台（2026-09-16 实测事故）。详见 AGENTS.md 与 tools/pre-push-guard.py。
+# git >=2.55 会给本钩子传（远端名, 远端地址）两个参数；门禁只读 stdin 的 ref 行，
+# 故不向脚本转发 "$@"。
+ROOT=$(git rev-parse --show-toplevel) || exit 2
+for PY in python python3 py; do
+  if command -v "$PY" >/dev/null 2>&1; then
+    exec "$PY" "$ROOT/tools/pre-push-guard.py"
+  fi
+done
+echo "[pre-push] 警告：找不到 python，门禁被跳过（请安装 Python 或检查 PATH）" >&2
+exit 0

@@ -265,6 +265,13 @@ export async function fetchServerListWithTotal<T>(
   return { items, total };
 }
 
+/** 统一数字格式（zh-CN 千分位）：模块级实例，SSR/CSR 输出一致，替代 toLocaleString() 的隐式 locale。 */
+const numberFormat = new Intl.NumberFormat("zh-CN");
+
+export function formatCount(value: number): string {
+  return numberFormat.format(value);
+}
+
 export function formatPrice(value: number | null): string {
   if (value === null || value === undefined) return "暂无";
   const wan = value / 10000;

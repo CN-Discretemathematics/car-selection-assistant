@@ -59,6 +59,22 @@ def test_compare_page_has_no_external_entry():
         assert token not in source, f"对比页不应出现 {token}"
 
 
+def test_compare_button_jumps_to_analysis_panel():
+    """✨按钮 = 跳转到确定性分析面板（一句话结论 + 关键差异，明细可展开）；仅兜底时走 Agent。
+
+    用户 2026-09-16 的口径：点按钮直接跳转，且分析要「先结论后细节」（避免大段文字）。
+    """
+    source = COMPARE_PAGE.read_text(encoding="utf-8")
+    assert 'id="analysis-panel"' in source, "分析面板必须有稳定的跳转锚点"
+    assert "scrollIntoView" in source and "dsh:flash-analysis" in source, "应平滑滚动并高亮"
+    assert "查看差异分析" in source, "按钮文案应反映「跳转」而非「询问 Agent」"
+    # 呈现口径：先结论（verdict/key_points）后明细（默认折叠、可展开）；AI 点评随后台补充
+    assert "analysis.verdict" in source and "analysis.key_points" in source
+    assert "展开全部" in source and "收起明细" in source
+    assert "useAiComment" in source and "AI 点评" in source
+    assert "askAgent" in source, "分析不可用时的 Agent 兜底应保留"
+
+
 def test_agent_surface_has_no_official_links():
     """Agent 侧不得再提供官方/来源跳转（2026-09-16 已删除，防止被顺手加回）。
 

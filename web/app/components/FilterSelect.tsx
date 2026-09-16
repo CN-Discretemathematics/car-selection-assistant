@@ -84,7 +84,7 @@ export default function FilterSelect({
 
   const triggerCls =
     "flex h-9 items-center gap-1.5 whitespace-nowrap rounded-full border border-black/[0.08] " +
-    "bg-white/85 px-3.5 text-[13px] text-ink-soft shadow-sm transition-all duration-300 " +
+    "bg-white/85 px-3.5 text-[13px] text-ink-soft shadow-sm transition-[border-color,background-color,box-shadow] duration-300 " +
     "ease-[cubic-bezier(0.25,0.1,0.25,1)] hover:border-apple/35 hover:bg-white " +
     "focus:border-apple focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12";
 

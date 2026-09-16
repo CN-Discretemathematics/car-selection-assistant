@@ -47,7 +47,7 @@ export default function BrowseFilters() {
   }
 
   const inputCls =
-    "h-9 rounded-full border border-black/[0.08] bg-white/85 px-3.5 text-[13px] text-ink-soft shadow-sm transition-all duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)] hover:border-apple/35 hover:bg-white focus:border-apple focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12";
+    "h-9 rounded-full border border-black/[0.08] bg-white/85 px-3.5 text-[13px] text-ink-soft shadow-sm transition-[border-color,background-color,box-shadow] duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)] hover:border-apple/35 hover:bg-white focus:border-apple focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12";
 
   return (
     <div
@@ -84,9 +84,11 @@ export default function BrowseFilters() {
         <div className="flex items-center gap-1">
           <input
             aria-label="最低价（万元）"
+            name="price_min"
+            autoComplete="off"
             type="number"
             min={0}
-            placeholder="最低价(万)"
+            placeholder="最低价(万)…"
             value={form.price_min}
             onChange={(e) => apply({ ...form, price_min: e.target.value })}
             className={`${inputCls} w-28`}
@@ -94,9 +96,11 @@ export default function BrowseFilters() {
           <span className="text-hair">—</span>
           <input
             aria-label="最高价（万元）"
+            name="price_max"
+            autoComplete="off"
             type="number"
             min={0}
-            placeholder="最高价(万)"
+            placeholder="最高价(万)…"
             value={form.price_max}
             onChange={(e) => apply({ ...form, price_max: e.target.value })}
             className={`${inputCls} w-28`}
@@ -110,7 +114,7 @@ export default function BrowseFilters() {
         />
 
         {/* 搜索框固定放在排序右侧：回车即按关键词筛选本页列表 */}
-        <SearchBar placeholder="搜索车系/品牌" className="ml-auto sm:ml-0" />
+        <SearchBar placeholder="搜索车系/品牌…" className="ml-auto sm:ml-0" />
         {searchParams.size > 0 && (
           <button
             type="button"

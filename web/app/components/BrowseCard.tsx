@@ -1,5 +1,13 @@
 import Link from "next/link";
-import { BODY_LABELS, ENERGY_CHIP, ENERGY_LABELS, formatPriceRange, SALES_TYPE_LABELS, type VehicleListItem } from "@/lib/api";
+import {
+  BODY_LABELS,
+  ENERGY_CHIP,
+  ENERGY_LABELS,
+  formatCount,
+  formatPriceRange,
+  SALES_TYPE_LABELS,
+  type VehicleListItem,
+} from "@/lib/api";
 
 /** 全部车型浏览卡片（无排名；点进详情后可加对比）。 */
 export default function BrowseCard({ item }: { item: VehicleListItem }) {
@@ -14,11 +22,13 @@ export default function BrowseCard({ item }: { item: VehicleListItem }) {
           <img
             src={item.thumbnail_url}
             alt={item.series_name}
-            className="h-20 w-28 shrink-0 rounded-2xl border border-black/[0.04] bg-canvas object-contain p-1 transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:scale-[1.06]"
+            width={128}
+            height={96}
+            className="h-24 w-32 shrink-0 rounded-2xl border border-black/[0.04] bg-canvas object-contain p-1 transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] group-hover:scale-[1.06]"
             loading="lazy"
           />
         ) : (
-          <div className="brand-tile flex h-20 w-28 shrink-0 items-center justify-center rounded-2xl text-2xl font-semibold text-apple/30">
+          <div className="brand-tile flex h-24 w-32 shrink-0 items-center justify-center rounded-2xl text-2xl font-semibold text-apple/30">
             {item.series_name.slice(0, 2)}
           </div>
         )}
@@ -45,15 +55,20 @@ export default function BrowseCard({ item }: { item: VehicleListItem }) {
               </span>
             ))}
           </div>
-          <p className="mt-2 text-sm font-medium text-ink-soft">
+          {/* 与首页卡片同一套「仪表读数」：价格主视觉，销量次之 */}
+          <p className="mt-2.5 text-[12px] leading-4 text-ash">官方指导价</p>
+          <p className="truncate text-[21px] font-semibold leading-7 tracking-tight text-ink">
             {item.price_range.min === null && item.price_range.max === null && item.price_range_note
-              ? `官方指导价：${item.price_range_note}`
+              ? item.price_range_note
               : formatPriceRange(item.price_range)}
           </p>
           {item.latest_sales.sales_count != null && (
-            <p className="mt-0.5 text-xs text-ash">
-              {item.latest_sales.month} 销量 {item.latest_sales.sales_count.toLocaleString()} 辆（
-              {SALES_TYPE_LABELS[item.latest_sales.sales_type ?? ""] ?? "口径未标注"}）
+            <p className="mt-1 text-[13px] text-ash">
+              {item.latest_sales.month} 销量{" "}
+              <span className="font-semibold text-ink-soft">
+                {formatCount(item.latest_sales.sales_count)} 辆
+              </span>
+              （{SALES_TYPE_LABELS[item.latest_sales.sales_type ?? ""] ?? "口径未标注"}）
             </p>
           )}
         </div>
@@ -66,7 +81,7 @@ export default function BrowseCard({ item }: { item: VehicleListItem }) {
           </span>
           <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
             更新：{item.data_updated_at ? item.data_updated_at.slice(0, 10) : "未标注"}
-            <span className="hidden text-apple/80 transition-all duration-300 group-hover:translate-x-0.5 sm:inline">
+            <span className="hidden text-apple/80 transition-transform duration-300 group-hover:translate-x-0.5 sm:inline">
               · 查看详情与款型 →
             </span>
           </span>

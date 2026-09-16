@@ -156,7 +156,7 @@ function LoginModal({
   }
 
   const inputCls =
-    "w-full rounded-2xl border border-transparent bg-canvas px-4 py-3 text-sm text-ink transition-all duration-300 placeholder:text-ash/70 focus:border-apple/50 focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12";
+    "w-full rounded-2xl border border-transparent bg-canvas px-4 py-3 text-sm text-ink transition-[border-color,background-color,box-shadow] duration-300 placeholder:text-ash/70 focus:border-apple/50 focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12";
 
   if (typeof document === "undefined") return null;
   return createPortal(
@@ -192,9 +192,12 @@ function LoginModal({
           <div className="mt-5 space-y-3">
             <input
               type="email"
+              name="email"
+              autoComplete="email"
+              spellCheck={false}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="你的邮箱"
+              placeholder="你的邮箱…"
               className={inputCls}
             />
             <button
@@ -209,9 +212,12 @@ function LoginModal({
         ) : (
           <div className="mt-5 space-y-3">
             <input
+              name="code"
+              autoComplete="one-time-code"
+              spellCheck={false}
               value={code}
               onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              placeholder="6 位验证码"
+              placeholder="6 位验证码…"
               inputMode="numeric"
               className={`${inputCls} text-center text-lg tracking-[0.5em]`}
             />

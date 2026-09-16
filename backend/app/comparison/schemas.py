@@ -90,6 +90,20 @@ class AnalysisGapOut(BaseModel):
     note: str = ""
 
 
+class AnalysisKeyPointOut(BaseModel):
+    """关键差异 Top3 的一项：给「先看结论」的用户（label=维度，winner=领先方，gap=差距原文）。"""
+
+    label: str
+    winner: str
+    gap: str
+
+
+class AnalysisAiCommentOut(BaseModel):
+    """LLM 一句话点评：只复述确定性事实；LLM 不可用/越界时为 None（前端回退 verdict）。"""
+
+    ai_comment: str | None = None
+
+
 class ComparisonAnalysisOut(BaseModel):
     """差异分析结果：全部字段都是库内事实的确定性推导（无推测、无编造）。"""
 
@@ -97,5 +111,7 @@ class ComparisonAnalysisOut(BaseModel):
     price: AnalysisDimensionOut | None = None
     dimensions: list[AnalysisDimensionOut] = Field(default_factory=list)
     tradeoffs: list[str] = Field(default_factory=list)
+    verdict: str | None = None
+    key_points: list[AnalysisKeyPointOut] = Field(default_factory=list)
     summary: list[str] = Field(default_factory=list)
     gaps: list[AnalysisGapOut] = Field(default_factory=list)

@@ -12,6 +12,7 @@ import {
   ENERGY_LABELS,
   SALES_TYPE_LABELS,
   fetchServerJson,
+  formatCount,
   formatPrice,
   formatPriceRange,
   type VariantOut,
@@ -120,6 +121,7 @@ export default async function VehiclePage({
               <img
                 src={detail.thumbnail_url}
                 alt={`${detail.brand?.name ?? ""} ${detail.name}`}
+                fetchPriority="high"
                 className="mx-auto max-h-64 w-auto max-w-full rounded-[28px] border border-black/[0.04] bg-white/70 object-contain p-6 shadow-[0_30px_60px_-30px_rgba(0,0,0,0.25)] backdrop-blur-xl"
               />
             </div>
@@ -150,63 +152,61 @@ export default async function VehiclePage({
         </div>
       </section>
 
-      <main className="mx-auto max-w-6xl px-4 sm:px-6">
-        {/* ── 关键数据三联卡 ─────────────────────────────────────────── */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <Reveal className="h-full">
-            <div className="lift glass h-full rounded-[22px] border border-black/[0.05] p-5">
-              <p className="flex items-center gap-1.5 text-xs font-medium text-ash">
-                <span className="h-1.5 w-1.5 rounded-full bg-apple" />
-                官方指导价区间
-              </p>
-              <p className="mt-2.5 text-[22px] font-semibold tracking-tight text-ink">
-                {detail.price_range.min === null && detail.price_range.max === null && detail.price_range_note
-                  ? `官方指导价：${detail.price_range_note}`
-                  : formatPriceRange(detail.price_range)}
-              </p>
-              <p className="mt-1.5 text-xs text-ash">只展示官方指导价，非成交价</p>
-            </div>
-          </Reveal>
-          <Reveal className="h-full" delay={90}>
-            <div className="lift glass h-full rounded-[22px] border border-black/[0.05] p-5">
-              <p className="flex items-center gap-1.5 text-xs font-medium text-ash">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#64d2ff]" />
-                月销量（{sales?.sales_type ? (SALES_TYPE_LABELS[sales.sales_type] ?? sales.sales_type) : "口径未标注"}）
-              </p>
-              <p className="mt-2.5 text-[22px] font-semibold tracking-tight text-ink">
-                {sales?.sales_count != null ? `${sales.sales_count.toLocaleString()} 辆` : "暂无统一公开数据"}
-              </p>
-              <p className="mt-1.5 text-xs text-ash">
-                {sales?.month ? `${sales.month} · 来源：${sales.source_name ?? "未标注"}` : "缺少可靠车型级销量数据"}
-              </p>
-            </div>
-          </Reveal>
-          <Reveal className="h-full" delay={180}>
-            <div className="lift glass h-full rounded-[22px] border border-black/[0.05] p-5">
-              <p className="flex items-center gap-1.5 text-xs font-medium text-ash">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#5e5ce6]" />
-                在售年款
-              </p>
-              <div className="mt-2.5 flex flex-wrap gap-1.5">
-                {detail.model_years.length === 0 ? (
-                  <span className="text-sm text-ash">{MISSING_LABEL}</span>
-                ) : (
-                  detail.model_years.map((y) => (
-                    <span
-                      key={y.id}
-                      className="rounded-full bg-canvas px-2.5 py-1 text-[13px] text-ink-soft ring-1 ring-black/[0.05]"
-                    >
-                      {y.year_name}
-                    </span>
-                  ))
-                )}
+      <main id="main-content" className="mx-auto max-w-6xl px-4 sm:px-6">
+        {/* ── 关键数据带：价格 / 销量 / 年款（发丝线分隔成一条，替代三张独立卡） ── */}
+        <Reveal>
+          <div className="lift glass nums rounded-[22px] border border-black/[0.05]">
+            <div className="grid grid-cols-1 divide-y divide-black/[0.06] sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+              <div className="p-5">
+                <p className="flex items-center gap-1.5 text-xs font-medium text-ash">
+                  <span className="h-1.5 w-1.5 rounded-full bg-apple" />
+                  官方指导价区间
+                </p>
+                <p className="mt-2.5 text-[24px] font-semibold leading-8 tracking-tight text-ink">
+                  {detail.price_range.min === null && detail.price_range.max === null && detail.price_range_note
+                    ? detail.price_range_note
+                    : formatPriceRange(detail.price_range)}
+                </p>
+                <p className="mt-1.5 text-xs text-ash">只展示官方指导价，非成交价</p>
               </div>
-              <p className="mt-1.5 text-xs text-ash">
-                数据更新：{detail.data_updated_at ? detail.data_updated_at.slice(0, 10) : "未标注"}
-              </p>
+              <div className="p-5">
+                <p className="flex items-center gap-1.5 text-xs font-medium text-ash">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#64d2ff]" />
+                  月销量（{sales?.sales_type ? (SALES_TYPE_LABELS[sales.sales_type] ?? sales.sales_type) : "口径未标注"}）
+                </p>
+                <p className="mt-2.5 text-[24px] font-semibold leading-8 tracking-tight text-ink">
+                  {sales?.sales_count != null ? `${formatCount(sales.sales_count)} 辆` : "暂无统一公开数据"}
+                </p>
+                <p className="mt-1.5 text-xs text-ash">
+                  {sales?.month ? `${sales.month} · 来源：${sales.source_name ?? "未标注"}` : "缺少可靠车型级销量数据"}
+                </p>
+              </div>
+              <div className="p-5">
+                <p className="flex items-center gap-1.5 text-xs font-medium text-ash">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#5e5ce6]" />
+                  在售年款
+                </p>
+                <div className="mt-2.5 flex flex-wrap gap-1.5">
+                  {detail.model_years.length === 0 ? (
+                    <span className="text-sm text-ash">{MISSING_LABEL}</span>
+                  ) : (
+                    detail.model_years.map((y) => (
+                      <span
+                        key={y.id}
+                        className="rounded-full bg-canvas px-2.5 py-1 text-[13px] text-ink-soft ring-1 ring-black/[0.05]"
+                      >
+                        {y.year_name}
+                      </span>
+                    ))
+                  )}
+                </div>
+                <p className="mt-1.5 text-xs text-ash">
+                  数据更新：{detail.data_updated_at ? detail.data_updated_at.slice(0, 10) : "未标注"}
+                </p>
+              </div>
             </div>
-          </Reveal>
-        </div>
+          </div>
+        </Reveal>
 
         {/* ── 在售款型 ───────────────────────────────────────────────── */}
         <Reveal className="mt-14 flex items-baseline gap-2.5">
@@ -229,10 +229,10 @@ export default async function VehiclePage({
               key={v.id}
               id={`variant-${v.id}`}
               delay={Math.min(index, 8) * 70}
-              className="h-full"
+              className="h-full scroll-mt-20"
             >
               <div
-                className={`lift h-full rounded-[22px] border bg-white/85 p-6 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl ${
+                className={`lift nums h-full rounded-[22px] border bg-white/85 p-6 shadow-[0_2px_16px_-6px_rgba(0,0,0,0.06)] backdrop-blur-xl ${
                   v.id === highlightVariant
                     ? "animate-ring border-apple/60 ring-2 ring-apple/15"
                     : "border-black/[0.06] hover:border-apple/25 hover:bg-white"
@@ -251,7 +251,8 @@ export default async function VehiclePage({
                     <AddToCompareButton variantId={v.id} />
                   </div>
                 </div>
-                <p className="text-gradient mt-4 text-[28px] font-semibold tracking-tight">
+                <p className="mt-4 text-[12px] leading-4 text-ash">官方指导价</p>
+                <p className="mt-0.5 text-[26px] font-semibold leading-8 tracking-tight text-ink">
                   {v.official_price ? formatPrice(v.official_price.price_cny) : MISSING_LABEL}
                 </p>
                 <div className="mt-4 grid grid-cols-2 gap-x-5 gap-y-0 text-[13px]">

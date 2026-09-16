@@ -6,7 +6,7 @@ import HomeFilters from "./components/HomeFilters";
 import Reveal from "./components/Reveal";
 import RiseText from "./components/RiseText";
 import SiteHeader from "./components/SiteHeader";
-import { fetchServerListWithTotal, SALES_TYPE_LABELS, type HomeCard } from "@/lib/api";
+import { fetchServerListWithTotal, formatCount, SALES_TYPE_LABELS, type HomeCard } from "@/lib/api";
 
 interface SearchParams {
   q?: string;
@@ -60,6 +60,8 @@ export default async function HomePage({
     : "";
   // 销量条可视化基准 = 列表内最大销量（不改变数据，仅做相对宽度）
   const maxSalesCount = cards.reduce((acc, c) => Math.max(acc, c.sales_count ?? 0), 0);
+  // Hero 冠军带：榜单第一名直出——用真实数据做 hero 素材，而不是放大数字+小标签的装饰
+  const champion = cards.find((c) => c.rank === 1) ?? null;
 
   return (
     <div>
@@ -75,7 +77,7 @@ export default async function HomePage({
           <h1 className="mx-auto mt-4 max-w-3xl text-[38px] font-semibold leading-[1.14] tracking-tight text-ink sm:text-[56px]">
             <RiseText text="找到适合你的" startDelay={160} />
             <br />
-            <RiseText text="那一款车" gradient startDelay={560} />
+            <RiseText text="那一款车" startDelay={560} />
           </h1>
           <p
             className="animate-fade-up mx-auto mt-5 max-w-xl text-[15px] leading-7 text-ash sm:text-base"
@@ -103,10 +105,27 @@ export default async function HomePage({
               </span>
             )}
           </div>
+
+          {/* 本期销冠带：真实榜单第一名直出，点击进详情 */}
+          {champion && (
+            <Link
+              href={`/vehicles/${champion.series_id}`}
+              className="glass press animate-fade-up mx-auto mt-4 flex w-fit max-w-full flex-wrap items-center justify-center gap-x-2.5 gap-y-1 rounded-full border border-black/[0.05] px-5 py-2.5"
+              style={{ animationDelay: "1150ms" }}
+            >
+              <span className="text-xs font-medium text-ash">本期销冠</span>
+              <span className="text-sm font-semibold text-ink">{champion.series_name}</span>
+              {champion.sales_count != null && (
+                <span className="nums text-[13px] text-ash">
+                  月销 <span className="font-semibold text-ink">{formatCount(champion.sales_count)}</span> 辆
+                </span>
+              )}
+            </Link>
+          )}
         </div>
       </section>
 
-      <main className="mx-auto max-w-6xl px-4 sm:px-6">
+      <main id="main-content" className="mx-auto max-w-6xl px-4 sm:px-6">
         <Suspense
           fallback={
             <div className="h-16 animate-pulse rounded-3xl bg-white/60" aria-label="加载筛选器" />
