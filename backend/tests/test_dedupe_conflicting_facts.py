@@ -34,6 +34,11 @@ FIXTURES = [
     [_fact("最大功率(kW)", "100", "kW"), _fact("最大功率(kW)", "110", "kW")],
     [_fact("最大扭矩(N·m)", "188", None), _fact("最大扭矩(N·m)", "205", None),
      _fact("最大扭矩(N·m)", "188", None)],
+    # 同义不同粒度（车身结构）：保留信息量最大的那个
+    [_fact("车身结构", "两厢车"), _fact("车身结构", "5门5座两厢车")],
+    [_fact("车身结构", "5门5座两厢车"), _fact("车身结构", "两厢车")],
+    # 非包含关系（保留全部，交分析层标存疑）
+    [_fact("车身结构", "两厢车"), _fact("车身结构", "三厢车")],
 ]
 
 
@@ -50,3 +55,14 @@ def test_rules_are_conservative_on_uncovered_conflicts():
     facts = [_fact("最大功率(kW)", "100", "kW"), _fact("最大功率(kW)", "110", "kW")]
     assert len(tool_dedupe(facts)) == 2
     assert len(parser_dedupe(facts)) == 2
+
+
+def test_dedupe_keeps_most_specific_for_substring_values():
+    """同义不同粒度：保留信息量最大的值（车身结构 5门5座两厢车 ⊃ 两厢车）。"""
+    out = tool_dedupe([_fact("车身结构", "两厢车"), _fact("车身结构", "5门5座两厢车")])
+    assert len(out) == 1 and out[0]["value"] == "5门5座两厢车"
+
+    # 非包含关系不适用该规则 → 保留全部（交分析层标存疑）
+    kept = tool_dedupe([_fact("车身结构", "两厢车"), _fact("车身结构", "三厢车")])
+    assert len(kept) == 2
+    assert len(parser_dedupe([_fact("车身结构", "两厢车"), _fact("车身结构", "三厢车")])) == 2

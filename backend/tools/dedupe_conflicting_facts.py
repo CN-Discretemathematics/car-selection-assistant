@@ -56,6 +56,14 @@ def dedupe_duplicate_keys(facts: list[dict]) -> list[dict]:
         if len(distinct) == 1:
             out.append(group[0])
             continue
+        # 同义不同粒度（如 车身结构「5门5座两厢车」⊃「两厢车」）→ 保留信息量最大的那个
+        longest = max(distinct, key=len)
+        if all(value == longest or value in longest for value in distinct):
+            for fact in group:
+                if str(fact.get("value") or "").strip() == longest:
+                    out.append(fact)
+                    break
+            continue
         covered = lambda value: any(  # noqa: E731
             value in values_by_key.get(sibling, set())
             for sibling in DEDUPE_PREFERRED_KEYS if sibling != key

@@ -3,7 +3,7 @@
 - 用途：把官方车型数据导入数据库，保证枚举、必填与来源优先级正确。
 - 来源：阶段 3 沉淀（对应 `backend/app/sources/importer.py`、`fetcher.py`）。
 - 适用阶段：3（车辆数据中心）。
-- 最后验证：2026-09（355 用例全绿）。
+- 最后验证：2026-09（356 用例全绿）。
 
 ## 步骤
 
@@ -142,6 +142,19 @@ curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" -H 'Content-Type: appli
 `pytest tests/test_autohome_sku.py tests/test_comparison_analysis.py tests/test_dedupe_conflicting_facts.py`
 —— 其中 `test_conflicting_duplicate_keys_are_flagged_not_compared` 复现事故数据形态，
 `test_tool_and_parser_rules_agree` 保证解析层与修复工具的规则不漂移。
+
+**第二批清理（同义不同粒度）**：车身结构等同名参数在源页面出现两种粒度
+（`5门5座两厢车` 与 `两厢车`）——规则扩展为「一个值包含其余全部值时保留信息量最大的那个」，
+已清理 6,400 行（留档 `dedupe_backup_substring.json`）。详情页不再重复展示该参数。
+
+**尚未解决（下一步，根因已定位）**：仍有 **818 组「最大功率(kW)」+ 712 组「最大扭矩(N·m)」**
+冲突（约 932 个款型、占 12%），样例：发动机 112 kW 与系统综合 200/365 kW 同键并存。
+根因：源接口**本身带可区分信息**——两个同名项分属不同 `itemtype`（`发动机` / `电动机`），
+而 `parse_sku_config` 用 `category = groupname or itemtype` 把 `itemtype` 丢掉了
+（两个分组的 `groupname` 都是「参数信息」）。修法：解析时保留 `itemtype`，
+对「去重后仍冲突」的同名项按 itemtype 加前缀（如 `发动机-最大功率(kW)`），
+让规范键（`最大功率(kW)`）确定性地指向源页面靠前的那一项；存量数据需要按车系重抓一次。
+在那之前，引擎的「存疑」守卫保证不会输出假差异。
 
 **延伸检查**：任何「按 fact_key 建 dict 再取值」的代码都要问一句——同键多行时取哪一行？
 （`catalog/series_index.py`、`agent/tools.py` 的同类取值也应按同一原则复核。）

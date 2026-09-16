@@ -449,9 +449,11 @@ def dedupe_duplicate_keys(facts: list[dict]) -> list[dict]:
     （两款实际同为 144kW）。规则：
 
     1. 同键各值相同 → 只保留一行（源页面重复项，无信息损失）；
-    2. 值不同，但**每个**值都能在同款型的更具体键里读到（系统综合功率/发动机最大功率/
+    2. 值不同但**同义不同粒度**（如 车身结构「5门5座两厢车」包含「两厢车」）→ 保留信息量
+       最大的那个（被丢弃的值字面上是它的子串，零信息损失）；
+    3. 值不同，但**每个**值都能在同款型的更具体键里读到（系统综合功率/发动机最大功率/
        净功率/电动机总功率）→ 只保留优先键覆盖的那一行；
-    3. 有任何值无处承载 → 全部保留（不丢数据），由分析层标注「存疑、不参与比较」。
+    4. 有任何值不满足上述条件 → 全部保留（不丢数据），由分析层标注「存疑、不参与比较」。
     """
     by_key: dict[str, list[dict]] = {}
     for fact in facts:
@@ -468,6 +470,15 @@ def dedupe_duplicate_keys(facts: list[dict]) -> list[dict]:
         distinct = {str(f.get("value") or "").strip() for f in group}
         if len(distinct) == 1:
             out.append(group[0])
+            continue
+
+        # ② 同义不同粒度：存在一个值包含其余全部值 → 保留它（它自带全部信息）
+        longest = max(distinct, key=len)
+        if all(value == longest or value in longest for value in distinct):
+            for fact in group:
+                if str(fact.get("value") or "").strip() == longest:
+                    out.append(fact)
+                    break
             continue
 
         def covered(value: str) -> bool:
