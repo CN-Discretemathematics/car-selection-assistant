@@ -11,6 +11,7 @@ from app.sources.autohome_sku import (
     dedupe_duplicate_keys,
     ev_evidence,
     has_engine_evidence,
+    namespace_duplicate_keys,
     normalize_displacement,
     normalize_price_note,
     parse_series_index,
@@ -477,3 +478,87 @@ def test_dedupe_keeps_all_when_value_has_no_other_home():
     facts = [_fact("最大功率(kW)", "100", "kW"), _fact("最大功率(kW)", "110", "kW")]
     out = dedupe_duplicate_keys(facts)
     assert len(out) == 2, out
+
+
+# ── itemtype 区分同名参数（2026-09-16 假差异事故的根治） ─────────────────────────
+
+def test_parse_sku_config_keeps_itemtype():
+    """解析结果必须携带 itemtype（同名参数的唯一区分依据）。"""
+    parsed = parse_sku_config(_sku_result_fixture())
+    motor_items = [
+        item for g in parsed["groups"] if g["category"] == "参数信息"
+        for item in g["items"] if item["key"] == "电动机总功率(kW)"
+    ]
+    assert motor_items and all(item["itemtype"] == "电动机" for item in motor_items)
+
+
+def test_namespace_duplicate_keys_by_itemtype():
+    """去重后仍同键的（发动机 112 与系统综合 200 并存）→ 第 2 项加发动机前缀；
+    规范键指向源页面靠前的系统综合口径，且值原样保留（零信息损失）。"""
+    facts = [
+        {**_fact("最大功率(kW)", "200", "kW"), "itemtype": "电动机"},
+        {**_fact("最大功率(kW)", "112", "kW"), "itemtype": "发动机"},
+        _fact("系统综合功率(kW)", "200", "kW"),
+    ]
+    out = namespace_duplicate_keys(facts)
+    keys = [f["fact_key"] for f in out]
+    assert keys.count("最大功率(kW)") == 1
+    assert "发动机-最大功率(kW)" in keys, keys
+    values = {f["fact_key"]: f["value"] for f in out}
+    assert values["最大功率(kW)"] == "200"
+    assert values["发动机-最大功率(kW)"] == "112"
+
+
+def test_namespace_falls_back_without_itemtype():
+    """itemtype 缺失时用（重复N）后缀，保证键不冲突。"""
+    facts = [_fact("最大功率(kW)", "200", "kW"), _fact("最大功率(kW)", "112", "kW")]
+    out = namespace_duplicate_keys(facts)
+    keys = [f["fact_key"] for f in out]
+    assert len(keys) == len(set(keys)), keys
+    assert keys[0] == "最大功率(kW)"
+
+
+def test_build_sku_payload_namespaces_conflicting_power():
+    """端到端（解析 → 载荷）：两组同名 最大功率(kW)（电动机 200 / 发动机 112）
+    产出 规范键=200 与 发动机-最大功率(kW)=112，而不是两行同键冲突值。"""
+    result = {
+        "conditionlist": [
+            {"typevalue": "year", "name": "年款", "list": [{"name": "2026款", "id": "2026"}]},
+            {"typevalue": "displacement", "name": "排量", "list": [{"name": "新能源", "id": "新能源"}]},
+            {"typevalue": "gearbox", "name": "变速箱", "list": [{"name": "自动", "id": "自动"}]},
+            {"typevalue": "standards", "name": "环保标准", "list": [{"name": "国标", "id": "国标"}]},
+            {"typevalue": "cartype", "name": "车体结构", "list": [{"name": "SUV", "id": "SUV"}]},
+            {"typevalue": "drivemode", "name": "驱动方式", "list": [{"name": "前置前驱", "id": "前置前驱"}]},
+            {"typevalue": "seatcount", "name": "座位数", "list": [{"name": "5座", "id": "5"}]},
+        ],
+        "paramitems": [
+            {"itemtype": "电动机", "groupname": "参数信息", "items": [
+                {"name": "最大功率(kW)", "paramitemid": 50,
+                 "modelexcessids": [{"id": 1, "value": "200"}]},
+                {"name": "系统综合功率(kW)", "paramitemid": 52,
+                 "modelexcessids": [{"id": 1, "value": "200"}]},
+            ]},
+            {"itemtype": "发动机", "groupname": "参数信息", "items": [
+                {"name": "最大功率(kW)", "paramitemid": 51,
+                 "modelexcessids": [{"id": 1, "value": "112"}]},
+            ]},
+        ],
+        "configitems": [],
+        "specinfo": {"specitems": [
+            {"specid": 1, "year": 2026, "noshowprice": 219800,
+             "specname": "2026款 试装版", "condition": ["新能源", "SUV", "自动", "国标", "SUV", "前置前驱", "5座"],
+             "specstatus": 20},
+        ]},
+    }
+    parsed = parse_sku_config(result)
+    payload = build_sku_payload(
+        {"name": "测试品牌", "brand_type": "domestic_nev", "inclusion_reason": "测试"},
+        {"external_id": "9998", "name": "测试车系", "energy_types": ["PHEV"]},
+        parsed,
+        "https://car.m.autohome.com.cn/config/series/9998.html",
+    )
+    facts = payload["series"][0]["model_years"][0]["variants"][0]["facts"]
+    powers = [f for f in facts if f["fact_key"].endswith("最大功率(kW)")]
+    by_key = {f["fact_key"]: f["value"] for f in powers}
+    assert by_key.get("最大功率(kW)") == "200", by_key
+    assert by_key.get("发动机-最大功率(kW)") == "112", by_key
