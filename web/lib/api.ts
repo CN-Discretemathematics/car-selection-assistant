@@ -153,6 +153,8 @@ export interface Clarification {
   missing: string[];
 }
 
+/** 推荐/版本罗列卡片：不含官方车型页链接（该数据无法从现有来源获得，
+ * Agent 侧不提供任何外部跳转，见 skills/sku-comparison.md）。 */
 export interface RecommendedVariant {
   variant_id: number;
   series_id: number;
@@ -164,7 +166,6 @@ export interface RecommendedVariant {
   score: number;
   matched: string[];
   tradeoffs: string[];
-  official_page_url: string | null;
 }
 
 export interface AgentMessageOut {
@@ -177,7 +178,6 @@ export interface AgentMessageOut {
   reasons: string[];
   tradeoffs: string[];
   citations: Citation[];
-  official_links: string[];
   explanation: string | null;
 }
 

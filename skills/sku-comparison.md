@@ -25,12 +25,19 @@
   （`kind=official|source`，官方优先，判定在后端，缺失时回退「查看数据来源」，
   由 `external_series_refs` 的来源名 + 外部 id 确定性拼出，**不得冒充品牌官网**）。
 
-## 待产品确认项（Agent 侧外部入口）
+## Agent 侧外部入口（2026-09-16 已删除）
 
-Agent 协议里仍有 `AgentMessageOut.official_links` 与 `RecommendedVariant.official_page_url`
-（`backend/app/agent/engine.py` 推荐 / 同车系版本罗列 / 车系问答三个分支在填），
-前端只有 `web/app/components/AgentChat.tsx` 的推荐卡片会渲染 `official_page_url`
-（顶层 `official_links` 前端从未渲染）。当前数据恒空 → 实际不显示；
-**一旦上游补上官方 URL，推荐卡片会自动重新出现「官方车型页 ↗」**。
-是否把「对比时避免提及」也扩展到 Agent 侧，属产品口径问题，未擅自改动——
-要改的话，删除面是：AgentChat 卡片链接 + 后端三处填充 + 工具 `official_link_tool`。
+用户口径：「官方链接能轻松收集就保留，不能就删掉，以汽车之家与已入库数据为准」。
+实测结论是**不能轻松收集**（唯一来源汽车之家不提供该字段，见 `docs/deployment.md` §8），
+因此已删除 Agent 侧全部官方链接面：
+`app/agent/tools.py` 的 `official_link_tool`（连同 `TOOL_SCHEMAS` 里的一项与引擎分发）、
+`AgentMessageOut.official_links`、`RecommendedVariant.official_page_url`、
+`web/app/components/AgentChat.tsx` 推荐卡片的「官方车型页 ↗」链接，
+以及 `build_variant_diff_answer` 里「可先到品牌官网查看配置表」与同级别小结里
+「或到品牌官网查看具体款型配置表」**两处**指向品牌官网的建议语
+（免责声明「具体以品牌官网为准」保留，与全站 footer 一致）。
+Agent 现在只用库内事实回答，不提供任何外部跳转。详情页 `external_link` 保留（数据驱动）。
+
+已知但未改（口径不彻底处，非用户可见）：`retrieval_search` 的出参里仍有 `source_url`
+（RAG 切片元数据，线上该字段恒空），它会随证据一起进入 LLM 上下文，但系统提示明确
+「不要输出来源 id 或链接」，且面向用户的 `Citation` 只有来源名与标签，不渲染 URL。

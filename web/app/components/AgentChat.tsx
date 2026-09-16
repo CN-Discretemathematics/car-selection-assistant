@@ -439,16 +439,6 @@ function RecommendationCard({ variant }: { variant: RecommendedVariant }) {
           查看详情
         </Link>
         <AddFromAgent variantId={variant.variant_id} />
-        {variant.official_page_url && (
-          <a
-            href={variant.official_page_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="press rounded-full border border-black/[0.08] bg-white px-3 py-1 text-xs text-ink-soft hover:border-apple/35 hover:text-apple"
-          >
-            官方车型页 ↗
-          </a>
-        )}
       </div>
     </div>
   );

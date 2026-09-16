@@ -57,3 +57,22 @@ def test_compare_page_has_no_external_entry():
     source = COMPARE_PAGE.read_text(encoding="utf-8")
     for token in ("official_page_url", "external_link", "source_page_url", "官方车型页", "数据来源"):
         assert token not in source, f"对比页不应出现 {token}"
+
+
+def test_agent_surface_has_no_official_links():
+    """Agent 侧不得再提供官方/来源跳转（2026-09-16 已删除，防止被顺手加回）。
+
+    判断依据：官方车型页链接无法从现有唯一来源（汽车之家）获得，用户口径是
+    「不能轻松收集就删掉，以汽车之家与已入库数据为准」。
+    """
+    backend_app = Path(__file__).resolve().parents[1] / "app"
+    tools_src = (backend_app / "agent" / "tools.py").read_text(encoding="utf-8")
+    schemas_src = (backend_app / "agent" / "schemas.py").read_text(encoding="utf-8")
+    engine_src = (backend_app / "agent" / "engine.py").read_text(encoding="utf-8")
+    chat_src = (WEB_APP / "components" / "AgentChat.tsx").read_text(encoding="utf-8")
+
+    assert "official_link_tool" not in tools_src, "官方车型页链接工具应已删除"
+    assert "official_links: list[str]" not in schemas_src, "AgentMessageOut 不应再有 official_links"
+    assert "official_page_url: str" not in schemas_src, "RecommendedVariant 不应再有 official_page_url"
+    assert "official_links=" not in engine_src, "引擎不应再填充 official_links"
+    assert "official_page_url" not in chat_src, "推荐卡片不应再渲染官方车型页链接"
