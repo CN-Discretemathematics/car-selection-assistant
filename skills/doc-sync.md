@@ -2,16 +2,20 @@
 
 来源：2026-09-15 文档对齐轮（一次性修复 20+ 处漂移后沉淀，含 UTF-16 编码事故）。
 适用阶段：全阶段（交付流程类 skill，属开发侧，不进用户侧 Agent 注入集）。
-可执行检查：`skills/doc_sync_check.py`（只读，FAIL 时退出码 1）。
+可执行检查：`skills/doc_sync_check.py`（只读，FAIL 时退出码 1）；**已接入 CI**
+（`.github/workflows/ci.yml` 的 gates job，PR 阶段即拦截）。
 
 ## 为什么需要（真实事故）
 
 文档是「代码的旧快照」，会以四种方式静默烂掉：
 
 1. **计数漂移**：README 写 289 用例、DELIVERY 写 189/179——实际已 298；「7 个迁移」实际 8 个；
+   2026-09-16 复发一次：README 写 313 用例、实际已 347（当天新增 5 个分支的功能都没同步），
+   说明「靠 Agent 记得跑」不够可靠——所以本检查已接进 CI，见下。
 2. **悬空引用**：DEPLOYMENT.md 引用 `deploy/systemd/*.service`、`deploy/deploy.sh`、
    `tools/replace_sample_data.py`、`register_sales_task.ps1`——文件早已删除；RAG.md 开头引用
-   断成空反引号；
+   断成空反引号；2026-09-16 又出现**反例**：根级 `tools/pre-push-guard.py` 真实存在却被误报
+   悬空（检查器的 `ROOT_PREFIXES` 不认识新增的根级 `tools/`）——说明检查器自身也要随结构演进维护。
 3. **口径冲突**：RAG_TECH_SELECTION.md 写「路权重按 query_type 分路」，实现早已统一 0.6/0.4；
    RAG.md 环境变量表漏掉 `RETRIEVAL_TOKENIZER` / `RERANK_API_PATH` / `RETRIEVAL_RRF_WEIGHT_*`；
 4. **编码损坏**：CHANGES.md、RAG_TECH_SELECTION.md 被 PowerShell `>` 重定向写成 UTF-16，
@@ -19,6 +23,8 @@
 
 ## 触发时机（自动执行，不需要人提）
 
+- **CI（已接线，最可靠）**：`.github/workflows/ci.yml` 的 gates job 在每次 PR 与 main push 上
+  运行本检查——文档漂移会在 PR 阶段被拦下，不再依赖「Agent 记得跑」；
 - **会话开始**：`git log --oneline -5` / `git status` 显示有新提交或代码改动（`backend/`、
   `web/`、`deploy/` 下文件），且尚未跑过本轮检查；
 - **代码改动任务完成时**：本次会话改过任何代码文件，收尾前必跑；

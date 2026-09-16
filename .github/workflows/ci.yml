@@ -47,7 +47,7 @@ jobs:
         run: python -m pytest -q
 
   gates:
-    name: gates (secrets + ui-copy)
+    name: gates (secrets + ui-copy + doc-sync)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -59,6 +59,11 @@ jobs:
         run: python reviewer/scan_secrets.py
       - name: 用户可见文案门禁（退出码必须 0）
         run: python reviewer/scan_ui_copy.py
+      # 文档与代码一致性（计数/迁移数/工具数/结构/悬空路径/编码/过期表述）。
+      # CI 无 backend/.venv，用例数一项自动跳过（WARN），其余检查照常生效——
+      # 本次事故（README 用例数 313 与实际 347 漂移）即由这道门禁在本地抓到。
+      - name: 文档一致性门禁（退出码必须 0）
+        run: python skills/doc_sync_check.py
 
   web:
     name: web (tsc + build)

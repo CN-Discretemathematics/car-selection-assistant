@@ -34,7 +34,9 @@
 - backend：`backend\.venv\Scripts\python.exe -m pytest -q`（在 `backend/` 下）
 - web：`pnpm --dir web exec tsc --noEmit`；改 UI 后按需 `next build`（先停 `next dev`，
   两者共用 `.next` 会互相破坏）
-- 文案/密钥门禁：`reviewer/scan_ui_copy.py`、`reviewer/scan_secrets.py`
+- 文案/密钥/文档门禁：`reviewer/scan_ui_copy.py`、`reviewer/scan_secrets.py`、
+  `skills/doc_sync_check.py`（计数/悬空引用/配置表/编码；退出码必须 0，CI gates job 已接线。
+  2026-09-16 实例：README 用例数 313 未随实际 347 更新，就是它抓出来的）
 - 端到端判据先定义再动手（真后端 + 真 DOM 断言），参考 `skills/` 同类脚本。
 
 ## 其他
