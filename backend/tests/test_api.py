@@ -247,8 +247,10 @@ def test_comparison_lifecycle_and_common_params(client: TestClient, db_session: 
     body = client.get(f"/api/v1/comparisons/{comparison_id}").json()
     assert body["variant_ids"] == [v_low.id, v_high.id]
     assert len(body["variants"]) == 2
-    # 对比结果带官方车型页链接（§11.1 从对比结果进入官方车型页）
-    assert all(v["official_page_url"] == "https://example.com/series" for v in body["variants"])
+    # 对比场景不展示外部跳转入口：响应里不得出现官方车型页/来源页字段
+    # （口径见 skills/sku-comparison.md；入口只在详情页）
+    assert all("official_page_url" not in v for v in body["variants"])
+    assert all("external_link" not in v and "source_page_url" not in v for v in body["variants"])
     # 150 kW 与 150千瓦 归一化后相同 → 隐藏相同参数
     common_keys = {(p["category"], p["fact_key"]) for p in body["common_params"]}
     assert ("动力", "power_kw") in common_keys

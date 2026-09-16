@@ -7,12 +7,17 @@
   「又把入口写回 official_page_url && …」或「两个 kind 用了同一个标签」这类回归，
   渲染级验证脚本又在 gitignored 的 `.tools/` 里、CI 看不到。所以这里退一步：
   直接对详情页源码做契约断言（改动只需同步这几条字符串）。
+
+同一文件里也守住反向口径：**对比页不得出现外部跳转入口**（用户 2026-09-16 的决定：
+对比场景不提及官方车型页/来源页链接）。
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-DETAIL_PAGE = Path(__file__).resolve().parents[2] / "web" / "app" / "vehicles" / "[series_id]" / "page.tsx"
+WEB_APP = Path(__file__).resolve().parents[2] / "web" / "app"
+DETAIL_PAGE = WEB_APP / "vehicles" / "[series_id]" / "page.tsx"
+COMPARE_PAGE = WEB_APP / "compare" / "page.tsx"
 
 
 def _source() -> str:
@@ -41,3 +46,14 @@ def test_detail_page_external_link_attributes():
     source = _source()
     assert 'target="_blank"' in source
     assert 'rel="noopener noreferrer"' in source
+
+
+def test_compare_page_has_no_external_entry():
+    """对比页不得出现外部跳转入口（官方车型页 / 数据来源页都不提）。
+
+    用户 2026-09-16 的口径：官方链接数据为空、对比场景不补来源兜底，改为**不提及**这类信息；
+    入口只保留在详情页。这条断言防止有人「顺手」把链接加回对比表。
+    """
+    source = COMPARE_PAGE.read_text(encoding="utf-8")
+    for token in ("official_page_url", "external_link", "source_page_url", "官方车型页", "数据来源"):
+        assert token not in source, f"对比页不应出现 {token}"

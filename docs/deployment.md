@@ -241,8 +241,11 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
   官方优先，判定在后端、由 pytest 守），官方缺失时回退「查看数据来源」——
   由 `external_series_refs` 的来源名 + 外部 id 确定性拼出
   （`external_series_refs` 覆盖 **1078/1078** 车系，2026-09-16 只读核查 → `https://www.autohome.com.cn/{external_id}/`），
-  如实标注为数据来源、**不冒充品牌官网**。对比页与 Agent 回复
-  目前仍只显示官方链接（无来源兜底，属已知缺口）。
+  如实标注为数据来源、**不冒充品牌官网**。**对比场景不展示任何外部跳转入口**
+  （对比接口 `CompareVariantOut` 已不返回 `official_page_url`，对比表也不渲染链接；
+  用户 2026-09-16 的口径：对比时避免提及这类信息）。Agent 侧仍保留 `official_links` 字段与
+  推荐卡片的 `official_page_url` 条件渲染代码（数据恒空 → 当前不渲染；上游补到官方 URL 后
+  会自动出现，是否纳入「不提及」口径属**待产品确认项**，见 `skills/sku-comparison.md`）。
 
 - **`web/public/` 曾被漏掉**：`deploy/frontend.Dockerfile` 会 `COPY .../web/public ./public`，
   但仓库此前未跟踪该目录——全新克隆构建必失败（服务器靠手工 `.gitkeep` 侥幸可用）。
