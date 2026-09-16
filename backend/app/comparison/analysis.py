@@ -110,6 +110,11 @@ class _Variant:
     price: float | None
     energy_type: str | None
     facts: dict[str, dict] = field(default_factory=dict)
+    # 同名参数在库内存在多个不同取值（如混动车的「最大功率(kW)」既有系统综合 144
+    # 又有发动机净功率 116）→ key → 去重后的取值列表。这类维度必须标注存疑、不参与比较：
+    # 任选一行都会凭空造出差异（2026-09-16 实测事故：卡罗拉锐放两款实际同为 144kW，
+    # 却因两行覆盖顺序不同得出「144 vs 116、差 24%」）。
+    conflicting_keys: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def short(self) -> str:
@@ -178,7 +183,19 @@ def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
 
     variants: list[_Variant] = []
     for row in rows:
-        facts = {f["fact_key"]: f for f in row.get("facts") or []}
+        by_key: dict[str, list[dict]] = {}
+        for fact in row.get("facts") or []:
+            by_key.setdefault(str(fact.get("fact_key") or ""), []).append(fact)
+        facts: dict[str, dict] = {}
+        conflicting_keys: dict[str, list[str]] = {}
+        for key, group in by_key.items():
+            # 同键多行：按（单位、取值）稳定排序后取首个 —— 结果不依赖 DB 返回顺序
+            # （原实现直接 dict 覆盖，取值随行序漂移，正是假差异的来源）
+            group.sort(key=lambda f: (_unit_of(f) or "", str(f.get("value") or "")))
+            facts[key] = group[0]
+            distinct = sorted({str(f.get("value") or "").strip() for f in group if str(f.get("value") or "").strip()})
+            if len(distinct) > 1:
+                conflicting_keys[key] = distinct
         variants.append(
             _Variant(
                 variant_id=row["variant_id"],
@@ -186,6 +203,7 @@ def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
                 price=row.get("official_price"),
                 energy_type=row.get("energy_type"),
                 facts=facts,
+                conflicting_keys=conflicting_keys,
             )
         )
 
@@ -197,6 +215,42 @@ def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
 
     for dim in DIMENSIONS:
         picked = {v.variant_id: _pick_fact(v.facts, dim) for v in variants}
+
+        # ① 同键多值冲突（库内同名参数有两个不同取值）：只列示、不比较——
+        #    任选一行都会造出假差异，宁可标注存疑并让用户看到冲突本身
+        suspect = {
+            v.variant_id: v.conflicting_keys.get(str((picked[v.variant_id] or {}).get("fact_key") or ""))
+            for v in variants
+        }
+        if any(suspect.values()):
+            note = "库内同一参数存在多个不同取值（" + "；".join(
+                f"{v.label}：{' / '.join(suspect[v.variant_id] or [])}"
+                for v in variants if suspect[v.variant_id]
+            ) + "），已标注存疑、不参与比较"
+            values = []
+            for v in variants:
+                fact = picked[v.variant_id]
+                conflicting = suspect[v.variant_id]
+                if conflicting:
+                    display = f"存疑（{' / '.join(conflicting)}）"
+                elif fact:
+                    display = f"{str(fact.get('value') or '').strip()}{_unit_of(fact) or ''}"
+                else:
+                    display = MISSING_VALUE_LABEL
+                values.append({
+                    "variant_id": v.variant_id,
+                    "display": display,
+                    "raw": None,
+                    "leader": False,
+                    "source_id": (fact or {}).get("source_id"),
+                    "fact_key": (fact or {}).get("fact_key"),
+                })
+            dimensions.append({
+                "key": dim.key, "label": dim.label, "why": dim.why, "values": values,
+                "significant": False, "gap": None, "note": note,
+            })
+            continue
+
         missing = [v.label for v in variants if picked[v.variant_id] is None]
         if len(missing) == len(variants):
             continue  # 全体都没有这个维度 → 整个维度不呈现（不是缺口，是没这项数据）

@@ -3,7 +3,7 @@
 - 用途：把官方车型数据导入数据库，保证枚举、必填与来源优先级正确。
 - 来源：阶段 3 沉淀（对应 `backend/app/sources/importer.py`、`fetcher.py`）。
 - 适用阶段：3（车辆数据中心）。
-- 最后验证：2026-09（313 用例全绿）。
+- 最后验证：2026-09（355 用例全绿）。
 
 ## 步骤
 
@@ -110,3 +110,38 @@ curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" -H 'Content-Type: appli
 
 重建后按 `/admin/rag/status` 核对：`dense.chunks == sparse.chunks`，且摘要切片能被检索到
 （用 `get_dense_backend().search("秦PLUS 月销量")` 抽查命中文本是否含「月销量」）。
+
+## 同名参数（同键多值）会凭空造出假差异（2026-09-16 事故沉淀）
+
+**事故**：用户在对比页看到「卡罗拉锐放 先锋版 144kW ★ 领先 精英版 116kW，差 24%」，
+但两款实际同为 144kW。核查结论：**不是 AI 编造**——AI 点评被约束为零新增数字，
+那组数字来自确定性分析层，最终来自库里的 `spec_facts`。
+
+**根因链**（三层，缺一层都不会出事）：
+
+1. **源页面本身有重名项**：汽车之家参数页对混动车给出**两行同名「最大功率(kW)」**
+   ——系统综合 144 与发动机净功率 116（二者在页面上另有 `系统综合功率(kW)` /
+   `最大净功率(kW)` 专键承载）。实测该页共 5 个重名参数（能源类型/环保标准/最大功率/
+   最大扭矩/车身结构）。
+2. **解析器把 param 名直接当 fact_key**：`build_sku_payload` 逐项追加 → 同款型同键存两行
+   不同值（全库实测 7,875 个款型、35,305 行可安全去重）。
+3. **分析引擎用 dict 覆盖取值**：`{f["fact_key"]: f for f in facts}` 让后一行覆盖前一行，
+   而查询没有 ORDER BY → **不同款型覆盖到不同行**，于是同款动力总成被比出 24% 差异。
+
+**修复（三层同时做，缺一层仍会复发）**：
+
+- 解析层：`autohome_sku.dedupe_duplicate_keys()` —— 同键同值只留一行；值不同时**仅当每个值
+  都能在同款型的更具体键里读到**才去重（保留优先键覆盖的那行，本案例留 144），
+  有值无处承载则全部保留，绝不丢数据；
+- 数据层：`tools/dedupe_conflicting_facts.py`（默认 dry-run，`--apply` 才写库，`--backup` 留档）
+  清理存量行；已对生产执行（车系 10 共 21 行；全库 35,305 行，留档 `dedupe_backup_global.json`）；
+- 引擎层：对比分析遇到「同键多值冲突」时**标存疑、不参与比较**（进不了 Top3/结论/AI 点评），
+  即使数据没修完也不会再输出假差异。
+
+**回归判据（提交前实跑）**：
+`pytest tests/test_autohome_sku.py tests/test_comparison_analysis.py tests/test_dedupe_conflicting_facts.py`
+—— 其中 `test_conflicting_duplicate_keys_are_flagged_not_compared` 复现事故数据形态，
+`test_tool_and_parser_rules_agree` 保证解析层与修复工具的规则不漂移。
+
+**延伸检查**：任何「按 fact_key 建 dict 再取值」的代码都要问一句——同键多行时取哪一行？
+（`catalog/series_index.py`、`agent/tools.py` 的同类取值也应按同一原则复核。）

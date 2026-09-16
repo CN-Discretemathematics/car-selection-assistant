@@ -434,6 +434,65 @@ def _powertrain_label(energy_type: str, displacement: str) -> str:
     return displacement or "燃油"
 
 
+# 同名参数去重时的优先保留键：源参数页会给混动车两行同名「最大功率(kW)」
+# （系统综合功率与发动机净功率），二者在页面上另有专键承载，保留更权威的那个即可零信息损失
+DEDUPE_PREFERRED_KEYS = (
+    "系统综合功率(kW)", "发动机最大功率(kW)", "最大净功率(kW)", "电动机总功率(kW)",
+)
+
+
+def dedupe_duplicate_keys(facts: list[dict]) -> list[dict]:
+    """同键多行去重（零信息损失）——2026-09-16 卡罗拉锐放事故的根因修复。
+
+    源参数页对混动车给出两行同名「最大功率(kW)」：系统综合 144 与发动机净功率 116。
+    原实现直接入库 → 同键冲突值，对比分析取值随 DB 行序漂移，凭空得出「144 vs 116、差 24%」
+    （两款实际同为 144kW）。规则：
+
+    1. 同键各值相同 → 只保留一行（源页面重复项，无信息损失）；
+    2. 值不同，但**每个**值都能在同款型的更具体键里读到（系统综合功率/发动机最大功率/
+       净功率/电动机总功率）→ 只保留优先键覆盖的那一行；
+    3. 有任何值无处承载 → 全部保留（不丢数据），由分析层标注「存疑、不参与比较」。
+    """
+    by_key: dict[str, list[dict]] = {}
+    for fact in facts:
+        by_key.setdefault(str(fact.get("fact_key") or ""), []).append(fact)
+    values_by_key = {
+        key: {str(f.get("value") or "").strip() for f in group} for key, group in by_key.items()
+    }
+
+    out: list[dict] = []
+    for key, group in by_key.items():
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        distinct = {str(f.get("value") or "").strip() for f in group}
+        if len(distinct) == 1:
+            out.append(group[0])
+            continue
+
+        def covered(value: str) -> bool:
+            return any(
+                value in values_by_key.get(sibling, set())
+                for sibling in DEDUPE_PREFERRED_KEYS if sibling != key
+            )
+
+        if not all(covered(value) for value in distinct):
+            out.extend(group)  # 保守：有值只在这一个键里 → 不能丢
+            continue
+        kept: dict | None = None
+        for sibling in DEDUPE_PREFERRED_KEYS:
+            if sibling == key or sibling not in values_by_key:
+                continue
+            for fact in group:
+                if str(fact.get("value") or "").strip() in values_by_key[sibling]:
+                    kept = fact
+                    break
+            if kept is not None:
+                break
+        out.extend([kept] if kept is not None else group)
+    return out
+
+
 def build_sku_payload(brand_meta: dict, series_meta: dict, parsed: dict,
                       page_url: str) -> dict:
     """把一个车系的参数配置解析结果转换为 importer 兼容载荷（含 model_years/variants/facts）。"""
@@ -476,6 +535,10 @@ def build_sku_payload(brand_meta: dict, series_meta: dict, parsed: dict,
                         "page_or_section": "汽车之家参数配置页",
                     }
                 )
+
+        # 同名参数去重（零信息损失）：源页面会给混动车两行「最大功率(kW)」，
+        # 直接入库会形成同键冲突值并让对比分析凭行序造出假差异（2026-09-16 事故）
+        facts = dedupe_duplicate_keys(facts)
 
         # 座位数写入结构化 fact（评审 M6）：Agent 乘客硬约束与检索可依赖真实数据；
         # 若参数组已自带「座位数」项则跳过，避免同键重复（复审 M-M6-1）

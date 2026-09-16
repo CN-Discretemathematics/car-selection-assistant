@@ -8,6 +8,7 @@ from app.common.models import SpecFact, VehicleModelYear, VehicleSeries, Vehicle
 from app.sources.autohome_sku import (
     build_sku_payload,
     classify_variant_energy,
+    dedupe_duplicate_keys,
     ev_evidence,
     has_engine_evidence,
     normalize_displacement,
@@ -423,3 +424,56 @@ def test_sku_reimport_updates_status(db_session: Session):
         select(VehicleVariant).where(VehicleVariant.series_id == series.id)
     ).all()
     assert all(v.status == "off_sale" for v in variants)
+
+
+# ── 同名参数去重（2026-09-16 卡罗拉锐放事故根因修复） ──────────────────────────
+
+def _fact(key: str, value: str, unit: str | None = None) -> dict:
+    return {"category": "参数信息", "fact_key": key, "value": value, "unit": unit,
+            "cycle": None, "page_or_section": "汽车之家参数配置页"}
+
+
+def test_dedupe_keeps_one_row_when_values_identical():
+    """源页面重复项（同键同值）只留一行。"""
+    facts = [_fact("最大功率(kW)", "126", "kW"), _fact("最大功率(kW)", "126", "kW")]
+    out = dedupe_duplicate_keys(facts)
+    assert len(out) == 1 and out[0]["value"] == "126"
+
+
+def test_dedupe_prefers_system_power_for_hybrid_duplicates():
+    """混动车两行「最大功率(kW)」（系统综合 144 / 发动机净功率 116）→ 保留 144。
+
+    116 并未丢失：它仍在同款型的「最大净功率(kW)」键里可读——这是零信息损失的前提。
+    """
+    facts = [
+        _fact("最大功率(kW)", "144", "kW"),
+        _fact("最大功率(kW)", "116", "kW"),
+        _fact("系统综合功率(kW)", "144", "kW"),
+        _fact("最大净功率(kW)", "116", "kW"),
+    ]
+    out = dedupe_duplicate_keys(facts)
+    powers = [f for f in out if f["fact_key"] == "最大功率(kW)"]
+    assert len(powers) == 1, out
+    assert powers[0]["value"] == "144"
+    # 更具体的键必须原样保留（信息不丢）
+    keys = {f["fact_key"] for f in out}
+    assert {"系统综合功率(kW)", "最大净功率(kW)"} <= keys
+
+
+def test_dedupe_prefers_system_power_regardless_of_row_order():
+    """行序颠倒也要得到同一结果（原实现按行序覆盖 → 不同款型取值不同，正是假差异来源）。"""
+    facts = [
+        _fact("最大功率(kW)", "116", "kW"),
+        _fact("最大功率(kW)", "144", "kW"),
+        _fact("系统综合功率(kW)", "144", "kW"),
+        _fact("最大净功率(kW)", "116", "kW"),
+    ]
+    powers = [f for f in dedupe_duplicate_keys(facts) if f["fact_key"] == "最大功率(kW)"]
+    assert len(powers) == 1 and powers[0]["value"] == "144"
+
+
+def test_dedupe_keeps_all_when_value_has_no_other_home():
+    """有值只存在于该键（别处读不到）→ 全部保留，交给分析层标「存疑」，绝不丢数据。"""
+    facts = [_fact("最大功率(kW)", "100", "kW"), _fact("最大功率(kW)", "110", "kW")]
+    out = dedupe_duplicate_keys(facts)
+    assert len(out) == 2, out
