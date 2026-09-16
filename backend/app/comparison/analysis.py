@@ -387,6 +387,10 @@ def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
     if not any(dim["significant"] for dim in dimensions):
         summary.append("本次对比的维度差异均不显著（低于各自阈值），建议按价格与售后网络做取舍")
 
+    label_by_id = {v.variant_id: v.label for v in variants}
+    verdict = _build_verdict(variants, leaders, prices)
+    key_points = _build_key_points(dimensions, label_by_id)
+
     return {
         "variants": [
             {
@@ -405,16 +409,67 @@ def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
         "tradeoffs": tradeoffs,
         "summary": summary,
         "gaps": gaps,
+        # 一句话结论 + 关键差异 Top3：给「先看结论」的用户（细节仍在 dimensions/summary）
+        "verdict": verdict,
+        "key_points": key_points,
         # 供答案数字校验：回答里出现的数字必须落在这个集合内（防止模型编数字）
         "allowed_numbers": sorted(allowed_numbers),
     }
+
+
+def _build_verdict(
+    variants: list, leaders: dict[int, list[str]], prices: dict[int, float]
+) -> str | None:
+    """一句话结论（确定性模板，不含任何库外事实）：谁强在哪 + 谁最便宜。
+
+    款型全名较长，两个款型时价格子句用「前者/后者」指代，避免整句被全名撑爆。
+    """
+    parts: list[str] = []
+    for v in variants:
+        wins = leaders.get(v.variant_id, [])[:2]
+        if wins:
+            parts.append(f"{v.label} 强在 {'、'.join(wins)}")
+    if not parts:
+        return None
+    verdict = "总体：" + "；".join(parts)
+    if len(prices) >= 2:
+        cheapest_id = min(prices, key=lambda k: prices[k])
+        cheapest = next(v for v in variants if v.variant_id == cheapest_id)
+        if len(variants) == 2:
+            ordinal = "前者" if cheapest_id == variants[0].variant_id else "后者"
+            verdict += f"；{ordinal}指导价最低"
+        else:
+            verdict += f"；{cheapest.label} 指导价最低"
+    return verdict + "。"
+
+
+def _build_key_points(dimensions: list[dict], label_by_id: dict[int, str]) -> list[dict]:
+    """关键差异 Top3：显著维度按「差距百分比」从大到小（解析不到百分比的排后面）。"""
+    scored: list[tuple[float, int, dict, str]] = []
+    for idx, dim in enumerate(dimensions):
+        if not (dim.get("significant") and dim.get("gap")):
+            continue
+        match = re.search(r"差距 ([0-9]+(?:\.[0-9]+)?)%", dim["gap"])
+        leader = next((v for v in dim["values"] if v.get("leader")), None)
+        if leader is None:
+            continue
+        pct = float(match.group(1)) if match else -1.0
+        scored.append((pct, idx, dim, label_by_id.get(leader["variant_id"], "")))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return [
+        {"label": dim["label"], "winner": winner, "gap": dim["gap"]}
+        for _, _, dim, winner in scored[:3]
+    ]
 
 
 def render_analysis_text(analysis: dict) -> str:
     """把分析结果渲染成确定性文案（LLM 不可用时的兜底，与 LLM 版同源同数据）。"""
     if "error" in analysis:
         return analysis["error"]
-    lines = list(analysis.get("summary") or [])
+    lines: list[str] = []
+    if analysis.get("verdict"):
+        lines.append(analysis["verdict"])   # 先给结论，再给明细
+    lines.extend(analysis.get("summary") or [])
     if analysis.get("tradeoffs"):
         lines.append("取舍：")
         lines.extend(f"- {t}" for t in analysis["tradeoffs"])

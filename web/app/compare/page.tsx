@@ -91,19 +91,26 @@ interface ComparisonAnalysis {
   tradeoffs: string[];
   summary: string[];
   gaps: { dimension: string; missing: string[] }[];
+  /** 一句话结论（后端确定性模板：谁强在哪 + 谁最便宜）。 */
+  verdict: string | null;
+  /** 关键差异 Top3（按差距百分比从大到小）。 */
+  key_points: { label: string; winner: string; gap: string }[];
 }
 
 /** 取差异分析（对比页专用端点；与参数表并存，不是替代）。 */
-function useAnalysis(variantIds: number[]): ComparisonAnalysis | null {
+function useAnalysis(variantIds: number[]): { analysis: ComparisonAnalysis | null; loading: boolean } {
   const [analysis, setAnalysis] = useState<ComparisonAnalysis | null>(null);
+  const [loading, setLoading] = useState(false);
   const key = variantIds.join(",");
 
   useEffect(() => {
     if (variantIds.length < 2) {
       setAnalysis(null);
+      setLoading(false);
       return;
     }
     let cancelled = false;
+    setLoading(true);
     (async () => {
       try {
         const res = await fetch("/api/v1/comparisons/analysis", {
@@ -116,6 +123,8 @@ function useAnalysis(variantIds: number[]): ComparisonAnalysis | null {
         if (!cancelled) setAnalysis(body);
       } catch {
         /* 静默降级：参数表仍在 */
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
@@ -124,16 +133,32 @@ function useAnalysis(variantIds: number[]): ComparisonAnalysis | null {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
-  return analysis;
+  return { analysis, loading };
 }
 
-/** 差异分析面板：只呈现有决策意义的差异，缺数据如实标注。 */
+/** 差异分析面板：先给一句话结论与关键差异，细节默认折叠（缺数据如实标注）。 */
 function AnalysisPanel({ analysis, names }: { analysis: ComparisonAnalysis; names: Map<number, string> }) {
   const significant = analysis.dimensions.filter((d) => d.significant);
   const notes = analysis.dimensions.filter((d) => !d.significant && d.note);
+  // 跳转高亮：✨按钮触发「dsh:flash-analysis」，短暂高亮面板让用户知道该看哪
+  const [flash, setFlash] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    const handler = () => {
+      setFlash(true);
+      window.setTimeout(() => setFlash(false), 1800);
+    };
+    window.addEventListener("dsh:flash-analysis", handler);
+    return () => window.removeEventListener("dsh:flash-analysis", handler);
+  }, []);
   return (
     <Reveal className="mt-6" delay={60}>
-      <div className="glass nums rounded-[22px] border border-apple/15 p-5 sm:p-6">
+      <div
+        id="analysis-panel"
+        className={`glass nums rounded-[22px] border p-5 transition duration-500 sm:p-6 ${
+          flash ? "border-apple/60 ring-2 ring-apple/25" : "border-apple/15"
+        }`}
+      >
         <h2 className="flex items-center gap-2 text-[18px] font-semibold tracking-tight text-ink">
           差异分析
           <span className="rounded-full bg-apple/10 px-2 py-0.5 text-[11px] font-semibold text-apple">
@@ -141,67 +166,100 @@ function AnalysisPanel({ analysis, names }: { analysis: ComparisonAnalysis; name
           </span>
         </h2>
 
-        <ul className="mt-3 space-y-1.5 text-[13.5px] leading-6 text-ink-soft">
-          {analysis.summary.map((line) => (
-            <li key={line} className="flex gap-2">
-              <span className="text-apple">·</span>
-              <span>{line}</span>
-            </li>
-          ))}
-        </ul>
-
-        {significant.length > 0 && (
-          <div className="mt-4 overflow-x-auto">
-            <table className="w-full min-w-[560px] text-[13px]">
-              <thead>
-                <tr className="border-b border-black/[0.06] text-left text-ash">
-                  <th className="py-2 font-medium">维度</th>
-                  {analysis.variants.map((v) => (
-                    <th key={v.variant_id} className="py-2 font-medium">
-                      {names.get(v.variant_id) ?? `款型 ${v.variant_id}`}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {significant.map((dim) => (
-                  <tr key={dim.key} className="border-b border-black/[0.04]">
-                    <td className="py-2 pr-3">
-                      <span className="font-medium text-ink">{dim.label}</span>
-                      {dim.why && <span className="block text-[11px] text-ash">{dim.why}</span>}
-                    </td>
-                    {dim.values.map((val) => (
-                      <td key={val.variant_id} className="py-2 pr-3">
-                        <span className={val.leader ? "font-semibold text-apple" : "text-ink-soft"}>
-                          {val.display}
-                          {val.leader && " ★"}
-                        </span>
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {analysis.tradeoffs.length > 0 && (
-          <div className="mt-4 space-y-1.5">
-            <p className="text-[13px] font-semibold text-ink">取舍</p>
-            {analysis.tradeoffs.map((line) => (
-              <p key={line} className="text-[13px] leading-6 text-ink-soft">
-                {line}
-              </p>
-            ))}
-          </div>
-        )}
-
-        {(analysis.gaps.length > 0 || notes.length > 0) && (
-          <p className="mt-3 text-[12px] leading-5 text-ash">
-            信息缺口：
-            {analysis.gaps.map((g) => `${g.dimension}（${g.missing.length} 个款型无数据）`).join("、")}
-            {notes.length > 0 && (analysis.gaps.length > 0 ? "；" : "") + notes.map((n) => `${n.label}：${n.note}`).join("；")}
+        {analysis.verdict && (
+          <p className="mt-3 border-l-2 border-apple/40 pl-3 text-[15.5px] font-medium leading-7 text-ink">
+            {analysis.verdict}
           </p>
+        )}
+
+        {analysis.key_points.length > 0 && (
+          <ul className="mt-3 space-y-1 text-[13.5px] leading-6">
+            {analysis.key_points.map((p) => (
+              <li key={p.label} className="flex flex-wrap items-baseline gap-x-2">
+                <span className="font-medium text-ink">{p.label}</span>
+                <span className="text-ink-soft">
+                  <span className="font-semibold text-apple">{p.winner}</span> 领先
+                </span>
+                <span className="text-ash">{p.gap}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          className="press mt-3 text-[12.5px] font-medium text-apple underline-offset-4 hover:underline"
+        >
+          {expanded ? "收起明细" : `展开全部 ${significant.length} 项对比（含原因与缺数据说明）`}
+        </button>
+
+        {expanded && (
+          <div className="mt-3 space-y-4 border-t border-black/[0.05] pt-3">
+            <ul className="space-y-1.5 text-[13.5px] leading-6 text-ink-soft">
+              {analysis.summary.map((line) => (
+                <li key={line} className="flex gap-2">
+                  <span className="text-apple">·</span>
+                  <span>{line}</span>
+                </li>
+              ))}
+            </ul>
+
+            {significant.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[560px] text-[13px]">
+                  <thead>
+                    <tr className="border-b border-black/[0.06] text-left text-ash">
+                      <th className="py-2 font-medium">维度</th>
+                      {analysis.variants.map((v) => (
+                        <th key={v.variant_id} className="py-2 font-medium">
+                          {names.get(v.variant_id) ?? `款型 ${v.variant_id}`}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {significant.map((dim) => (
+                      <tr key={dim.key} className="border-b border-black/[0.04]">
+                        <td className="py-2 pr-3">
+                          <span className="font-medium text-ink">{dim.label}</span>
+                          {dim.why && <span className="block text-[11px] text-ash">{dim.why}</span>}
+                        </td>
+                        {dim.values.map((val) => (
+                          <td key={val.variant_id} className="py-2 pr-3">
+                            <span className={val.leader ? "font-semibold text-apple" : "text-ink-soft"}>
+                              {val.display}
+                              {val.leader && " ★"}
+                            </span>
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {analysis.tradeoffs.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[13px] font-semibold text-ink">取舍</p>
+                {analysis.tradeoffs.map((line) => (
+                  <p key={line} className="text-[13px] leading-6 text-ink-soft">
+                    {line}
+                  </p>
+                ))}
+              </div>
+            )}
+
+            {(analysis.gaps.length > 0 || notes.length > 0) && (
+              <p className="text-[12px] leading-5 text-ash">
+                信息缺口：
+                {analysis.gaps.map((g) => `${g.dimension}（${g.missing.length} 个款型无数据）`).join("、")}
+                {notes.length > 0 && (analysis.gaps.length > 0 ? "；" : "") + notes.map((n) => `${n.label}：${n.note}`).join("；")}
+              </p>
+            )}
+          </div>
         )}
       </div>
     </Reveal>
@@ -243,7 +301,7 @@ function CompareTable({ data }: { data: ComparisonDetail }) {
   // 参数分类多选（null=全部）；自动过滤已随数据集变化失效的旧选择
   const [picked, setPicked] = useState<string[] | null>(null);
   // 差异分析：与参数表并行取数（分析失败时静默降级，参数表照常可用）
-  const analysis = useAnalysis(data.variants.map((v) => v.variant_id));
+  const { analysis, loading } = useAnalysis(data.variants.map((v) => v.variant_id));
   const activePicked = useMemo(() => {
     if (!picked) return null;
     const valid = picked.filter((c) => categories.includes(c));
@@ -411,6 +469,17 @@ function CompareTable({ data }: { data: ComparisonDetail }) {
           对比对象为具体款型；不同工况（CLTC/NEDC/WLTC）的续航与油耗不直接比较。
         </p>
       </Reveal>
+      {/* 分析未就绪时也渲染占位卡片：✨按钮的跳转目标在任何时刻都存在 */}
+      {loading && !analysis && (
+        <Reveal className="mt-6" delay={60}>
+          <div
+            id="analysis-panel"
+            className="glass rounded-[22px] border border-apple/15 p-5 text-[13px] text-ash"
+          >
+            正在生成差异分析…
+          </div>
+        </Reveal>
+      )}
       {analysis && (
         <AnalysisPanel
           analysis={analysis}
@@ -446,9 +515,15 @@ function CompareContent() {
               <button
                 type="button"
                 onClick={() => {
-                  // §12.1：对比页「帮我分析差异」→ 悬浮 Agent 介入。
-                  // 带上**款型 ID**：Agent 据此跑确定性差异分析，而不是靠模型自由发挥
-                  // （数字全部来自库内参数，并过数字白名单校验）。
+                  // 用户口径（2026-09-16）：点按钮 = 跳到页面里的确定性差异分析面板
+                  //（先一句话结论 + 关键差异，细节可展开），不再自动弹开悬浮窗；
+                  // 分析尚未生成（<2 款型 / 加载失败）时才回退为悬浮 Agent 介入。
+                  const panel = document.getElementById("analysis-panel");
+                  if (panel) {
+                    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+                    window.dispatchEvent(new CustomEvent("dsh:flash-analysis"));
+                    return;
+                  }
                   const names = [...new Set(data.variants.map((v) => `${v.brand_name} ${v.series_name}`))];
                   const ids = data.variants.map((v) => v.variant_id).join("、");
                   const ask =
@@ -459,14 +534,14 @@ function CompareContent() {
                 }}
                 className="press glass inline-flex items-center gap-1.5 rounded-full border border-apple/25 px-5 py-2.5 text-sm font-semibold text-apple shadow-md shadow-apple/10 hover:border-apple/45 hover:bg-ice/70"
               >
-                ✨ 帮我分析差异
+                ✨ 查看差异分析
               </button>
             </div>
           )}
         </div>
       </section>
 
-      <main className="mx-auto max-w-6xl px-4 pb-8 sm:px-6">
+      <main id="main-content" className="mx-auto max-w-6xl px-4 pb-8 sm:px-6">
         {error ? (
           <Reveal className="rounded-2xl border border-red-200/60 bg-red-50/90 p-4 text-sm text-red-600">
             {error}

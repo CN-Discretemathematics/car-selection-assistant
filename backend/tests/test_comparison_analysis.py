@@ -223,3 +223,39 @@ def test_render_text_is_deterministic(db_session: Session):
 def test_needs_two_variants(db_session: Session):
     a_id, _ = _seed_pair(db_session)
     assert "error" in analyze_comparison(db_session, [a_id])
+
+
+def test_analysis_has_verdict_and_key_points(db_session: Session):
+    """面板「先结论后细节」：verdict 一句话 + 关键差异 Top3（按差距百分比从大到小）。"""
+    import re
+
+    a_id, b_id = _seed_pair(db_session)
+    result = analyze_comparison(db_session, [a_id, b_id])
+
+    verdict = result["verdict"] or ""
+    assert "甲车系" in verdict and "乙车系" in verdict, verdict
+    assert "指导价最低" in verdict
+    # verdict 是纯模板（只插值款型 label 与 leaders），断言其确定性组成：
+    # 以「总体：」开头，且每个款型的领先维度都来自 leaders 字段（不允许出现库外事实）
+    assert verdict.startswith("总体：")
+    a_row = next(v for v in result["variants"] if v["variant_id"] == a_id)
+    assert a_row["label"] in verdict
+    if a_row["leaders"]:
+        assert "、".join(a_row["leaders"][:2]) in verdict
+
+    points = result["key_points"]
+    assert 1 <= len(points) <= 3
+    pcts = [float(re.search(r"差距 ([0-9.]+)%", p["gap"]).group(1)) for p in points]
+    assert pcts == sorted(pcts, reverse=True), f"Top3 应按差距从大到小：{pcts}"
+    sig_labels = {d["label"] for d in result["dimensions"] if d["significant"]}
+    variant_labels = {v["label"] for v in result["variants"]}
+    for p in points:
+        assert p["winner"] in variant_labels
+        assert p["label"] in sig_labels, f"key_point 必须来自显著维度：{p}"
+
+
+def test_render_text_leads_with_verdict(db_session: Session):
+    a_id, b_id = _seed_pair(db_session)
+    result = analyze_comparison(db_session, [a_id, b_id])
+    text = render_analysis_text(result)
+    assert text.startswith(result["verdict"])
