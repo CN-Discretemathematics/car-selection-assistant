@@ -21,14 +21,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import os  # noqa: E402
-
-from sqlalchemy import select, update  # noqa: E402
+from sqlalchemy import func, select, update  # noqa: E402
 
 from app.common.database import get_session_factory  # noqa: E402
 from app.common.models import ExternalSeriesRef, SpecFact, VehicleVariant  # noqa: E402
@@ -59,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--apply", action="store_true", help="执行改名（默认只报告）")
     ap.add_argument("--backup", default=None, help="改名前把变更导出到该 JSON 路径")
     ap.add_argument("--limit-series", type=int, default=None, help="只处理前 N 个车系（灰度）")
+    ap.add_argument("--show", type=int, default=10, help="打印跳过明细的条数（默认 10）")
     args = ap.parse_args(argv)
 
     factory = get_session_factory()
@@ -95,10 +95,10 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             specid_by_name = {v["specname"]: v["specid"] for v in parsed["variants"]}
-            occurrences: dict[str, list[tuple[str, dict[str, str]]]] = defaultdict(list)
+            key_occurrences: dict[str, list[tuple[str, dict[str, str]]]] = defaultdict(list)
             for group in parsed["groups"]:
                 for item in group["items"]:
-                    occurrences[item["key"]].append(
+                    key_occurrences[item["key"]].append(
                         (item.get("itemtype") or "", {str(k): str(v) for k, v in item["values"].items()})
                     )
 
@@ -113,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
                     skipped.append(f"variant {variant.id}：源页面无同名款型（{variant.display_name}）")
                     continue
                 for key, rows in conflicts.get(variant.id, {}).items():
-                    occurrences = occurrences.get(key) or []
+                    occurrences = key_occurrences.get(key) or []
                     if len(occurrences) < 2:
                         continue
                     used: set[int] = set()
@@ -140,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
                         })
 
         print(f"\n计划改名 {len(renames)} 行；跳过 {len(skipped)} 项：")
-        for s in skipped[:10]:
+        for s in skipped[:args.show]:
             print(f"  {s}")
         by_new: Counter = Counter(r["new_key"] for r in renames)
         print("改名后键分布（前 10）：")
