@@ -129,14 +129,20 @@ export default async function VehiclePage({
             className="animate-fade-up mt-7 flex flex-wrap items-center justify-center gap-2.5"
             style={{ animationDelay: "880ms" }}
           >
-            {detail.official_page_url && (
+            {detail.external_link && (
               <a
-                href={detail.official_page_url}
+                href={detail.external_link.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="press inline-flex items-center gap-1.5 rounded-full bg-apple px-5 py-2.5 text-sm font-medium text-white shadow-md shadow-apple/30 hover:bg-[#0077ed]"
+                className={
+                  detail.external_link.kind === "official"
+                    ? "press inline-flex items-center gap-1.5 rounded-full bg-apple px-5 py-2.5 text-sm font-medium text-white shadow-md shadow-apple/30 hover:bg-[#0077ed]"
+                    : "press inline-flex items-center gap-1.5 rounded-full border border-black/[0.08] bg-white/70 px-5 py-2.5 text-sm font-medium text-ink-soft hover:text-apple"
+                }
               >
-                查看品牌官网车型页 ↗
+                {detail.external_link.kind === "official"
+                  ? "查看品牌官网车型页 ↗"
+                  : `查看数据来源${detail.external_link.source_name ? `：${detail.external_link.source_name}` : ""} ↗`}
               </a>
             )}
             <FavoriteButton vehicleId={detail.id} kind="series" />

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -31,6 +32,18 @@ class ModelYearOut(BaseModel):
     launch_status: str
 
 
+class ExternalLinkOut(BaseModel):
+    """详情页对外的唯一跳转入口：官方车型页优先，缺失时回退到数据来源页。
+
+    优先级判定放在后端（而不是前端三元表达式），这样「官方优先」这条产品口径
+    由 pytest 守着——前端只按 kind 决定标签与样式，不再自己判断谁优先。
+    """
+
+    kind: Literal["official", "source"]
+    url: str
+    source_name: str | None = None
+
+
 class VehicleDetailOut(BaseModel):
     id: int
     name: str
@@ -46,6 +59,8 @@ class VehicleDetailOut(BaseModel):
     latest_sales: LatestSales
     model_years: list[ModelYearOut] = []
     data_updated_at: datetime | None = None
+    # 唯一跳转入口（官方优先 / 回退数据来源）；两者都没有时为 None
+    external_link: ExternalLinkOut | None = None
     # 门户来源指导价区间原文（SKU 价格未入库时前端展示回退）
     price_range_note: str | None = None
 

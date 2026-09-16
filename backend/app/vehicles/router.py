@@ -21,6 +21,7 @@ from app.common.images import proxy_image_url
 from app.common.models import Brand, MonthlySales, OfficialPrice, Source, VehicleSeries, VehicleVariant
 from app.vehicles.schemas import (
     BrandRef,
+    ExternalLinkOut,
     LatestSales,
     ModelYearOut,
     PriceRange,
@@ -194,6 +195,13 @@ def vehicle_detail(series_id: int, db: Session = Depends(get_session)) -> Vehicl
     sales = catalog.latest_sales(db, series_id)
     years = catalog.series_model_years(db, series_id)
     brand = catalog.brand_of_series(db, series)
+    source_page_url, source_name = catalog.series_source_page(db, series_id)
+    # 唯一跳转入口：官方车型页优先；官方缺失时回退数据来源页（如实标注来源，不冒充官网）
+    external_link: ExternalLinkOut | None = None
+    if series.official_page_url:
+        external_link = ExternalLinkOut(kind="official", url=series.official_page_url)
+    elif source_page_url:
+        external_link = ExternalLinkOut(kind="source", url=source_page_url, source_name=source_name)
 
     return VehicleDetailOut(
         id=series.id,
@@ -217,6 +225,7 @@ def vehicle_detail(series_id: int, db: Session = Depends(get_session)) -> Vehicl
         model_years=[ModelYearOut(id=y.id, year_name=y.year_name, launch_status=y.launch_status) for y in years],
         data_updated_at=series.last_verified_at,
         price_range_note=series.price_range_note,
+        external_link=external_link,
     )
 
 

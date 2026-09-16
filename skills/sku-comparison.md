@@ -17,4 +17,8 @@
 ## 约束
 
 - 游客分享走 URL 无状态（`/compare?variant_ids=`）；登录用户可保存（comparisons 表）。
-- 对比结果必须可进入官方车型页（`official_page_url` 新窗口 + rel="noopener"）。
+- 官方车型页链接（`official_page_url`）**当前数据为空**（唯一来源汽车之家不提供该字段，
+  见 `docs/deployment.md` §8）：详情页统一用 `external_link`（`kind=official|source`，官方优先，
+  判定在后端）——有官方链接时新窗口进入官方车型页（rel="noopener"）；
+  缺失时回退「查看数据来源」入口（由 `external_series_refs` 的来源名 + 外部 id 确定性拼出，
+  **不得冒充品牌官网**）。对比页与 Agent 回复目前仍只显示官方链接。

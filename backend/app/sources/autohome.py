@@ -40,6 +40,19 @@ RANK_API_PAGE_SIZE = 200
 RANK_API_MAX_PAGES = 12
 PLACEHOLDER_BRAND = "待分类（汽车之家销量榜）"
 BASE_URL = "https://www.autohome.com.cn"
+# 来源名（写入 sources.name，也是「来源页 URL」模板的键）：改这里就够，别在多处硬编码
+AUTOHOME_SOURCE_NAME = "汽车之家"
+
+
+def series_page_url(external_id: str) -> str | None:
+    """汽车之家车系页 URL（前端「查看数据来源」入口用；不是品牌官网链接）。
+
+    只接受纯数字车系 id——形态可疑时返回 None，避免拼出一个坏链接（宁可没有链接）。
+    """
+    sid = (external_id or "").strip()
+    if not (sid.isascii() and sid.isdigit()):   # isdigit() 也接受全角/上标数字，必须限定 ASCII
+        return None
+    return f"{BASE_URL}/{sid}/"
 
 
 def parse_rank_page(html: str) -> dict:
@@ -90,7 +103,7 @@ def build_payload(parsed: dict, page_url: str) -> dict:
     ]
     return {
         "source": {
-            "name": "汽车之家",
+            "name": AUTOHOME_SOURCE_NAME,
             "source_type": "industry_data",
             "url": page_url,
             "verified_status": "unverified",
@@ -317,7 +330,7 @@ def build_series_payload(rows: list[dict], page_url: str) -> dict:
         )
     return {
         "source": {
-            "name": "汽车之家",
+            "name": AUTOHOME_SOURCE_NAME,
             "source_type": "industry_data",
             "url": page_url,
             "verified_status": "unverified",
