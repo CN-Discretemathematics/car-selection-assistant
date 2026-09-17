@@ -46,7 +46,7 @@ export default function CompareBar() {
   if (ids.length === 0) return null;
 
   return (
-    <div className="glass-strong animate-slide-up fixed bottom-6 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full border border-black/[0.07] px-5 py-2.5">
+    <div className="compare-dock glass-strong animate-slide-up fixed bottom-6 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full border border-black/[0.07] px-5 py-2.5">
       <span className="animate-breathe flex h-6 min-w-6 items-center justify-center rounded-full bg-gradient-to-br from-[#0a84ff] to-[#5e5ce6] px-1.5 text-xs font-bold text-white shadow-sm shadow-apple/30">
         {ids.length}
       </span>

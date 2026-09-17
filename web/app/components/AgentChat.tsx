@@ -98,6 +98,25 @@ export default function AgentChat() {
     return () => window.removeEventListener(AGENT_ASK_EVENT, onAsk);
   }, []);
 
+  /**
+   * 打开状态同步到 <body>：桌面端据此为会话框让出右侧通道（见 globals.css 的 body.agent-open）。
+   * 起因：悬浮窗压在车型卡片上，卡片被遮住大半、边缘又被切齐在窗边，看起来「贴在一起」。
+   */
+  useEffect(() => {
+    document.body.classList.toggle("agent-open", open);
+    return () => document.body.classList.remove("agent-open");
+  }, [open]);
+
+  // Esc 收起（键盘可达性：小屏抽屉会盖住页面，必须有纯键盘退出方式）
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, busy]);
@@ -163,127 +182,143 @@ export default function AgentChat() {
   }
 
   return (
-    <div className="fixed bottom-6 right-6 z-40 flex flex-col items-end gap-3">
+    <>
+      {/* 小屏（<1280px）打开时压暗并轻模糊页面：会话框作为底部抽屉出现，
+          卡片不再从抽屉两侧「露边」，视觉上也不再与会话框贴在一起。 */}
       {open && (
-        <div className="glass-strong animate-scale-in flex h-[min(540px,calc(100dvh-7rem))] w-[380px] max-w-[calc(100vw-3rem)] origin-bottom-right flex-col overflow-hidden rounded-[28px] border border-black/[0.07]">
-          {/* 头部：磨砂白 + AI 徽标 */}
-          <div className="flex items-center justify-between border-b border-black/[0.06] bg-white/60 px-4 py-3 backdrop-blur-xl">
-            <div className="flex items-center gap-2.5">
-              <span className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-[#0a84ff] via-apple to-[#5e5ce6] text-white shadow-md shadow-apple/30">
-                <CarChatIcon className="h-6 w-6" />
-              </span>
-              <div>
-                <p className="flex items-center gap-1.5 text-[15px] font-semibold tracking-tight text-ink">
-                  帮我选车
-                  <span className="rounded-full bg-apple/10 px-1.5 py-px text-[10px] font-bold text-apple">AI 导购</span>
-                </p>
-                <p className="text-[11px] leading-4 text-ash">说出预算与用途 · 真实车型数据 · 带来源引用</p>
-              </div>
+        <div
+          className="animate-fade-in fixed inset-0 z-[35] bg-ink/25 backdrop-blur-[2px] xl:hidden"
+          onClick={() => setOpen(false)}
+          aria-hidden
+        />
+      )}
+
+      {/* 容器：小屏贴底占满宽度（抽屉），桌面收在右下角（悬浮窗，此时页面已让位） */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col items-end gap-3 xl:inset-x-auto xl:bottom-6 xl:right-6">
+        {open && (
+          <div className="glass-strong animate-panel-rise pointer-events-auto flex h-[min(85dvh,620px)] w-full origin-bottom flex-col overflow-hidden rounded-t-[28px] border-t border-black/[0.07] pb-[env(safe-area-inset-bottom)] xl:h-[min(540px,calc(100dvh-7rem))] xl:w-[380px] xl:origin-bottom-right xl:rounded-[28px] xl:border xl:pb-0">
+            {/* 抽屉把手：小屏一眼看出这是可收起的底部面板（桌面悬浮窗不需要） */}
+            <div className="flex shrink-0 justify-center pt-2 xl:hidden">
+              <span className="h-1 w-10 rounded-full bg-black/15" />
             </div>
-            <div className="flex items-center gap-1.5">
-              {messages.length > 0 && (
+            {/* 头部：磨砂白 + AI 徽标 */}
+            <div className="flex items-center justify-between border-b border-black/[0.06] bg-white/60 px-4 py-3 backdrop-blur-xl">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-[#0a84ff] via-apple to-[#5e5ce6] text-white shadow-md shadow-apple/30">
+                  <CarChatIcon className="h-6 w-6" />
+                </span>
+                <div>
+                  <p className="flex items-center gap-1.5 text-[15px] font-semibold tracking-tight text-ink">
+                    帮我选车
+                    <span className="rounded-full bg-apple/10 px-1.5 py-px text-[10px] font-bold text-apple">AI 导购</span>
+                  </p>
+                  <p className="text-[11px] leading-4 text-ash">说出预算与用途 · 真实车型数据 · 带来源引用</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {messages.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={startNewChat}
+                    disabled={busy}
+                    title="清空这段对话（含已记录的预算/用途等条件），重新开始"
+                    className="press rounded-full bg-black/[0.06] px-2.5 py-1 text-[11px] font-medium text-ash hover:bg-black/10 hover:text-ink disabled:opacity-40"
+                  >
+                    新对话
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={startNewChat}
-                  disabled={busy}
-                  title="清空这段对话（含已记录的预算/用途等条件），重新开始"
-                  className="press rounded-full bg-black/[0.06] px-2.5 py-1 text-[11px] font-medium text-ash hover:bg-black/10 hover:text-ink disabled:opacity-40"
+                  onClick={() => setOpen(false)}
+                  aria-label="关闭"
+                  className="press flex h-7 w-7 items-center justify-center rounded-full bg-black/[0.06] text-xs text-ash hover:bg-black/10 hover:text-ink"
                 >
-                  新对话
+                  ✕
                 </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                aria-label="关闭"
-                className="press flex h-7 w-7 items-center justify-center rounded-full bg-black/[0.06] text-xs text-ash hover:bg-black/10 hover:text-ink"
-              >
-                ✕
-              </button>
-            </div>
-          </div>
-
-          {/* 消息区：异步回复对读屏播报（aria-live） */}
-          <div
-            ref={listRef}
-            aria-live="polite"
-            className="flex-1 space-y-3 overflow-y-auto bg-canvas/40 px-4 py-4"
-          >
-            {messages.length === 0 && (
-              <div className="msg-pop rounded-[22px] border border-apple/12 bg-ice/70 p-3.5 text-[13px] leading-6 text-ink-soft">
-                💡 告诉我你的预算、用途和人数，例如：「预算15万，家庭用车，5口人，想要新能源SUV」。
               </div>
-            )}
-            {messages.map((m, i) => (
-              <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
-                <div
-                  className={`msg-pop inline-block max-w-[85%] whitespace-pre-wrap px-3.5 py-2.5 text-left text-[13.5px] leading-6 ${
-                    m.role === "user"
-                      ? "rounded-[22px] rounded-br-md bg-gradient-to-b from-[#3b9bff] to-apple text-white shadow-sm shadow-apple/30"
-                      : "rounded-[22px] rounded-bl-md bg-[#e9e9ee]/90 text-ink shadow-sm shadow-black/[0.03]"
-                  }`}
-                >
-                  {m.text}
+            </div>
+
+            {/* 消息区：异步回复对读屏播报（aria-live） */}
+            <div
+              ref={listRef}
+              aria-live="polite"
+              className="flex-1 space-y-3 overflow-y-auto bg-canvas/40 px-4 py-4"
+            >
+              {messages.length === 0 && (
+                <div className="msg-pop rounded-[22px] border border-apple/12 bg-ice/70 p-3.5 text-[13px] leading-6 text-ink-soft">
+                  💡 告诉我你的预算、用途和人数，例如：「预算15万，家庭用车，5口人，想要新能源SUV」。
                 </div>
-                {m.role === "assistant" && m.payload && (
-                  <AgentExtras payload={m.payload} onPick={(option) => send(option)} />
-                )}
-              </div>
-            ))}
-            {busy && (
-              <div className="msg-pop inline-flex items-center gap-1.5 rounded-[22px] rounded-bl-md bg-[#e9e9ee]/90 px-4 py-3 shadow-sm">
-                {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    className="typing-dot h-1.5 w-1.5 rounded-full bg-ash"
-                    style={{ animationDelay: `${i * 0.15}s` }}
-                  />
-                ))}
-                <span className="ml-1.5 text-[11px] text-ash">正在筛选车型…</span>
-              </div>
-            )}
-            {error && (
-              <div className="msg-pop rounded-2xl border border-red-200/60 bg-red-50/90 p-2.5 text-xs text-red-600">
-                {error}
-              </div>
-            )}
-          </div>
+              )}
+              {messages.map((m, i) => (
+                <div key={i} className={m.role === "user" ? "text-right" : "text-left"}>
+                  <div
+                    className={`msg-pop inline-block max-w-[85%] whitespace-pre-wrap px-3.5 py-2.5 text-left text-[13.5px] leading-6 ${
+                      m.role === "user"
+                        ? "rounded-[22px] rounded-br-md bg-gradient-to-b from-[#3b9bff] to-apple text-white shadow-sm shadow-apple/30"
+                        : "rounded-[22px] rounded-bl-md bg-[#e9e9ee]/90 text-ink shadow-sm shadow-black/[0.03]"
+                    }`}
+                  >
+                    {m.text}
+                  </div>
+                  {m.role === "assistant" && m.payload && (
+                    <AgentExtras payload={m.payload} onPick={(option) => send(option)} />
+                  )}
+                </div>
+              ))}
+              {busy && (
+                <div className="msg-pop inline-flex items-center gap-1.5 rounded-[22px] rounded-bl-md bg-[#e9e9ee]/90 px-4 py-3 shadow-sm">
+                  {[0, 1, 2].map((i) => (
+                    <span
+                      key={i}
+                      className="typing-dot h-1.5 w-1.5 rounded-full bg-ash"
+                      style={{ animationDelay: `${i * 0.15}s` }}
+                    />
+                  ))}
+                  <span className="ml-1.5 text-[11px] text-ash">正在筛选车型…</span>
+                </div>
+              )}
+              {error && (
+                <div className="msg-pop rounded-2xl border border-red-200/60 bg-red-50/90 p-2.5 text-xs text-red-600">
+                  {error}
+                </div>
+              )}
+            </div>
 
-          {/* 输入区：iMessage 式圆形发送键 */}
-          <div className="border-t border-black/[0.06] bg-white/60 p-3 backdrop-blur-xl">
-            <div className="flex items-center gap-2">
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.nativeEvent.isComposing) send(input);
-                }}
-                placeholder="描述你的购车需求…"
-                className="min-w-0 flex-1 rounded-full border border-transparent bg-canvas px-4 py-2.5 text-[13.5px] text-ink transition-[border-color,background-color,box-shadow] duration-300 placeholder:text-ash/70 focus:border-apple/50 focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12"
-              />
-              <button
-                type="button"
-                onClick={() => send(input)}
-                disabled={busy || !input.trim()}
-                aria-label="发送"
-                className="press flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-apple text-white shadow-md shadow-apple/30 hover:bg-[#0077ed] disabled:opacity-35 disabled:shadow-none"
-              >
-                <svg viewBox="0 0 20 20" fill="currentColor" className="h-[18px] w-[18px]">
-                  <path
-                    fillRule="evenodd"
-                    d="M10 17a.75.75 0 0 1-.75-.75V5.61L5.53 9.33a.75.75 0 1 1-1.06-1.06l5-5a.75.75 0 0 1 1.06 0l5 5a.75.75 0 1 1-1.06 1.06l-3.72-3.72v10.64A.75.75 0 0 1 10 17Z"
-                    clipRule="evenodd"
-                  />
-                </svg>
-              </button>
+            {/* 输入区：iMessage 式圆形发送键 */}
+            <div className="border-t border-black/[0.06] bg-white/60 p-3 backdrop-blur-xl">
+              <div className="flex items-center gap-2">
+                <input
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.nativeEvent.isComposing) send(input);
+                  }}
+                  placeholder="描述你的购车需求…"
+                  className="min-w-0 flex-1 rounded-full border border-transparent bg-canvas px-4 py-2.5 text-[13.5px] text-ink transition-[border-color,background-color,box-shadow] duration-300 placeholder:text-ash/70 focus:border-apple/50 focus:bg-white focus:outline-none focus:ring-4 focus:ring-apple/12"
+                />
+                <button
+                  type="button"
+                  onClick={() => send(input)}
+                  disabled={busy || !input.trim()}
+                  aria-label="发送"
+                  className="press flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-apple text-white shadow-md shadow-apple/30 hover:bg-[#0077ed] disabled:opacity-35 disabled:shadow-none"
+                >
+                  <svg viewBox="0 0 20 20" fill="currentColor" className="h-[18px] w-[18px]">
+                    <path
+                      fillRule="evenodd"
+                      d="M10 17a.75.75 0 0 1-.75-.75V5.61L5.53 9.33a.75.75 0 1 1-1.06-1.06l5-5a.75.75 0 0 1 1.06 0l5 5a.75.75 0 1 1-1.06 1.06l-3.72-3.72v10.64A.75.75 0 0 1 10 17Z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                </button>
+              </div>
             </div>
           </div>
-        </div>
       )}
 
       {/* 一次性引导气泡：只在没关闭过时出现，且不自动打开聊天窗（低打扰） */}
       {nudge && !open && (
-        <div className="glass-strong animate-scale-in relative max-w-[268px] origin-bottom-right rounded-[22px] rounded-br-md border border-black/[0.07] p-4 text-left shadow-[0_18px_40px_-16px_rgba(0,0,0,0.28)]">
+        <div className="glass-strong animate-scale-in pointer-events-auto relative mr-6 max-w-[268px] origin-bottom-right rounded-[22px] rounded-br-md border border-black/[0.07] p-4 text-left shadow-[0_18px_40px_-16px_rgba(0,0,0,0.28)] xl:mr-0">
           <button
             type="button"
             onClick={dismissNudge}
@@ -325,7 +360,9 @@ export default function AgentChat() {
         }}
         aria-label={open ? "收起购车助手" : "打开购车助手：帮我选车"}
         aria-expanded={open}
-        className="animate-glow group flex h-14 items-center gap-2.5 rounded-full bg-gradient-to-br from-[#0a84ff] via-apple to-[#5e5ce6] px-4 text-white transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] hover:scale-105 active:scale-95 sm:px-5"
+        className={`animate-glow group pointer-events-auto mb-6 mr-6 h-14 items-center gap-2.5 rounded-full bg-gradient-to-br from-[#0a84ff] via-apple to-[#5e5ce6] px-4 text-white transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] hover:scale-105 active:scale-95 sm:px-5 xl:mr-0 xl:mb-0 ${
+          open ? "hidden xl:flex" : "flex"
+        }`}
       >
         {open ? (
           <>
@@ -344,7 +381,8 @@ export default function AgentChat() {
           </>
         )}
       </button>
-    </div>
+      </div>
+    </>
   );
 }
 

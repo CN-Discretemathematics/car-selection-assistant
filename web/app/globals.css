@@ -252,6 +252,22 @@ h3 {
   animation: scale-in 0.42s var(--ease-spring) both;
 }
 
+/* 购车助手面板入场：从底部抬起（小屏底部抽屉 / 桌面悬浮窗共用同一支动效） */
+@keyframes panel-rise {
+  from {
+    opacity: 0;
+    transform: translateY(28px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-panel-rise {
+  animation: panel-rise 0.5s var(--ease-spring) both;
+}
+
 .animate-slide-up {
   animation: slide-up 0.55s var(--ease-spring) both;
 }
@@ -320,6 +336,24 @@ h3 {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.85),
     0 20px 56px -20px rgba(0, 0, 0, 0.22);
+}
+
+/* ── 购车助手打开时的页面让位（桌面 dock，≥1280px） ────────────────
+   会话框 380px + 右缘 24px = 404px：打开时页面右侧留出等宽通道，内容区整体收窄，
+   卡片再也不会被悬浮窗压住、也不会出现「卡片边缘被切齐在窗边」的贴合观感。
+   小屏不收窄——那里会话框是底部抽屉 + 遮罩（见 AgentChat.tsx）。
+   面板默认关闭，因此未打开时所有断点的布局与桌面基线完全一致。 */
+@media (min-width: 1280px) {
+  body {
+    transition: padding-right 0.45s var(--ease-apple);
+  }
+  body.agent-open {
+    padding-right: 404px;
+  }
+  /* 底部对比栏是 fixed 定位（不受 body padding 影响），让它对齐收窄后内容区的中心 */
+  body.agent-open .compare-dock {
+    margin-left: -202px;
+  }
 }
 
 /* ── 装饰工具类 ─────────────────────────────────────────────────── */
