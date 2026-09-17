@@ -66,6 +66,9 @@ def test_asks_catalog_count_positive():
         "SUV有多少款车",
         "奔驰有多少款车",
         "车型数量",
+        "品牌一共有几个",
+        "车型一共多少款",
+        "款型数量是多少",
         # 「盘点」是数量问法的常见前缀：数量仍以确定性计数为准（工具循环只能看到截断结果）
         "盘点一下有多少款车",
     ):
@@ -85,8 +88,17 @@ def test_asks_catalog_count_negative():
         # 评审建议 1：排名/解释类问法拿总数回答等于答非所问
         "哪个品牌车型数量最多",
         "帮我解释一下车型数量是什么意思",
+        # 评审二轮阻塞项回归：分支 ④⑤ 一度把「名词+的+属性+是多少」当盘点（15 条误命中）
+        "这个车型的价格是多少",
+        "车系的销量是多少",
+        "这个品牌有多少年的历史",
+        "车型的续航里程是多少",
+        "车系的价格区间是多少",
+        "品牌的保值率是多少",
     ):
         assert not asks_catalog_count(text), f"不应识别为盘点计数：{text}"
+    # 已知边界（评审二轮确认可接受，勿当成回归）：尾部省略名词、依赖上下文的计数问法
+    #   「一共有几款」「有没有15万以内的车，有多少款」——当前不识别，落到既有链路。
 
 
 def test_catalog_overview_counts_from_db(db_session: Session):
@@ -180,6 +192,7 @@ def test_body_count_question_answered_for_subset(client: TestClient, db_session:
     text = out.get("explanation") or ""
     assert out["filters"].get("series_count") == 2, f"应只数 SUV，实际：{text}"
     assert "SUV" in text, f"范围应说明是 SUV，实际：{text}"
+    assert "共 2 个车系" in text, f"正文应报出子集车系数，实际：{text}"
 
 
 def test_constrained_count_falls_back_to_recommendation_chain(client: TestClient, db_session: Session):

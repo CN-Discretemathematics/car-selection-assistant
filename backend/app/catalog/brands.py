@@ -155,7 +155,12 @@ def catalog_overview(
             VehicleSeries.body_type,
             VehicleSeries.energy_types,
             VehicleSeries.source_id,
-        ).where(VehicleSeries.active_status == "active")
+        )
+        # 内连接 Brand：孤儿车系（无品牌/品牌缺失）不计入——口径与站内列表页
+        # （vehicles/router.py 的 /vehicles）完全一致；列表页同样不按品牌 active 过滤，
+        # 故这里也不过滤，两边数字永远可以对得上（2026-09-17 评审建议 3）。
+        .join(Brand, Brand.id == VehicleSeries.brand_id)
+        .where(VehicleSeries.active_status == "active")
     ).all()
 
     wanted_types = set(energy_allowed or ())
