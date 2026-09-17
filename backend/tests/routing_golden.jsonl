@@ -1,0 +1,91 @@
+{"utterance": "全部车型有多少款车？", "expect_intent": "catalog_count", "known_gap": false, "note": "2026-09-17 用户实测缺陷原句：必须读库报数，不得追问预算"}
+{"utterance": "一共有多少款车", "expect_intent": "catalog_count", "known_gap": false, "note": "test_catalog_count 正例"}
+{"utterance": "现在有多少个车系", "expect_intent": "catalog_count", "known_gap": false, "note": "test_catalog_count 正例"}
+{"utterance": "库里有几款车型", "expect_intent": "catalog_count", "known_gap": false, "note": "test_catalog_count 正例"}
+{"utterance": "总共有多少款车", "expect_intent": "catalog_count", "known_gap": false, "note": "test_catalog_count 正例"}
+{"utterance": "车系总数是多少", "expect_intent": "catalog_count", "known_gap": false, "note": "分支⑥：名词+总数/数量"}
+{"utterance": "有多少款新能源车", "expect_intent": "catalog_count", "known_gap": false, "note": "评审 B2：修饰词夹在中间的问法"}
+{"utterance": "有多少款SUV", "expect_intent": "catalog_count", "known_gap": false, "note": "分支③：省略名词；车身偏好不排除，按子集计数"}
+{"utterance": "有多少款纯电车", "expect_intent": "catalog_count", "known_gap": false, "note": "评审 B2 正例"}
+{"utterance": "有多少款电动车", "expect_intent": "catalog_count", "known_gap": false, "note": "「电动车」以车字收尾命中分支②"}
+{"utterance": "现在在售车型一共几款", "expect_intent": "catalog_count", "known_gap": false, "note": "分支⑤：名词在前"}
+{"utterance": "车系有多少", "expect_intent": "catalog_count", "known_gap": false, "note": "分支④：句尾省略量词"}
+{"utterance": "现在在售车系有几个", "expect_intent": "catalog_count", "known_gap": false, "note": "分支④⑤组合"}
+{"utterance": "SUV有多少款车", "expect_intent": "catalog_count", "known_gap": false, "note": "评审建议 2：带车身答子集计数"}
+{"utterance": "车型数量", "expect_intent": "catalog_count", "known_gap": false, "note": "分支⑥：名词+数量"}
+{"utterance": "品牌一共有几个", "expect_intent": "catalog_count", "known_gap": false, "note": "test_catalog_count 正例"}
+{"utterance": "车型一共多少款", "expect_intent": "catalog_count", "known_gap": false, "note": "test_catalog_count 正例"}
+{"utterance": "款型数量是多少", "expect_intent": "catalog_count", "known_gap": false, "note": "test_catalog_count 正例"}
+{"utterance": "盘点一下有多少款车", "expect_intent": "catalog_count", "known_gap": false, "note": "「盘点」前缀仍以确定性计数为准（有意不加 not asks_tool_assist）"}
+{"utterance": "奔驰有多少款车", "expect_intent": "brand_lineup", "known_gap": false, "note": "评审 B1：品牌计数归品牌盘点，不得答全库数"}
+{"utterance": "丰田都有哪些车型", "expect_intent": "brand_lineup", "known_gap": false, "note": "品牌盘点问法（assume_constraint 升级为品牌约束）"}
+{"utterance": "奔驰都有哪些车型", "expect_intent": "brand_lineup", "known_gap": false, "note": "2026-09 实测缺陷原句"}
+{"utterance": "奔驰全系有哪些车", "expect_intent": "brand_lineup", "known_gap": false, "note": "「全系」命中盘点词表"}
+{"utterance": "比亚迪有什么车型", "expect_intent": "brand_lineup", "known_gap": false, "note": "品牌盘点问法"}
+{"utterance": "零跑有哪些系列", "expect_intent": "brand_lineup", "known_gap": false, "note": "「有哪些系列」命中盘点词表"}
+{"utterance": "凯美瑞怎么样", "expect_intent": "series_qa", "known_gap": false, "note": "单车系+提问触发词"}
+{"utterance": "凯美瑞和汉兰达相比有什么优点", "expect_intent": "series_qa", "known_gap": false, "note": "双车系无条件走问答"}
+{"utterance": "汉兰达有什么优点", "expect_intent": "series_qa", "known_gap": false, "note": "test_series_qa 代表问法"}
+{"utterance": "汉兰达油耗是多少", "expect_intent": "series_qa", "known_gap": false, "note": "参数提问句式（评审 M-R10）"}
+{"utterance": "星愿续航多少", "expect_intent": "series_qa", "known_gap": false, "note": "参数提问句式"}
+{"utterance": "奔驰A级有没有空气悬架", "expect_intent": "series_qa", "known_gap": false, "note": "「有没有X」参数提问"}
+{"utterance": "凯美瑞和汉兰达选哪个", "expect_intent": "series_qa", "known_gap": false, "note": "双车系+选哪个"}
+{"utterance": "零跑A10和星愿哪个好", "expect_intent": "series_qa", "known_gap": false, "note": "双车系+哪个好"}
+{"utterance": "解释一下凯美瑞现在的情况，给点官方信息", "expect_intent": "tool_loop", "known_gap": false, "note": "test_tool_loop 主用例问法"}
+{"utterance": "解释一下什么是增程式", "expect_intent": "tool_loop", "known_gap": false, "note": "概念解释类自由问法"}
+{"utterance": "对比一下秦PLUS和海豹06", "expect_intent": "tool_loop", "known_gap": false, "note": "无款型 ID 的对比措辞归工具循环"}
+{"utterance": "盘点一下现在有哪些车", "expect_intent": "tool_loop", "known_gap": false, "note": "test_tool_loop_forced_final_answer 问法（列举而非计数）"}
+{"utterance": "解释一下比亚迪的销量表现怎么样", "expect_intent": "tool_loop", "known_gap": false, "note": "长品牌名非约束提及也算汽车语境（2026-09-15 实测缺口）"}
+{"utterance": "奔驰有哪些新能源车", "expect_intent": "tool_loop", "known_gap": false, "note": "边界：「有哪些」与能源词不相邻不构成盘点问法；工具循环 vehicle_search(brand=) 作答"}
+{"utterance": "电动车和油车哪个好？", "expect_intent": "tool_loop", "known_gap": false, "note": "边界：「哪个好」先被 0.75 工具循环接管（无 LLM 时退化为普通对话，test_agent 既有断言兼容）"}
+{"utterance": "对比一下秦PLUS和海豹06差异", "expect_intent": "tool_loop", "known_gap": false, "note": "comparison 需要款型 ID，纯文字对比归工具循环"}
+{"utterance": "帮我解释一下车型数量是什么意思", "expect_intent": "tool_loop", "known_gap": false, "note": "评审建议 1：解释语境不算盘点计数（exclude 词表）"}
+{"utterance": "20~30万有哪些增程SUV", "expect_intent": "recommendation", "known_gap": false, "note": "test_tool_loop_gate：带预算不得被工具循环接管"}
+{"utterance": "我平时3个人坐，有哪些增程SUV", "expect_intent": "recommendation", "known_gap": false, "note": "test_tool_loop_gate：带人数留在推荐链"}
+{"utterance": "每天通勤用，解释一下有哪些新能源SUV", "expect_intent": "recommendation", "known_gap": false, "note": "test_tool_loop_gate：带用途留在推荐链"}
+{"utterance": "帮我解释一下量子纠缠", "expect_intent": "chitchat", "known_gap": false, "note": "test_tool_loop_scope：无汽车语境不得劫持"}
+{"utterance": "华为和苹果哪个好", "expect_intent": "chitchat", "known_gap": false, "note": "非汽车话题"}
+{"utterance": "银河系有多少颗恒星", "expect_intent": "chitchat", "known_gap": false, "note": "易混短品牌名（银河）不算汽车语境（第三轮审查 M1）"}
+{"utterance": "帮我把这段话改得大众化一点", "expect_intent": "chitchat", "known_gap": false, "note": "易混短品牌名（大众）+ 无汽车信号"}
+{"utterance": "（款型ID：11、12、13）帮我分析一下差异", "expect_intent": "comparison", "known_gap": false, "note": "对比页「帮我分析差异」拼接句式"}
+{"utterance": "variant_ids=11,12,13 帮我分析差异", "expect_intent": "comparison", "known_gap": false, "note": "variant_ids= 参数式拼接"}
+{"utterance": "款型ID：5、9 这两个配置有什么区别", "expect_intent": "comparison", "known_gap": false, "note": "两个款型的差异分析"}
+{"utterance": "你好", "expect_intent": "chitchat", "known_gap": false, "note": "实际经 is_chatty 提前返回（0.6 之前的有状态区段）；decide_route 对同句同向判 chitchat"}
+{"utterance": "今天天气不错", "expect_intent": "chitchat", "known_gap": false, "note": "无购车意图普通对话"}
+{"utterance": "帮我算个题", "expect_intent": "chitchat", "known_gap": false, "note": "无购车意图普通对话"}
+{"utterance": "现代人压力大怎么办", "expect_intent": "chitchat", "known_gap": false, "note": "test_tool_loop_gate 同款日常语"}
+{"utterance": "混动和燃油怎么选", "expect_intent": "general_advice", "known_gap": false, "note": "通用咨询：「怎么选」不命中工具循环词表，落通用咨询"}
+{"utterance": "新能源车和燃油车怎么选", "expect_intent": "general_advice", "known_gap": false, "note": "仅能源偏好不算核心约束，通用咨询作答"}
+{"utterance": "我想买台车", "expect_intent": "recommendation", "known_gap": false, "note": "test_agent 追问链入口（无画像先问预算）"}
+{"utterance": "帮我推荐一台车", "expect_intent": "recommendation", "known_gap": false, "note": "购车意图兜底"}
+{"utterance": "预算12万", "expect_intent": "recommendation", "known_gap": false, "note": "test_agent：补预算后追问用途"}
+{"utterance": "预算15万，家庭用车，5口人，想要新能源SUV", "expect_intent": "recommendation", "known_gap": false, "note": "完整画像直接推荐"}
+{"utterance": "预算5万，家庭用车，5口人，想要燃油MPV", "expect_intent": "recommendation", "known_gap": false, "note": "空结果也要走推荐链如实说明"}
+{"utterance": "预算12万，2个人", "expect_intent": "recommendation", "known_gap": false, "note": "部分画像 targeted clarify 在推荐链内"}
+{"utterance": "随便推荐吧", "expect_intent": "recommendation", "known_gap": false, "note": "宽松授权在推荐链内判定（需核心画像）"}
+{"utterance": "想要纯电的车", "expect_intent": "recommendation", "known_gap": false, "note": "仅能源偏好不足授权，仍追问核心画像（评审 S1）"}
+{"utterance": "不要燃油车，预算18万，家庭用5人", "expect_intent": "recommendation", "known_gap": false, "note": "avoid 硬过滤在推荐链内"}
+{"utterance": "预算 20 万，家用 5 人", "expect_intent": "recommendation", "known_gap": false, "note": "test_catalog_count 负例：带核心约束的计数守卫交回推荐链"}
+{"utterance": "15 万以内有哪些车", "expect_intent": "recommendation", "known_gap": false, "note": "带约束的列举不进工具循环"}
+{"utterance": "必须是奔驰", "expect_intent": "recommendation", "known_gap": false, "note": "品牌约束写入画像，走确定性推荐链（2026-09 实测缺陷回归）"}
+{"utterance": "只要奔驰", "expect_intent": "recommendation", "known_gap": false, "note": "同上：BRAND_INTENT_RE 命中"}
+{"utterance": "不要奔驰", "expect_intent": "recommendation", "known_gap": false, "note": "否定品牌记为排除项，仍走推荐链"}
+{"utterance": "这款车有多少个座位", "expect_intent": "chitchat", "known_gap": false, "note": "test_catalog_count 负例：问配置项不是盘点；无购车关键词落闲聊（现状行为）"}
+{"utterance": "哪款车有多少马力", "expect_intent": "recommendation", "known_gap": false, "note": "test_catalog_count 负例：问配置项；「哪款」构成购车意图落推荐链"}
+{"utterance": "一次充电能跑多少公里", "expect_intent": "recommendation", "known_gap": false, "note": "test_catalog_count 负例：「充电」线索使 structured=True，落推荐链（现状行为）"}
+{"utterance": "汉兰达有几个版本", "expect_intent": "chitchat", "known_gap": false, "note": "指名车系但无问答触发词（_SERIES_QA_RE 无「几个」）；版本差异需「区别/怎么选」类词才归 0.55（现状行为）"}
+{"utterance": "哪个品牌车型数量最多", "expect_intent": "recommendation", "known_gap": false, "note": "评审建议 1：排名语境不算计数，不拿总数答非所问"}
+{"utterance": "这个车型的价格是多少", "expect_intent": "recommendation", "known_gap": false, "note": "评审二轮阻塞项回归：「名词+的+属性」不得当盘点"}
+{"utterance": "车系的销量是多少", "expect_intent": "chitchat", "known_gap": false, "note": "test_catalog_count 负例；「车系」不在购车意图词表（现状行为）"}
+{"utterance": "这个品牌有多少年的历史", "expect_intent": "chitchat", "known_gap": false, "note": "test_catalog_count 负例：属性问句非盘点（现状行为）"}
+{"utterance": "车型的续航里程是多少", "expect_intent": "recommendation", "known_gap": false, "note": "test_catalog_count 负例：「车型/续航」构成购车意图，无问答触发词落推荐链"}
+{"utterance": "车系的价格区间是多少", "expect_intent": "chitchat", "known_gap": false, "note": "test_catalog_count 负例（现状行为：无购车意图词落闲聊）"}
+{"utterance": "品牌的保值率是多少", "expect_intent": "chitchat", "known_gap": false, "note": "test_catalog_count 负例（现状行为）"}
+{"utterance": "一共有几款", "expect_intent": "catalog_count", "known_gap": true, "note": "已知差距：尾部省略名词的计数问法当前不识别（test_catalog_count 注明的可接受边界），单轮实测落 chitchat"}
+{"utterance": "有没有15万以内的车，有多少款", "expect_intent": "catalog_count", "known_gap": true, "note": "已知差距：约束+计数复合句，计数部分被约束遮蔽，实测落 recommendation"}
+{"utterance": "没有燃油的吗", "expect_intent": "brand_lineup", "known_gap": true, "note": "已知差距：需前轮「只要奔驰」建立品牌上下文；单轮无品牌时实测落 recommendation"}
+{"utterance": "有纯电的吗", "expect_intent": "brand_lineup", "known_gap": true, "note": "已知差距：同上，能源盘点问法依赖多轮品牌上下文"}
+{"utterance": "我看他们价格差不多", "expect_intent": "series_qa", "known_gap": true, "note": "已知差距：代词指代会话锁定车系，单轮 harness 无锁定上下文"}
+{"utterance": "这两个哪个更省油", "expect_intent": "series_qa", "known_gap": true, "note": "已知差距：代词指代前轮对比对象"}
+{"utterance": "那SUV呢", "expect_intent": "recommendation", "known_gap": true, "note": "已知差距：尾部省略式追问依赖上一轮意图"}
+{"utterance": "这款车的不同款型怎么选", "expect_intent": "series_qa", "known_gap": true, "note": "已知差距：版本差异问法归 0.55（decide_route 之前的有状态分支），需本轮点名或会话锁定车系；单轮实测落 chitchat"}
