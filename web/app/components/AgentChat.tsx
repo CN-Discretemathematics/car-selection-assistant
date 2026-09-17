@@ -55,6 +55,10 @@ export default function AgentChat() {
   const [error, setError] = useState<string | null>(null);
   const [nudge, setNudge] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const launcherRef = useRef<HTMLButtonElement>(null);
+  // ≥1280px 是停靠面板（页面仍可交互）；<1280px 是带遮罩的模态抽屉——aria-modal 只在前者之外成立
+  const [docked, setDocked] = useState(false);
   // 页面触发（§12.1：对比页「帮我分析差异」、筛选反复清空等）：展开聊天窗并发起消息。
   // send 依赖会话状态，用 ref 保持监听器始终拿到最新闭包。
   const sendRef = useRef(send);
@@ -107,11 +111,33 @@ export default function AgentChat() {
     return () => document.body.classList.remove("agent-open");
   }, [open]);
 
-  // Esc 收起（键盘可达性：小屏抽屉会盖住页面，必须有纯键盘退出方式）
+  // 断点与 CSS 的 @media (min-width:1280px) 对齐：决定抽屉是否模态、启动按钮是否仍在版面里
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1280px)");
+    const sync = () => setDocked(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
+
+  /**
+   * 焦点管理（键盘可达性）：<1280px 打开时启动按钮 display:none，若不接管焦点，
+   * 焦点会落回 body、Tab 要从页首重来才能进抽屉。打开即聚焦输入框，关闭把焦点还给启动按钮。
+   */
+  useEffect(() => {
+    if (open) {
+      const id = requestAnimationFrame(() => inputRef.current?.focus());
+      return () => cancelAnimationFrame(id);
+    }
+    launcherRef.current?.focus();
+  }, [open]);
+
+  // Esc 收起（键盘可达性：小屏抽屉会盖住页面，必须有纯键盘退出方式）。
+  // 输入法组合期间的 Esc 是「取消候选词」，不能顺手关闭抽屉。
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape" && !e.isComposing) setOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -196,7 +222,12 @@ export default function AgentChat() {
       {/* 容器：小屏贴底占满宽度（抽屉），桌面收在右下角（悬浮窗，此时页面已让位） */}
       <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col items-end gap-3 xl:inset-x-auto xl:bottom-6 xl:right-6">
         {open && (
-          <div className="glass-strong animate-panel-rise pointer-events-auto flex h-[min(85dvh,620px)] w-full origin-bottom flex-col overflow-hidden rounded-t-[28px] border-t border-black/[0.07] pb-[env(safe-area-inset-bottom)] xl:h-[min(540px,calc(100dvh-7rem))] xl:w-[380px] xl:origin-bottom-right xl:rounded-[28px] xl:border xl:pb-0">
+          <div
+            role="dialog"
+            aria-label="购车助手"
+            aria-modal={docked ? undefined : true}
+            className="glass-strong animate-panel-rise pointer-events-auto flex h-[min(85dvh,620px)] w-full origin-bottom flex-col overflow-hidden rounded-t-[28px] border-t border-black/[0.07] pb-[env(safe-area-inset-bottom)] xl:h-[min(540px,calc(100dvh-7rem))] xl:w-[380px] xl:origin-bottom-right xl:rounded-[28px] xl:border xl:pb-0"
+          >
             {/* 抽屉把手：小屏一眼看出这是可收起的底部面板（桌面悬浮窗不需要） */}
             <div className="flex shrink-0 justify-center pt-2 xl:hidden">
               <span className="h-1 w-10 rounded-full bg-black/15" />
@@ -288,6 +319,7 @@ export default function AgentChat() {
             <div className="border-t border-black/[0.06] bg-white/60 p-3 backdrop-blur-xl">
               <div className="flex items-center gap-2">
                 <input
+                  ref={inputRef}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -314,73 +346,74 @@ export default function AgentChat() {
               </div>
             </div>
           </div>
-      )}
+        )}
 
-      {/* 一次性引导气泡：只在没关闭过时出现，且不自动打开聊天窗（低打扰） */}
-      {nudge && !open && (
-        <div className="glass-strong animate-scale-in pointer-events-auto relative mr-6 max-w-[268px] origin-bottom-right rounded-[22px] rounded-br-md border border-black/[0.07] p-4 text-left shadow-[0_18px_40px_-16px_rgba(0,0,0,0.28)] xl:mr-0">
-          <button
-            type="button"
-            onClick={dismissNudge}
-            aria-label="不再提示"
-            className="press absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full text-[11px] text-ash hover:bg-black/[0.06] hover:text-ink"
-          >
-            ✕
-          </button>
-          <p className="flex items-center gap-1.5 text-[13.5px] font-semibold tracking-tight text-ink">
-            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-br from-[#0a84ff] via-apple to-[#5e5ce6] text-white">
-              <CarChatIcon className="h-4 w-4" />
-            </span>
-            买车拿不定主意？
-          </p>
-          <p className="mt-1.5 pr-4 text-xs leading-5 text-ink-soft">
-            说说预算和用途，例如「预算15万，家用5口人，想要新能源SUV」，我按真实车型数据帮你挑 3 款。
-          </p>
-          <div className="mt-2.5 flex items-center gap-2">
+        {/* 一次性引导气泡：只在没关闭过时出现，且不自动打开聊天窗（低打扰） */}
+        {nudge && !open && (
+          <div className="glass-strong animate-scale-in pointer-events-auto relative mr-6 max-w-[268px] origin-bottom-right rounded-[22px] rounded-br-md border border-black/[0.07] p-4 text-left shadow-[0_18px_40px_-16px_rgba(0,0,0,0.28)] xl:mr-0">
             <button
               type="button"
-              onClick={() => {
-                dismissNudge();
-                setOpen(true);
-              }}
-              className="press rounded-full bg-apple px-3.5 py-1.5 text-xs font-medium text-white shadow-sm shadow-apple/30 hover:bg-[#0077ed]"
+              onClick={dismissNudge}
+              aria-label="不再提示"
+              className="press absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full text-[11px] text-ash hover:bg-black/[0.06] hover:text-ink"
             >
-              帮我选车 →
+              ✕
             </button>
-            <span className="text-[11px] text-ash">免费 · 不用注册</span>
+            <p className="flex items-center gap-1.5 text-[13.5px] font-semibold tracking-tight text-ink">
+              <span className="flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-br from-[#0a84ff] via-apple to-[#5e5ce6] text-white">
+                <CarChatIcon className="h-4 w-4" />
+              </span>
+              买车拿不定主意？
+            </p>
+            <p className="mt-1.5 pr-4 text-xs leading-5 text-ink-soft">
+              说说预算和用途，例如「预算15万，家用5口人，想要新能源SUV」，我按真实车型数据帮你挑 3 款。
+            </p>
+            <div className="mt-2.5 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  dismissNudge();
+                  setOpen(true);
+                }}
+                className="press rounded-full bg-apple px-3.5 py-1.5 text-xs font-medium text-white shadow-sm shadow-apple/30 hover:bg-[#0077ed]"
+              >
+                帮我选车 →
+              </button>
+              <span className="text-[11px] text-ash">免费 · 不用注册</span>
+            </div>
           </div>
-        </div>
-      )}
-
-      <button
-        type="button"
-        onClick={() => {
-          if (!open) dismissNudge();
-          setOpen((v) => !v);
-        }}
-        aria-label={open ? "收起购车助手" : "打开购车助手：帮我选车"}
-        aria-expanded={open}
-        className={`animate-glow group pointer-events-auto mb-6 mr-6 h-14 items-center gap-2.5 rounded-full bg-gradient-to-br from-[#0a84ff] via-apple to-[#5e5ce6] px-4 text-white transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] hover:scale-105 active:scale-95 sm:px-5 xl:mr-0 xl:mb-0 ${
-          open ? "hidden xl:flex" : "flex"
-        }`}
-      >
-        {open ? (
-          <>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" className="msg-pop h-5 w-5">
-              <path d="M6 6l12 12M18 6L6 18" />
-            </svg>
-            <span className="hidden text-[15px] font-semibold tracking-tight sm:block">收起</span>
-          </>
-        ) : (
-          <>
-            <CarChatIcon className="msg-pop h-7 w-7 transition-transform duration-500 group-hover:rotate-6" />
-            <span className="hidden text-[15px] font-semibold tracking-tight sm:block">帮我选车</span>
-            <span className="hidden rounded-full bg-white/22 px-1.5 py-px text-[10px] font-bold tracking-wide sm:block">
-              AI 导购
-            </span>
-          </>
         )}
-      </button>
+
+        <button
+          ref={launcherRef}
+          type="button"
+          onClick={() => {
+            if (!open) dismissNudge();
+            setOpen((v) => !v);
+          }}
+          aria-label={open ? "收起购车助手" : "打开购车助手：帮我选车"}
+          aria-expanded={open}
+          className={`animate-glow group pointer-events-auto mb-6 mr-6 h-14 items-center gap-2.5 rounded-full bg-gradient-to-br from-[#0a84ff] via-apple to-[#5e5ce6] px-4 text-white transition-transform duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] hover:scale-105 active:scale-95 sm:px-5 xl:mr-0 xl:mb-0 ${
+            open ? "hidden xl:flex" : "flex"
+          }`}
+        >
+          {open ? (
+            <>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" className="msg-pop h-5 w-5">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+              <span className="hidden text-[15px] font-semibold tracking-tight sm:block">收起</span>
+            </>
+          ) : (
+            <>
+              <CarChatIcon className="msg-pop h-7 w-7 transition-transform duration-500 group-hover:rotate-6" />
+              <span className="hidden text-[15px] font-semibold tracking-tight sm:block">帮我选车</span>
+              <span className="hidden rounded-full bg-white/22 px-1.5 py-px text-[10px] font-bold tracking-wide sm:block">
+                AI 导购
+              </span>
+            </>
+          )}
+        </button>
       </div>
     </>
   );

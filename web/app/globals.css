@@ -354,6 +354,14 @@ h3 {
   body.agent-open .compare-dock {
     margin-left: -202px;
   }
+  /* 让位只针对页面主体：顶栏与页脚用负外边距抵消 body 让位（背景、毛玻璃与发丝线
+     仍铺满整宽，不会在会话框左侧断掉），内层再补回同样的让位，使导航与页脚文案
+     和收窄后的主体保持同一中线。 */
+  body.agent-open .site-header,
+  body.agent-open > footer {
+    margin-right: -404px;
+    padding-right: 404px;
+  }
 }
 
 /* ── 装饰工具类 ─────────────────────────────────────────────────── */
