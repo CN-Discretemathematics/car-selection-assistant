@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import re
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.catalog.series_index import normalize_name
-from app.common.models import Brand, VehicleSeries
+from app.common.models import Brand, VehicleSeries, VehicleVariant
 
 # 否定语境前缀（作用于品牌名之前 4 个字以内）
 NEGATION_PREFIXES = ("不要", "不考虑", "不想", "不想要", "不选", "别买", "别要", "除了", "排除", "拒绝")
@@ -120,6 +120,94 @@ def resolve_brand_mentions(
     if exclude:
         result["brand_exclude_ids"] = sorted(exclude)
     return result
+
+
+def catalog_overview(
+    db: Session,
+    *,
+    body_types: list[str] | None = None,
+    energy_allowed: set[str] | None = None,
+) -> dict:
+    """全库在售盘点（确定性，供「全部车型有多少款车」这类计数问题）。
+
+    背景（2026-09-17 用户实测）：这句话此前既没进品牌盘点、也没进工具循环，
+    直接落进推荐链去追问预算。数量类问题必须读库如实报数。
+
+    口径与站内列表页一致：车系取 `VehicleSeries.active_status == "active"`，
+    款型取 `VehicleVariant.status == "on_sale"`；能源分桶语义同 `/vehicles?energy_type=`。
+
+    **能源分桶一律不做减法**（2026-09-17 评审 B3）：`energy_types` 为空的车系既不算燃油、
+    也不算新能源，单列 `unlabeled_series_count`。真库实测 23 个在售车系里 20 个未标注，
+    「总数 − 燃油」会答出「新能源 22 个」，而按站内口径实际只有 2 个——把缺失值当事实。
+
+    可选过滤（把「SUV 有多少款车」「有多少款新能源车」这类问句答成子集计数，而不是全库数）：
+    `body_types` 命中任一即计入；`energy_allowed` 是**已展开的具体能源类型集合**
+    （如 BEV/PHEV/HEV/ICE）——泛化词 `new_energy`/`fuel` 由调用方按引擎口径
+    （`_expand_energy_prefs`）展开后再传，避免这里再维护一套词表而与推荐链不一致。
+    """
+    from app.common.enums import NEW_ENERGY_TYPES
+
+    new_energy_set = set(NEW_ENERGY_TYPES)
+    rows = db.execute(
+        select(
+            VehicleSeries.id,
+            VehicleSeries.brand_id,
+            VehicleSeries.body_type,
+            VehicleSeries.energy_types,
+            VehicleSeries.source_id,
+        )
+        # 内连接 Brand：孤儿车系（无品牌/品牌缺失）不计入——口径与站内列表页
+        # （vehicles/router.py 的 /vehicles）完全一致；列表页同样不按品牌 active 过滤，
+        # 故这里也不过滤，两边数字永远可以对得上（2026-09-17 评审建议 3）。
+        .join(Brand, Brand.id == VehicleSeries.brand_id)
+        .where(VehicleSeries.active_status == "active")
+    ).all()
+
+    wanted_types = set(energy_allowed or ())
+    wanted_body = set(body_types or [])
+
+    def keep(row) -> bool:
+        if wanted_body and row.body_type not in wanted_body:
+            return False
+        if not wanted_types:
+            return True
+        return bool(set(row.energy_types or []) & wanted_types)
+
+    selected = [row for row in rows if keep(row)]
+    # 款型数按车系分组一次查完（避免逐车系 N+1；也不用把 1k+ id 塞进 IN 列表）
+    variants_per_series = dict(
+        db.execute(
+            select(VehicleVariant.series_id, func.count(VehicleVariant.id))
+            .where(VehicleVariant.status == "on_sale")
+            .group_by(VehicleVariant.series_id)
+        ).all()
+    )
+    fuel_count = sum(1 for r in selected if (set(r.energy_types or []) - new_energy_set))
+    nev_count = sum(1 for r in selected if (set(r.energy_types or []) & new_energy_set))
+    unlabeled = sum(1 for r in selected if not r.energy_types)
+    without_variants = sum(1 for r in selected if not variants_per_series.get(r.id))
+    # 来源按覆盖车系数排序（同数时按 id 稳定排序，避免引用随扫描顺序抖动）
+    source_counts: dict[int, int] = {}
+    for row in selected:
+        if row.source_id:
+            source_counts[row.source_id] = source_counts.get(row.source_id, 0) + 1
+    source_ids = [sid for sid, _ in sorted(source_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:2]]
+    return {
+        "series_count": len(selected),
+        "variant_count": sum(variants_per_series.get(r.id, 0) for r in selected),
+        "brand_count": len({r.brand_id for r in selected if r.brand_id}),
+        "fuel_series_count": fuel_count,
+        "new_energy_series_count": nev_count,
+        "unlabeled_series_count": unlabeled,
+        # 燃油与新能源可重叠（同一车系两种款型都有），故不保证 fuel + nev == series_count
+        "energy_overlap_count": sum(
+            1
+            for r in selected
+            if (set(r.energy_types or []) - new_energy_set) and (set(r.energy_types or []) & new_energy_set)
+        ),
+        "without_variants": without_variants,
+        "source_ids": source_ids,
+    }
 
 
 def brand_series_overview(db: Session, brand_ids: list[int], budget_max: float | None = None) -> dict:

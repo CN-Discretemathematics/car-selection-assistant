@@ -24,6 +24,7 @@ from app.agent.schemas import (
 )
 from app.agent.series_qa import (
     NEGATION_RE,
+    _BODY_LABEL,
     asks_variant_diff,
     build_series_qa_answer,
     build_variant_diff_answer,
@@ -138,6 +139,42 @@ def asks_brand_lineup(message: str) -> bool:
     「奔驰在售就 3 款，都是纯电」，而库里是 57 款、燃油 37 款。
     """
     return bool(_BRAND_LINEUP_RE.search(message)) or bool(_ENERGY_ASK_RE.search(message))
+
+
+# 全库盘点计数（2026-09-17 用户实测：「全部车型有多少款车？」被当成选车需求去追问预算）。
+# 只认**数量问法**，不认列举问法（「有哪些车型」由品牌盘点/工具循环接管），
+# 也不认配置项计数（「有多少个座位」问的是配置，不是盘点车系）。
+# 分支覆盖（2026-09-17 评审 B2：只匹配「多少款+名词」会漏掉修饰词夹在中间的同类问句）：
+#   ① 多少/几 +（量词）+ 车系·车型·款型·品牌·车         「全部车型有多少款车」
+#   ② 多少/几 + 量词 + ≤5 字修饰 + 名词                 「有多少款新能源车」「有多少款纯电车」
+#   ③ 多少/几 + 量词 + 能源/车身类别（省略名词）          「有多少款SUV」
+#   ④ 名词 +（有|是）+ 几/多少 +（量词）+（句尾）      「车系有多少」「现在在售车系有几个」
+#   ⑤ 名词 + ≤6 字 + 几/多少 +（量词）+（句尾）        「现在在售车型一共几款」
+#   ⑥ 名词 + 的? + 总数/数量                            「车系总数是多少」
+#   ④⑤ 必须：名词后不得紧跟「的」（排除「这个车型的价格是多少」这类**属性**问句）、
+#   且「几/多少」后面要到量词或子句结束——否则「多少」修饰的是车系/品牌的某个属性，
+#   会把属性问句答成全库盘点数（2026-09-17 评审二轮阻塞项，16 条误命中全由此来）。
+_CATALOG_COUNT_RE = re.compile(
+    r"((多少|几)\s*(款|个|台|辆|种)?\s*(车系|车型|款型|品牌|车)"
+    r"|(多少|几)\s*(款|个|台|辆|种)\s*[\u4e00-\u9fa5A-Za-z0-9]{1,5}?(车系|车型|款型|品牌|车)"
+    r"|(多少|几)\s*(款|个|台|辆|种)\s*(新能源|纯电|插混|增程|油混|燃油|汽油|SUV|MPV|轿车)"
+    r"|(车系|车型|款型|品牌)(?!的)\s*(有|是)?\s*(几|多少)\s*(款|个|台|辆|种)?\s*(?=$|[。！？?!，,、；;\s])"
+    r"|(车系|车型|款型|品牌)(?!的)[^。！？，,]{0,6}?(几|多少)\s*(款|个|台|辆|种)?\s*(?=$|[。！？?!，,、；;\s])"
+    r"|(车系|车型|款型|品牌)\s*的?\s*(总数|数量|总数量))",
+    re.IGNORECASE,
+)
+# 排名/对比/解释语境问的不是「有多少」：拿总数回答排名问题等于答非所问（2026-09-17 评审建议 1）
+_CATALOG_COUNT_EXCLUDE_RE = re.compile(r"(最多|最少|排行|排名|对比|区别|解释|为什么|怎么算|是什么意思)")
+
+
+def asks_catalog_count(message: str) -> bool:
+    """是否在问「全库有多少款车/多少个车系」这类需要读库报数的盘点问题。
+
+    排名/对比/解释类措辞一律不算（「哪个品牌车型数量最多」问的是排名，不是总数）。
+    """
+    if _CATALOG_COUNT_EXCLUDE_RE.search(message):
+        return False
+    return bool(_CATALOG_COUNT_RE.search(message))
 
 
 # 对比页「帮我分析差异」会带上具体款型 ID（前端拼接），Agent 据此做确定性差异分析。
@@ -459,6 +496,16 @@ _ENERGY_HINTS = {
     "汽油": "ICE",
     "新能源": "new_energy",
 }
+# 能源 token → 中文（盘点范围与推荐理由共用同一套说法）
+_ENERGY_LABEL = {
+    "BEV": "纯电",
+    "PHEV": "插混",
+    "EREV": "增程",
+    "HEV": "油混",
+    "ICE": "燃油",
+    "new_energy": "新能源",
+    "fuel": "燃油（含油混）",
+}
 _USAGE_HINTS = {
     "上下班": "通勤",
     "通勤": "通勤",
@@ -731,7 +778,7 @@ class AgentEngine:
             db,
             message,
             series_names=[s.name for s, _brand in resolved],
-            assume_constraint=asks_brand_lineup(message),
+            assume_constraint=asks_brand_lineup(message) or asks_catalog_count(message),
         )
         if brand_hints:
             profile = merge_profile(profile, brand_hints)
@@ -795,11 +842,43 @@ class AgentEngine:
         if resolved and should_answer(resolved, message):
             return await self._series_qa_reply(db, session_id, message, resolved)
 
-        # 0.7) 品牌盘点（「奔驰都有哪些车型」「没有燃油的吗」）→ 读库完整盘点。
+        # 0.7) 品牌盘点（「奔驰都有哪些车型」「没有燃油的吗」「奔驰有多少款车」）→ 读库完整盘点。
         #      必须在「无购车意图 → 普通对话」gate 之前：这类问句不一定是购车意图措辞，
         #      但需要的是库内完整事实，不能交给模型记忆。
-        if profile.brand_ids and not resolved and asks_brand_lineup(message):
+        if profile.brand_ids and not resolved and (
+            asks_brand_lineup(message) or asks_catalog_count(message)
+        ):
             return await self._brand_overview_reply(db, session_id, profile, message)
+
+        # 0.7b) 全库盘点计数（「全部车型有多少款车」）→ 读库如实报数。
+        #       必须在推荐链与工具循环之前：这句话既不含「有哪些」也不含约束词，此前直接落到
+        #       「先问一下购车预算」的追问里（2026-09-17 用户实测）。
+        #       守卫：① 带核心约束（预算/人数/用途）的计数属筛选场景，交回推荐链；
+        #       ② 排名/对比/解释语境不算计数（在 asks_catalog_count 内排除）——
+        #          这类问题拿总数回答等于答非所问（评审建议 1）；
+        #       ③ 车身/能源偏好不排除，改为按画像报该子集计数——否则「SUV 有多少款车」
+        #          会被答成全库数（评审建议 2）。
+        #       注：**不**把「盘点」类措辞推给工具循环。评审建议加上 `not asks_tool_assist`，
+        #       但工具循环只能看到被截断的工具结果，让它数总数有编造风险（例如把 limit=50 的
+        #       结果答成「50 款」）；数量问题一律以确定性计数为准，故此处有意不加该条件。
+        if (
+            asks_catalog_count(message)
+            and not resolved
+            and not profile.brand_ids
+            and not ({"budget", "passengers", "usage"} & set(hints))
+            and profile.budget.min is None
+            and profile.budget.max is None
+            and not profile.usage
+            and profile.passengers is None
+        ):
+            energy_allowed = _expand_energy_prefs(list(profile.energy_preference or []))
+            return await self._catalog_overview_reply(
+                db,
+                session_id,
+                body_types=list(profile.body_type or []) or None,
+                energy_allowed=energy_allowed or None,
+                energy_labels=[_ENERGY_LABEL.get(t, t) for t in (profile.energy_preference or [])],
+            )
 
         # 0.71) 对比差异分析（对比页「帮我分析差异」会带上款型 ID）→ 确定性分析 + LLM 措辞。
         #      必须排在**车系档案问答与工具循环之前**：那句话里同时含车系名，早先会被
@@ -1087,6 +1166,84 @@ class AgentEngine:
             recommended_variants=[],
             filters={"comparison_analysis": True, "variant_ids": variant_ids},
             reasons=[f"基于 {len(analysis['variants'])} 个款型的库内参数做确定性差异分析"],
+        )
+        await self._emit(session_id, text, out)
+        return out
+
+    async def _catalog_overview_reply(
+        self,
+        db: Session,
+        session_id: str,
+        *,
+        body_types: list[str] | None = None,
+        energy_allowed: set[str] | None = None,
+        energy_labels: list[str] | None = None,
+    ) -> AgentMessageOut:
+        """全库盘点回复：在售车系/款型/品牌数量与能源构成，全部来自数据库计数。
+
+        缺失数据一律标注：「能源类型未标注」「暂无在售款型数据」单独成句，
+        不用减法把未标注的车系算进新能源（2026-09-17 评审 B3）。
+        带能源筛选时不重复给「能源构成」——范围本身已经说明了能源。
+        """
+        from app.catalog.brands import catalog_overview
+
+        overview = await run_in_threadpool(
+            catalog_overview, db, body_types=body_types, energy_allowed=energy_allowed
+        )
+        body_label = "、".join(_BODY_LABEL.get(b, b) for b in (body_types or []))
+        energy_label = "、".join(energy_labels or [])
+        scope_name = f"{energy_label}{body_label}"
+        if scope_name:
+            head = (
+                f"目前站内在售的{scope_name}共 {overview['series_count']} 个车系、"
+                f"{overview['variant_count']} 个款型，覆盖 {overview['brand_count']} 个品牌。"
+            )
+        else:
+            head = (
+                f"目前站内有 {overview['series_count']} 个在售车系，"
+                f"共 {overview['variant_count']} 个在售款型，覆盖 {overview['brand_count']} 个品牌。"
+            )
+        parts = [head]
+        if overview["series_count"]:
+            if not energy_label:
+                buckets = []
+                if overview["fuel_series_count"]:
+                    buckets.append(f"燃油（含油混）{overview['fuel_series_count']} 个车系")
+                if overview["new_energy_series_count"]:
+                    buckets.append(f"新能源 {overview['new_energy_series_count']} 个车系")
+                if overview["unlabeled_series_count"]:
+                    buckets.append(f"能源类型未标注 {overview['unlabeled_series_count']} 个车系")
+                if buckets:
+                    overlap = overview.get("energy_overlap_count") or 0
+                    tail = f"（其中 {overlap} 个车系燃油与新能源款型并存，两端都计入）" if overlap else ""
+                    parts.append("能源构成：" + "、".join(buckets) + "。" + tail)
+            if overview["without_variants"]:
+                parts.append(f"另有 {overview['without_variants']} 个车系暂无在售款型数据。")
+            parts.append("想看其中某一类，告诉我品牌、预算或车身形式，我按库内真实数据筛。")
+        else:
+            parts.append("这个范围内目前没有在售车系数据，可以换个条件试试。")
+        text = "".join(parts)
+        citations: list[Citation] = []
+        source_ids = overview.get("source_ids") or []
+        if source_ids:
+            names = {
+                s.id: s.name
+                for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
+            }
+            for sid in source_ids:
+                citations.append(
+                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 车型数据")
+                )
+        out = AgentMessageOut(
+            session_id=session_id,
+            explanation=text,
+            citations=citations,
+            # catalog_count 供测试与运维区分「读库盘点」与其它链路（同 tool_loop 标记的做法）
+            filters={
+                "catalog_count": True,
+                "series_count": overview["series_count"],
+                "variant_count": overview["variant_count"],
+            },
         )
         await self._emit(session_id, text, out)
         return out
