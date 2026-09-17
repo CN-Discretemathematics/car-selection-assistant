@@ -255,14 +255,19 @@ export default async function VehiclePage({
                 <p className="mt-0.5 text-[26px] font-semibold leading-8 tracking-tight text-ink">
                   {v.official_price ? formatPrice(v.official_price.price_cny) : MISSING_LABEL}
                 </p>
-                <div className="mt-4 grid grid-cols-2 gap-x-5 gap-y-0 text-[13px]">
+                {/* 参数排布：一条参数一行。标签与值同行；当值分不到 9rem 时（长标签或长文本）
+                    由 flex-wrap 自动落到下一行并占满整行——避免「拖车钩及拖车资质…」这类整段
+                    配置说明被压成每行两三个字的窄柱（2026-09-17 用户反馈）。 */}
+                <div className="mt-4 grid grid-cols-1 gap-y-0 text-[13px]">
                   {v.spec_facts.slice(0, 8).map((f) => (
                     <div
                       key={`${f.category}-${f.fact_key}`}
-                      className="flex justify-between gap-2 border-b border-black/[0.04] py-1.5"
+                      className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-b border-black/[0.04] py-1.5 last:border-b-0"
                     >
-                      <span className="shrink-0 text-ash">{f.label || f.fact_key}</span>
-                      <span className="text-right font-medium text-ink-soft">{f.display}</span>
+                      <span className="min-w-0 text-ash">{f.label || f.fact_key}</span>
+                      <span className="ml-auto min-w-[9rem] text-right font-medium text-ink-soft">
+                        {f.display}
+                      </span>
                     </div>
                   ))}
                 </div>
