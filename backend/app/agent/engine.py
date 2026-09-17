@@ -493,6 +493,16 @@ _ENERGY_HINTS = {
     "汽油": "ICE",
     "新能源": "new_energy",
 }
+# 能源 token → 中文（盘点范围与推荐理由共用同一套说法）
+_ENERGY_LABEL = {
+    "BEV": "纯电",
+    "PHEV": "插混",
+    "EREV": "增程",
+    "HEV": "油混",
+    "ICE": "燃油",
+    "new_energy": "新能源",
+    "fuel": "燃油（含油混）",
+}
 _USAGE_HINTS = {
     "上下班": "通勤",
     "通勤": "通勤",
@@ -858,11 +868,13 @@ class AgentEngine:
             and not profile.usage
             and profile.passengers is None
         ):
+            energy_allowed = _expand_energy_prefs(list(profile.energy_preference or []))
             return await self._catalog_overview_reply(
                 db,
                 session_id,
                 body_types=list(profile.body_type or []) or None,
-                energy=list(profile.energy_preference or []) or None,
+                energy_allowed=energy_allowed or None,
+                energy_labels=[_ENERGY_LABEL.get(t, t) for t in (profile.energy_preference or [])],
             )
 
         # 0.71) 对比差异分析（对比页「帮我分析差异」会带上款型 ID）→ 确定性分析 + LLM 措辞。
@@ -1161,36 +1173,47 @@ class AgentEngine:
         session_id: str,
         *,
         body_types: list[str] | None = None,
-        energy: list[str] | None = None,
+        energy_allowed: set[str] | None = None,
+        energy_labels: list[str] | None = None,
     ) -> AgentMessageOut:
         """全库盘点回复：在售车系/款型/品牌数量与能源构成，全部来自数据库计数。
 
         缺失数据一律标注：「能源类型未标注」「暂无在售款型数据」单独成句，
         不用减法把未标注的车系算进新能源（2026-09-17 评审 B3）。
+        带能源筛选时不重复给「能源构成」——范围本身已经说明了能源。
         """
         from app.catalog.brands import catalog_overview
 
         overview = await run_in_threadpool(
-            catalog_overview, db, body_types=body_types, energy=energy
+            catalog_overview, db, body_types=body_types, energy_allowed=energy_allowed
         )
         body_label = "、".join(_BODY_LABEL.get(b, b) for b in (body_types or []))
-        scope = f"目前站内在售的{body_label}" if body_label else "目前站内"
-        parts = [
-            f"{scope}有 {overview['series_count']} 个在售车系，"
-            f"共 {overview['variant_count']} 个在售款型，覆盖 {overview['brand_count']} 个品牌。"
-        ]
+        energy_label = "、".join(energy_labels or [])
+        scope_name = f"{energy_label}{body_label}"
+        if scope_name:
+            head = (
+                f"目前站内在售的{scope_name}共 {overview['series_count']} 个车系、"
+                f"{overview['variant_count']} 个款型，覆盖 {overview['brand_count']} 个品牌。"
+            )
+        else:
+            head = (
+                f"目前站内有 {overview['series_count']} 个在售车系，"
+                f"共 {overview['variant_count']} 个在售款型，覆盖 {overview['brand_count']} 个品牌。"
+            )
+        parts = [head]
         if overview["series_count"]:
-            buckets = []
-            if overview["fuel_series_count"]:
-                buckets.append(f"燃油（含油混）{overview['fuel_series_count']} 个车系")
-            if overview["new_energy_series_count"]:
-                buckets.append(f"新能源 {overview['new_energy_series_count']} 个车系")
-            if overview["unlabeled_series_count"]:
-                buckets.append(f"能源类型未标注 {overview['unlabeled_series_count']} 个车系")
-            if buckets:
-                overlap = overview.get("energy_overlap_count") or 0
-                tail = f"（其中 {overlap} 个车系燃油与新能源款型并存，两端都计入）" if overlap else ""
-                parts.append("能源构成：" + "、".join(buckets) + "。" + tail)
+            if not energy_label:
+                buckets = []
+                if overview["fuel_series_count"]:
+                    buckets.append(f"燃油（含油混）{overview['fuel_series_count']} 个车系")
+                if overview["new_energy_series_count"]:
+                    buckets.append(f"新能源 {overview['new_energy_series_count']} 个车系")
+                if overview["unlabeled_series_count"]:
+                    buckets.append(f"能源类型未标注 {overview['unlabeled_series_count']} 个车系")
+                if buckets:
+                    overlap = overview.get("energy_overlap_count") or 0
+                    tail = f"（其中 {overlap} 个车系燃油与新能源款型并存，两端都计入）" if overlap else ""
+                    parts.append("能源构成：" + "、".join(buckets) + "。" + tail)
             if overview["without_variants"]:
                 parts.append(f"另有 {overview['without_variants']} 个车系暂无在售款型数据。")
             parts.append("想看其中某一类，告诉我品牌、预算或车身形式，我按库内真实数据筛。")

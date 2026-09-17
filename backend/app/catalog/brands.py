@@ -126,7 +126,7 @@ def catalog_overview(
     db: Session,
     *,
     body_types: list[str] | None = None,
-    energy: list[str] | None = None,
+    energy_allowed: set[str] | None = None,
 ) -> dict:
     """全库在售盘点（确定性，供「全部车型有多少款车」这类计数问题）。
 
@@ -140,8 +140,10 @@ def catalog_overview(
     也不算新能源，单列 `unlabeled_series_count`。真库实测 23 个在售车系里 20 个未标注，
     「总数 − 燃油」会答出「新能源 22 个」，而按站内口径实际只有 2 个——把缺失值当事实。
 
-    可选过滤（把「SUV 有多少款车」这类问句答成子集计数，而不是全库数）：
-    `body_types` 命中任一即计入；`energy` 为偏好 token 列表（可含 "fuel"，含义同列表页）。
+    可选过滤（把「SUV 有多少款车」「有多少款新能源车」这类问句答成子集计数，而不是全库数）：
+    `body_types` 命中任一即计入；`energy_allowed` 是**已展开的具体能源类型集合**
+    （如 BEV/PHEV/HEV/ICE）——泛化词 `new_energy`/`fuel` 由调用方按引擎口径
+    （`_expand_energy_prefs`）展开后再传，避免这里再维护一套词表而与推荐链不一致。
     """
     from app.common.enums import NEW_ENERGY_TYPES
 
@@ -156,20 +158,15 @@ def catalog_overview(
         ).where(VehicleSeries.active_status == "active")
     ).all()
 
-    wanted = set(energy or [])
-    want_fuel = "fuel" in wanted
-    wanted_types = wanted - {"fuel"}
+    wanted_types = set(energy_allowed or ())
     wanted_body = set(body_types or [])
 
     def keep(row) -> bool:
         if wanted_body and row.body_type not in wanted_body:
             return False
-        if not wanted:
+        if not wanted_types:
             return True
-        types = set(row.energy_types or [])
-        if want_fuel and (types - new_energy_set):
-            return True
-        return bool(types & wanted_types)
+        return bool(set(row.energy_types or []) & wanted_types)
 
     selected = [row for row in rows if keep(row)]
     # 款型数按车系分组一次查完（避免逐车系 N+1；也不用把 1k+ id 塞进 IN 列表）

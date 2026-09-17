@@ -117,11 +117,26 @@ def test_catalog_overview_filters_by_body_and_energy(db_session: Session):
     suv = catalog_overview(db_session, body_types=["suv"])
     assert suv["series_count"] == 2
     assert suv["variant_count"] == 2
-    nev = catalog_overview(db_session, energy=["PHEV"])
+    nev = catalog_overview(db_session, energy_allowed={"PHEV"})
     assert nev["series_count"] == 1
-    fuel = catalog_overview(db_session, energy=["fuel"])
+    fuel = catalog_overview(db_session, energy_allowed={"ICE", "HEV"})
     assert fuel["series_count"] == 2                 # ICE + HEV
     assert catalog_overview(db_session, body_types=["mpv"])["series_count"] == 0
+
+
+def test_energy_count_question_uses_engine_vocabulary(client: TestClient, db_session: Session):
+    """回归：profile 里的能源词是 new_energy/fuel 这类**泛化 token**，
+    过滤前必须按引擎口径展开成具体类型，否则「有多少款新能源车」会答成 0。"""
+    _seed(db_session)
+    sid = client.post("/api/v1/agent/sessions").json()["session_id"]
+    out = client.post(
+        f"/api/v1/agent/sessions/{sid}/messages",
+        json={"message": "有多少款新能源车？"},
+    ).json()
+    text = out.get("explanation") or ""
+    assert out["filters"].get("catalog_count") is True
+    assert out["filters"].get("series_count") == 1, f"新能源车系应数到 1（汉L），实际：{out['filters']} {text}"
+    assert "新能源" in text, f"应说明范围是新能源，实际：{text}"
 
 
 def test_catalog_count_question_answered_not_clarified(client: TestClient, db_session: Session):
@@ -164,7 +179,7 @@ def test_body_count_question_answered_for_subset(client: TestClient, db_session:
     ).json()
     text = out.get("explanation") or ""
     assert out["filters"].get("series_count") == 2, f"应只数 SUV，实际：{text}"
-    assert "2 个在售车系" in text, f"实际：{text}"
+    assert "SUV" in text, f"范围应说明是 SUV，实际：{text}"
 
 
 def test_constrained_count_falls_back_to_recommendation_chain(client: TestClient, db_session: Session):
