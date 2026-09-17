@@ -140,6 +140,20 @@ def asks_brand_lineup(message: str) -> bool:
     return bool(_BRAND_LINEUP_RE.search(message)) or bool(_ENERGY_ASK_RE.search(message))
 
 
+# 全库盘点计数（2026-09-17 用户实测：「全部车型有多少款车？」被当成选车需求去追问预算）。
+# 只认**数量问法**（多少/几 + 车系·车型·款型·品牌，或「车系总数」），不认列举问法：
+# 「有哪些车型」由品牌盘点/工具循环接管；「有多少个座位」问的是配置项，不能当作盘点车系。
+_CATALOG_COUNT_RE = re.compile(
+    r"((多少|几)\s*(款|个|台|辆|种)?\s*(车系|车型|款型|品牌|车)"
+    r"|(车系|车型|款型|品牌)\s*的?\s*(总数|数量|总数量))"
+)
+
+
+def asks_catalog_count(message: str) -> bool:
+    """是否在问「全库有多少款车/多少个车系」这类需要读库报数的盘点问题。"""
+    return bool(_CATALOG_COUNT_RE.search(message))
+
+
 # 对比页「帮我分析差异」会带上具体款型 ID（前端拼接），Agent 据此做确定性差异分析。
 # 两种写法都认：「（款型ID：11、12、13）」与「variant_ids=11,12,13」。
 _COMPARE_IDS_RE = re.compile(r"(?:款型\s*ID|variant_ids)\s*[:：=]\s*([0-9、,，\s]+)", re.IGNORECASE)
@@ -795,11 +809,29 @@ class AgentEngine:
         if resolved and should_answer(resolved, message):
             return await self._series_qa_reply(db, session_id, message, resolved)
 
-        # 0.7) 品牌盘点（「奔驰都有哪些车型」「没有燃油的吗」）→ 读库完整盘点。
+        # 0.7) 品牌盘点（「奔驰都有哪些车型」「没有燃油的吗」「奔驰有多少款车」）→ 读库完整盘点。
         #      必须在「无购车意图 → 普通对话」gate 之前：这类问句不一定是购车意图措辞，
         #      但需要的是库内完整事实，不能交给模型记忆。
-        if profile.brand_ids and not resolved and asks_brand_lineup(message):
+        if profile.brand_ids and not resolved and (
+            asks_brand_lineup(message) or asks_catalog_count(message)
+        ):
             return await self._brand_overview_reply(db, session_id, profile, message)
+
+        # 0.7b) 全库盘点计数（「全部车型有多少款车」）→ 读库如实报数。
+        #       必须在推荐链之前：这句话既不含「有哪些」也不含约束词，此前直接落到
+        #       「先问一下购车预算」的追问里（2026-09-17 用户实测）。
+        #       带核心约束（预算/人数/用途）的计数属于筛选场景，仍交给推荐链下推 SQL。
+        if (
+            asks_catalog_count(message)
+            and not resolved
+            and not profile.brand_ids
+            and not ({"budget", "passengers", "usage"} & set(hints))
+            and profile.budget.min is None
+            and profile.budget.max is None
+            and not profile.usage
+            and profile.passengers is None
+        ):
+            return await self._catalog_overview_reply(db, session_id)
 
         # 0.71) 对比差异分析（对比页「帮我分析差异」会带上款型 ID）→ 确定性分析 + LLM 措辞。
         #      必须排在**车系档案问答与工具循环之前**：那句话里同时含车系名，早先会被
@@ -1087,6 +1119,43 @@ class AgentEngine:
             recommended_variants=[],
             filters={"comparison_analysis": True, "variant_ids": variant_ids},
             reasons=[f"基于 {len(analysis['variants'])} 个款型的库内参数做确定性差异分析"],
+        )
+        await self._emit(session_id, text, out)
+        return out
+
+    async def _catalog_overview_reply(self, db: Session, session_id: str) -> AgentMessageOut:
+        """全库盘点回复：在售车系/款型/品牌数量与能源构成，全部来自数据库计数。"""
+        from app.catalog.brands import catalog_overview
+
+        overview = await run_in_threadpool(catalog_overview, db)
+        text = (
+            f"目前站内有 {overview['series_count']} 个在售车系，"
+            f"共 {overview['variant_count']} 个在售款型，覆盖 {overview['brand_count']} 个品牌。"
+            f"其中燃油（含油混）{overview['fuel_series_count']} 个车系，"
+            f"新能源 {overview['new_energy_series_count']} 个车系。"
+            "想看其中某一类，告诉我品牌、预算或车身形式，我按库内真实数据筛。"
+        )
+        citations: list[Citation] = []
+        source_ids = overview.get("source_ids") or []
+        if source_ids:
+            names = {
+                s.id: s.name
+                for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
+            }
+            for sid in source_ids:
+                citations.append(
+                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 车型数据")
+                )
+        out = AgentMessageOut(
+            session_id=session_id,
+            explanation=text,
+            citations=citations,
+            # catalog_count 供测试与运维区分「读库盘点」与其它链路（同 tool_loop 标记的做法）
+            filters={
+                "catalog_count": True,
+                "series_count": overview["series_count"],
+                "variant_count": overview["variant_count"],
+            },
         )
         await self._emit(session_id, text, out)
         return out

@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import re
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.catalog.series_index import normalize_name
-from app.common.models import Brand, VehicleSeries
+from app.common.models import Brand, VehicleSeries, VehicleVariant
 
 # 否定语境前缀（作用于品牌名之前 4 个字以内）
 NEGATION_PREFIXES = ("不要", "不考虑", "不想", "不想要", "不选", "别买", "别要", "除了", "排除", "拒绝")
@@ -120,6 +120,48 @@ def resolve_brand_mentions(
     if exclude:
         result["brand_exclude_ids"] = sorted(exclude)
     return result
+
+
+def catalog_overview(db: Session) -> dict:
+    """全库在售盘点（确定性，供「全部车型有多少款车」这类计数问题）。
+
+    背景（2026-09-17 用户实测）：这句话此前既没进品牌盘点、也没进工具循环，
+    直接落进推荐链去追问预算。数量类问题必须读库如实报数。
+
+    口径与站内「在售车系」一致：`VehicleSeries.active_status == "active"`（列表页同款过滤），
+    款型取 `VehicleVariant.status == "on_sale"` 且属于在售车系（同价格区间查询的口径）。
+    """
+    from app.common.enums import NEW_ENERGY_TYPES
+
+    series_rows = db.execute(
+        select(VehicleSeries.id, VehicleSeries.brand_id, VehicleSeries.energy_types, VehicleSeries.source_id)
+        .where(VehicleSeries.active_status == "active")
+    ).all()
+    fuel_count = sum(
+        1
+        for row in series_rows
+        if any(t not in NEW_ENERGY_TYPES for t in (row.energy_types or []))
+    )
+    variant_count = db.scalar(
+        select(func.count(VehicleVariant.id))
+        .select_from(VehicleVariant)
+        .join(VehicleSeries, VehicleSeries.id == VehicleVariant.series_id)
+        .where(VehicleSeries.active_status == "active", VehicleVariant.status == "on_sale")
+    )
+    # 来源按覆盖车系数排序，取前两个做引用（与品牌盘点一样：结论可溯源）
+    source_counts: dict[int, int] = {}
+    for row in series_rows:
+        if row.source_id:
+            source_counts[row.source_id] = source_counts.get(row.source_id, 0) + 1
+    source_ids = [sid for sid, _ in sorted(source_counts.items(), key=lambda kv: -kv[1])[:2]]
+    return {
+        "series_count": len(series_rows),
+        "variant_count": int(variant_count or 0),
+        "brand_count": len({row.brand_id for row in series_rows if row.brand_id}),
+        "fuel_series_count": fuel_count,
+        "new_energy_series_count": len(series_rows) - fuel_count,
+        "source_ids": source_ids,
+    }
 
 
 def brand_series_overview(db: Session, brand_ids: list[int], budget_max: float | None = None) -> dict:
