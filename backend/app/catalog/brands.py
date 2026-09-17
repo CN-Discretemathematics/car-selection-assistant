@@ -122,44 +122,88 @@ def resolve_brand_mentions(
     return result
 
 
-def catalog_overview(db: Session) -> dict:
+def catalog_overview(
+    db: Session,
+    *,
+    body_types: list[str] | None = None,
+    energy: list[str] | None = None,
+) -> dict:
     """全库在售盘点（确定性，供「全部车型有多少款车」这类计数问题）。
 
     背景（2026-09-17 用户实测）：这句话此前既没进品牌盘点、也没进工具循环，
     直接落进推荐链去追问预算。数量类问题必须读库如实报数。
 
-    口径与站内「在售车系」一致：`VehicleSeries.active_status == "active"`（列表页同款过滤），
-    款型取 `VehicleVariant.status == "on_sale"` 且属于在售车系（同价格区间查询的口径）。
+    口径与站内列表页一致：车系取 `VehicleSeries.active_status == "active"`，
+    款型取 `VehicleVariant.status == "on_sale"`；能源分桶语义同 `/vehicles?energy_type=`。
+
+    **能源分桶一律不做减法**（2026-09-17 评审 B3）：`energy_types` 为空的车系既不算燃油、
+    也不算新能源，单列 `unlabeled_series_count`。真库实测 23 个在售车系里 20 个未标注，
+    「总数 − 燃油」会答出「新能源 22 个」，而按站内口径实际只有 2 个——把缺失值当事实。
+
+    可选过滤（把「SUV 有多少款车」这类问句答成子集计数，而不是全库数）：
+    `body_types` 命中任一即计入；`energy` 为偏好 token 列表（可含 "fuel"，含义同列表页）。
     """
     from app.common.enums import NEW_ENERGY_TYPES
 
-    series_rows = db.execute(
-        select(VehicleSeries.id, VehicleSeries.brand_id, VehicleSeries.energy_types, VehicleSeries.source_id)
-        .where(VehicleSeries.active_status == "active")
+    new_energy_set = set(NEW_ENERGY_TYPES)
+    rows = db.execute(
+        select(
+            VehicleSeries.id,
+            VehicleSeries.brand_id,
+            VehicleSeries.body_type,
+            VehicleSeries.energy_types,
+            VehicleSeries.source_id,
+        ).where(VehicleSeries.active_status == "active")
     ).all()
-    fuel_count = sum(
-        1
-        for row in series_rows
-        if any(t not in NEW_ENERGY_TYPES for t in (row.energy_types or []))
+
+    wanted = set(energy or [])
+    want_fuel = "fuel" in wanted
+    wanted_types = wanted - {"fuel"}
+    wanted_body = set(body_types or [])
+
+    def keep(row) -> bool:
+        if wanted_body and row.body_type not in wanted_body:
+            return False
+        if not wanted:
+            return True
+        types = set(row.energy_types or [])
+        if want_fuel and (types - new_energy_set):
+            return True
+        return bool(types & wanted_types)
+
+    selected = [row for row in rows if keep(row)]
+    # 款型数按车系分组一次查完（避免逐车系 N+1；也不用把 1k+ id 塞进 IN 列表）
+    variants_per_series = dict(
+        db.execute(
+            select(VehicleVariant.series_id, func.count(VehicleVariant.id))
+            .where(VehicleVariant.status == "on_sale")
+            .group_by(VehicleVariant.series_id)
+        ).all()
     )
-    variant_count = db.scalar(
-        select(func.count(VehicleVariant.id))
-        .select_from(VehicleVariant)
-        .join(VehicleSeries, VehicleSeries.id == VehicleVariant.series_id)
-        .where(VehicleSeries.active_status == "active", VehicleVariant.status == "on_sale")
-    )
-    # 来源按覆盖车系数排序，取前两个做引用（与品牌盘点一样：结论可溯源）
+    fuel_count = sum(1 for r in selected if (set(r.energy_types or []) - new_energy_set))
+    nev_count = sum(1 for r in selected if (set(r.energy_types or []) & new_energy_set))
+    unlabeled = sum(1 for r in selected if not r.energy_types)
+    without_variants = sum(1 for r in selected if not variants_per_series.get(r.id))
+    # 来源按覆盖车系数排序（同数时按 id 稳定排序，避免引用随扫描顺序抖动）
     source_counts: dict[int, int] = {}
-    for row in series_rows:
+    for row in selected:
         if row.source_id:
             source_counts[row.source_id] = source_counts.get(row.source_id, 0) + 1
-    source_ids = [sid for sid, _ in sorted(source_counts.items(), key=lambda kv: -kv[1])[:2]]
+    source_ids = [sid for sid, _ in sorted(source_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:2]]
     return {
-        "series_count": len(series_rows),
-        "variant_count": int(variant_count or 0),
-        "brand_count": len({row.brand_id for row in series_rows if row.brand_id}),
+        "series_count": len(selected),
+        "variant_count": sum(variants_per_series.get(r.id, 0) for r in selected),
+        "brand_count": len({r.brand_id for r in selected if r.brand_id}),
         "fuel_series_count": fuel_count,
-        "new_energy_series_count": len(series_rows) - fuel_count,
+        "new_energy_series_count": nev_count,
+        "unlabeled_series_count": unlabeled,
+        # 燃油与新能源可重叠（同一车系两种款型都有），故不保证 fuel + nev == series_count
+        "energy_overlap_count": sum(
+            1
+            for r in selected
+            if (set(r.energy_types or []) - new_energy_set) and (set(r.energy_types or []) & new_energy_set)
+        ),
+        "without_variants": without_variants,
         "source_ids": source_ids,
     }
 
