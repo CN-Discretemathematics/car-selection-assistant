@@ -18,6 +18,7 @@ from app.brands.router import router as brands_router
 from app.common.admin_auth import AdminAuditMiddleware
 from app.common.config import get_settings
 from app.common.database import create_all, get_session_factory
+from app.common.logging_setup import configure_logging
 from app.common.ratelimit import RateLimitMiddleware
 from app.comparison.router import router as comparison_router
 from app.images.router import router as images_router
@@ -27,6 +28,9 @@ from app.sources.router import router as sources_router
 from app.vehicles.router import router as vehicles_router
 
 settings = get_settings()
+# 路由决策/回答契约的结构化日志依赖这条配置（否则 uvicorn 默认配置下 INFO 被静默丢弃，
+# W0-P0「路由可观测」在生产不成立——2026-09-17 评审二轮阻塞项）
+configure_logging()
 
 
 @asynccontextmanager

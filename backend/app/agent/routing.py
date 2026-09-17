@@ -391,18 +391,35 @@ def decide_route(
     )
 
 
+# 路由日志的轻量 PII 掩码：手机号（CN）/邮箱/身份证等长数字串 → ***
+# （utterance 是用户原话，可能带个人信息；日志一旦真正落盘就不能原文跟着进去）
+_PII_PATTERNS = (
+    re.compile(r"1[3-9]\d{9}"),
+    re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
+    re.compile(r"\d{15,18}"),
+)
+
+
+def _mask_pii(text: str) -> str:
+    for pattern in _PII_PATTERNS:
+        text = pattern.sub("***", text)
+    return text
+
+
 def log_route_decision(
     session_id: str, message: str, decision: RouteDecision, elapsed_ms: float
 ) -> None:
     """单行 JSON 结构化路由日志。
 
     匿名会话 id = sha256(session_id) 前 12 位（不落原始 id、不记 IP、不记用户身份）；
-    utterance 截断到 200 字，只服务排障与离线评测回放。
+    utterance 先做轻量 PII 掩码（手机号/邮箱/长数字串 → ***，日志一旦真正落盘，
+    用户原文里的可识别信息不能跟着进日志——2026-09-17 评审二轮）再截断到 200 字，
+    只服务排障与离线评测回放。
     """
     anon = hashlib.sha256((session_id or "").encode("utf-8")).hexdigest()[:12] or "-"
     payload = {
         "sid": anon,
-        "utterance": (message or "")[:200],
+        "utterance": _mask_pii(message or "")[:200],
         "intent": decision.intent,
         "matched_rule": decision.matched_rule,
         "elapsed_ms": round(float(elapsed_ms), 2),

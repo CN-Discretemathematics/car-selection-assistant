@@ -30,7 +30,7 @@ from app.catalog.series_index import resolve_series
 from tests.seed import make_brand, make_series, make_source, make_variant, make_year
 
 GOLDEN_PATH = Path(__file__).resolve().parent / "routing_golden.jsonl"
-# 基线（实现完成实测）：断言行 81/81 全部命中，覆盖率 1.0；known_gap 8 行跳过断言。
+# 基线（实现完成实测）：断言行 83/83 全部命中，覆盖率 1.0；known_gap 8 行跳过断言。
 # 防回退语义：新增金标行若被正确路由则保持 1.0；任何路由回归使覆盖率跌破基线即失败。
 BASELINE_COVERAGE = 1.0
 

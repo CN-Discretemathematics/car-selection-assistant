@@ -19,6 +19,7 @@ from app.agent.answer_contract import (
     answer_numbers_allowed,
     check_catalog_overview_text,
     names_in,
+    numbers_in,
     tool_result_universe,
     validate_tool_answer,
 )
@@ -50,6 +51,7 @@ from app.agent.series_qa import (
     build_series_qa_answer,
     build_variant_diff_answer,
     negates_series,
+    should_answer,  # noqa: F401  # re-export：保持既有导入面（评审二轮建议 5）
 )
 from app.agent.session import SessionStore, get_session_store
 from app.agent.tools import (
@@ -1199,7 +1201,15 @@ class AgentEngine:
         log = logging.getLogger("app.agent.tool_loop")
         # 回答契约（P2）的「允许集合」：起点 = 用户消息 + 会话上下文里出现过的名字
         # （模型复述用户/画像里的车系/品牌不是编造），工具每返回一步再累积数值与名字。
-        allowed_numbers: set[float] = set()
+        # 数值起点同样并入用户消息与画像（评审二轮实测误杀：复述预算「15 万」、人数
+        # 「5 口」、年份「2025 款」都曾被判成编造数字 → 重写甚至降级）。
+        allowed_numbers: set[float] = set(numbers_in(message))
+        if profile.budget.min is not None:
+            allowed_numbers.add(float(profile.budget.min))
+        if profile.budget.max is not None:
+            allowed_numbers.add(float(profile.budget.max))
+        if profile.passengers is not None:
+            allowed_numbers.add(float(profile.passengers))
         allowed_names: set[str] = set(names_in(message))
         allowed_names.update(locked_names)
         allowed_names.update(profile.brand_labels or [])
@@ -1300,8 +1310,10 @@ class AgentEngine:
                         "content": (
                             "你上一条回答包含工具结果之外的内容，违反「只依据工具返回数据回答」的规则：\n"
                             + "\n".join(f"- {v}" for v in contract_violations)
-                            + "\n请重新给出最终回答：只保留工具结果里有依据的数字与车系/品牌名，"
-                            "没有依据的内容写「官方资料未披露」，不要引入任何新的数字。"
+                            + "\n请重新给出最终回答：只保留工具结果里有依据的数字与车系/品牌名"
+                            "（复述用户自己说过的数字可以保留），"
+                            "没有依据的内容写「官方资料未披露」，"
+                            "不要引入任何工具结果与用户消息之外的新数字。"
                         ),
                     },
                 ]

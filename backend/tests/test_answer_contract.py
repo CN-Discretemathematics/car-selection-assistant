@@ -220,3 +220,30 @@ def test_contract_compliant_answer_zero_extra_calls(client: TestClient, db_sessi
         assert len(fake.calls) == 2, "合规答案不得触发重写（零额外调用）"
     finally:
         restore()
+
+
+def test_contract_allows_restating_user_numbers(client: TestClient, db_session: Session):
+    """评审二轮假阴性回归：复述用户自己说的数字不算编造，不得触发重写/降级。
+
+    用户消息带「2025 年」；工具返回凯美瑞（200000 → 20 万口径）；最终回答复述
+    「2025 年」「20 万元」。修复前 allowed_numbers 起点为空，2025 被判编造 →
+    重写 → FakeLLM 脚本耗尽 → 降级；修复后一次调用直接放行。
+    """
+    _seed(db_session)
+    fake = _FakeLLM([
+        _tool_call("vehicle_search", brand="丰田"),
+        {"content": "丰田 2025 年在售车型有凯美瑞，官方指导价 20 万元。"},
+    ])
+    restore = _client_with_llm(client, db_session, fake)
+    try:
+        sid = client.post("/api/v1/agent/sessions").json()["session_id"]
+        out = client.post(f"/api/v1/agent/sessions/{sid}/messages",
+                          json={"message": "解释一下丰田 2025 年的在售情况"}).json()
+        assert out["explanation"] == "丰田 2025 年在售车型有凯美瑞，官方指导价 20 万元。"
+        assert out["filters"]["tool_loop"] is True
+        assert "contract_fallback" not in out["filters"], (
+            f"复述用户数字不得触发降级，实际 filters={out['filters']}"
+        )
+        assert len(fake.calls) == 2, "复述用户数字不得触发重写"
+    finally:
+        restore()
