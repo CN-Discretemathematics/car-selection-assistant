@@ -36,7 +36,12 @@
   两者共用 `.next` 会互相破坏）
 - 文案/密钥/文档门禁：`reviewer/scan_ui_copy.py`、`reviewer/scan_secrets.py`、
   `skills/doc_sync_check.py`（计数/悬空引用/配置表/编码；退出码必须 0，CI gates job 已接线。
-  2026-09-16 实例：README 用例数 313 未随实际 347 更新，就是它抓出来的）
+  2026-09-16 实例：README 用例数 313 未随实际 347 更新，就是它抓出来的。
+  **判定真值 = git 索引**（本地跑 == CI 跑，gitignore 的本地专属文件只 WARN）；
+  `--fix` 自愈确定性计数；改过判定逻辑后跑 `python skills/doc_sync_selftest.py`）
+- 收尾（commit 前，语义层）：本分支的代码改动会影响文档事实时，先跑**文档评审 subagent**
+  （输入/产出/完整 prompt 见 `skills/doc-sync.md`），它直接改文档并出报告，报告并入提交说明；
+  机械计数交给 `doc_sync_check.py --fix`；两道都过再 commit
 - 端到端判据先定义再动手（真后端 + 真 DOM 断言），参考 `skills/` 同类脚本。
 
 ## 其他

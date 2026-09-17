@@ -2,9 +2,12 @@
 """doc-sync：公开文档与代码库一致性检查（skills/doc-sync.md 的可执行部分）。
 
 用法（任意工作目录）：
-    python skills/doc_sync_check.py            # 输出报告；存在 FAIL 时退出码 1
+    python skills/doc_sync_check.py            # 输出报告；存在 FAIL 时退出码 1（默认只读）
+    python skills/doc_sync_check.py --fix      # 先自愈「确定性计数」，再照常检查
 
-只读检测；自动对齐由 Agent 按 skill 文档执行。本脚本给出**可判定的证据**：
+判定一律以 **git 索引**为真值（`git ls-files` / `git check-ignore`），保证「本地跑 == CI 跑」。
+`--fix` 只改写能从仓库事实直接算出的计数（用例数/迁移数/工具 schema 数）；悬空引用、
+过期表述等需要判读的 FAIL 一律不猜、不自动改。本脚本给出**可判定的证据**：
   1. 全量用例数：pytest 收集数 vs 文档「pytest ... N 用例」声明（CHANGES.md 为历史快照，豁免）
   2. 迁移数量：alembic/versions/*.py 实数 vs 文档「N 个迁移」
   3. LLM 工具 schema 数：TOOL_SCHEMAS 实数 vs 文档「N 个 LLM 工具 schema」
@@ -91,20 +94,24 @@ def collect_docs() -> list[tuple[Path, list[str]]]:
 
 # ── 1. 用例数 ────────────────────────────────────────────────────────────────
 def actual_test_count() -> int | None:
-    py = ROOT / "backend" / ".venv" / "Scripts" / "python.exe"
-    if not py.exists():
-        py = ROOT / "backend" / ".venv" / "bin" / "python"
-    if not py.exists():
-        warn("未找到 backend/.venv，跳过用例数核对")
-        return None
+    venv = [ROOT / "backend" / ".venv" / "Scripts" / "python.exe",
+            ROOT / "backend" / ".venv" / "bin" / "python"]
+    exe = next((p for p in venv if p.exists()), None)
+    if exe is None:
+        # CI（actions/setup-python 装了 requirements）没有 backend/.venv：退回当前解释器。
+        # 收集不了（依赖没装）就 WARN 跳过——宁可跳过，也不猜一个数字写进文档。
+        exe = Path(sys.executable)
     try:
         proc = subprocess.run(
-            [str(py), "-m", "pytest", "--collect-only", "-q"],
+            [str(exe), "-m", "pytest", "--collect-only", "-q"],
             cwd=ROOT / "backend", capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=180,
         )
     except (OSError, subprocess.TimeoutExpired):
         warn("pytest 收集失败/超时，跳过用例数核对")
+        return None
+    if proc.returncode != 0:
+        warn(f"pytest 收集未成功（{exe.name}，依赖未装齐？），跳过用例数核对")
         return None
     m = re.search(r"(\d+) tests? collected", proc.stdout or "")
     return int(m.group(1)) if m else None
@@ -126,9 +133,13 @@ def check_test_count(actual: int | None, docs: list[tuple[Path, list[str]]]) -> 
 
 
 # ── 2. 迁移数 ────────────────────────────────────────────────────────────────
-def check_migration_count(docs: list[tuple[Path, list[str]]]) -> None:
+def migration_count() -> int:
     versions = ROOT / "backend" / "alembic" / "versions"
-    actual = len([p for p in versions.glob("*.py") if p.name != "__init__.py"]) if versions.exists() else 0
+    return len([p for p in versions.glob("*.py") if p.name != "__init__.py"]) if versions.exists() else 0
+
+
+def check_migration_count(docs: list[tuple[Path, list[str]]]) -> None:
+    actual = migration_count()
     for path, lines in docs:
         if path in HISTORICAL_FILES:
             continue
@@ -140,10 +151,14 @@ def check_migration_count(docs: list[tuple[Path, list[str]]]) -> None:
 
 
 # ── 3. 工具 schema 数 ────────────────────────────────────────────────────────
-def check_tool_count(docs: list[tuple[Path, list[str]]]) -> None:
+def tool_count() -> int:
     tools_py = ROOT / "backend" / "app" / "agent" / "tools.py"
     text = tools_py.read_text(encoding="utf-8") if tools_py.exists() else ""
-    actual = len(set(re.findall(r'"name":\s*"(\w+)"', text)))
+    return len(set(re.findall(r'"name":\s*"(\w+)"', text)))
+
+
+def check_tool_count(docs: list[tuple[Path, list[str]]]) -> None:
+    actual = tool_count()
     for path, lines in docs:
         for i, line in enumerate(lines, 1):
             for m in re.finditer(r"(\d+)\s*个?\s*LLM 工具 schema", line):
@@ -201,7 +216,7 @@ def check_readme_structure() -> None:
         fail(f"README 项目结构列出但不存在于 backend/app 的模块: {extra}")
 
 
-# ── 5. 反引号路径悬空检查 ─────────────────────────────────────────────────────
+# ── 5. 反引号路径悬空检查（真值 = git 索引，不是本地工作区）──────────────────
 PATH_TOKEN = re.compile(r"`([^`\n]+)`")
 # 根级 tools/（2026-09-16 起有 pre-push-guard.py）：同时加进 ROOT_PREFIXES，
 # 让 `tools/x` 先解析到根级 tools/，再回退 backend/tools/（两个目录都真实存在）
@@ -213,18 +228,79 @@ ROOT_MD_FILES = {
 }
 
 
-def token_exists(token: str) -> bool:
-    candidates: list[Path] = []
+def token_candidates(token: str) -> list[str]:
+    """反引号 token → 仓库相对 POSIX 候选路径（顺序即解析优先级）。空列表 = 与仓库无关。"""
+    cands: list[str] = []
     if token.startswith(ROOT_PREFIXES):
-        candidates.append(ROOT / token)
+        cands.append(token)
     if token.startswith(BACKEND_REL_PREFIXES):
-        candidates.append(ROOT / "backend" / token)
+        cands.append(f"backend/{token}")
     if "/" not in token and token in ROOT_MD_FILES:
-        candidates.append(ROOT / token)
-    return any(c.exists() for c in candidates)
+        cands.append(token)
+    return cands
+
+
+def token_exists(token: str) -> bool:
+    """本地工作区存在性；**仅 git 不可用时**退回使用（与 CI 可能有偏差）。"""
+    return any((ROOT / c).exists() for c in token_candidates(token))
+
+
+# git 真值（缓存）。CI 检出的是 git 索引内容，工作区还可能有 gitignore 的本地专属文件
+# （PROJECT_PLAN.md / DEPLOYMENT.md / CHANGES.md / deploy/ALIYUN_RUNBOOK.md /
+#  reviewer/REVIEWER_AGENT.md / resume/ …）。2026-09-16 PR #29 实测：用 Path.exists()
+# 判悬空 → 本地「结论：一致」（exit 0）、CI 同一提交 FAIL 3 处，门禁在 push 前无法自证。
+# 故判定统一为：tracked → 存在；gitignored → 本地专属（WARN 提示后跳过）；
+# 未跟踪且未忽略 → FAIL（本地新增未提交，CI 检出后不存在）；其余 → FAIL（真悬空）。
+_TRACKED: set[str] | None = None
+_TRACKED_PROBED = False
+
+
+def _git(args: list[str], stdin: str = "") -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(ROOT), *args], input=stdin, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def tracked_paths() -> set[str] | None:
+    """git 索引内的文件**及其全部祖先目录**（POSIX 相对路径）；None = git 不可用。
+
+    目录必须一并入集：`git ls-files` 只列文件，而文档里的 token 常是目录
+    （`backend/app/rag`、`app/sales`、`backend/tests`、`web/app/compare`）。
+    """
+    global _TRACKED, _TRACKED_PROBED
+    if _TRACKED_PROBED:
+        return _TRACKED
+    _TRACKED_PROBED = True
+    proc = _git(["ls-files", "-z"])
+    if proc is None or proc.returncode != 0:
+        warn("git 不可用，悬空引用退回工作区存在性判定（结论可能与 CI 不一致）")
+        return None
+    paths: set[str] = set()
+    for f in (p for p in proc.stdout.split("\0") if p):
+        paths.add(f)
+        parts = f.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            paths.add("/".join(parts[:i]))
+    _TRACKED = paths
+    return _TRACKED
+
+
+def ignored_paths(paths: list[str]) -> set[str]:
+    """被 .gitignore 命中的路径（纯模式匹配，文件在不在本地都成立）。"""
+    if not paths:
+        return set()
+    proc = _git(["check-ignore", "-z", "--stdin"], stdin="\0".join(paths) + "\0")
+    if proc is None:
+        return set()
+    return {p for p in proc.stdout.split("\0") if p}
 
 
 def check_dangling_refs(docs: list[tuple[Path, list[str]]]) -> None:
+    refs: list[tuple[Path, int, str, list[str]]] = []
     for path, lines in docs:
         if path in HISTORICAL_FILES:
             continue
@@ -241,13 +317,33 @@ def check_dangling_refs(docs: list[tuple[Path, list[str]]]) -> None:
                     token == p.rstrip("/") or token.startswith(p) for p in RUNTIME_PREFIXES
                 ):
                     continue
-                relevant = (token.startswith(ROOT_PREFIXES)
-                            or token.startswith(BACKEND_REL_PREFIXES)
-                            or ("/" not in token and token in ROOT_MD_FILES))
-                if not relevant:
-                    continue
-                if not token_exists(token):
-                    fail(f"悬空路径引用 {path.relative_to(ROOT)}:{i} `{token}` 不存在")
+                cands = token_candidates(token)
+                if cands:
+                    refs.append((path, i, token, cands))
+
+    tracked = tracked_paths()
+    if tracked is None:  # git 不可用：退回旧行为，并已在 tracked_paths() 里 WARN
+        for path, i, token, _cands in refs:
+            if not token_exists(token):
+                fail(f"悬空路径引用 {path.relative_to(ROOT)}:{i} `{token}` 不存在")
+        return
+
+    local_only = ignored_paths(sorted({c for *_rest, cands in refs for c in cands}))
+    reported: set[str] = set()
+    for path, i, token, cands in refs:
+        if any(c in tracked for c in cands):
+            continue  # 已入库：CI 检出后一定在
+        ignored = [c for c in cands if c in local_only]
+        if ignored:
+            if ignored[0] not in reported:  # 同一路径只提示一次，避免刷屏
+                reported.add(ignored[0])
+                warn(f"本地专属引用（.gitignore 命中，CI 检出不含）`{ignored[0]}`")
+            continue
+        rel = path.relative_to(ROOT)
+        if any((ROOT / c).exists() for c in cands):
+            fail(f"引用未入库 {rel}:{i} `{token}` 只存在于本地工作区（未 git add），CI 检出后不存在")
+        else:
+            fail(f"悬空路径引用 {rel}:{i} `{token}` 不存在")
 
 
 # ── 6. 环境变量存在性 ────────────────────────────────────────────────────────
@@ -328,12 +424,64 @@ def check_stale_patterns(docs: list[tuple[Path, list[str]]]) -> None:
                     fail(f"过期表述 {path.relative_to(ROOT)}:{i} 含「{pat}」")
 
 
-def main() -> int:
+# ── 9. --fix：确定性计数自愈（可选，默认只读）────────────────────────────────
+# 只改写「能从仓库事实直接算出来」的计数：用例数（实测 pytest 收集数）、迁移数（文件数）、
+# LLM 工具 schema 数（tools.py 里的 name 去重数）。判读类的 FAIL（悬空引用、过期表述、
+# 环境变量存疑、README 结构）不自动改——猜错会把门禁变成「改文档骗过检查」。
+def fix_targets(actual_tests: int | None) -> list[tuple[str, re.Pattern[str], int | None]]:
+    return [
+        ("用例数", re.compile(r"pytest[^\n，。；]{0,60}?(\d{2,4})(?=\s*用例)"), actual_tests),
+        ("用例数", re.compile(r"(\d{2,4})(?=\s*用例与两道静态门禁)"), actual_tests),
+        ("迁移数", re.compile(r"(\d+)(?=\s*个迁移)"), migration_count()),
+        ("工具 schema 数", re.compile(r"(\d+)(?=\s*个?\s*LLM 工具 schema)"), tool_count()),
+    ]
+
+
+def apply_fixes(docs: list[tuple[Path, list[str]]], actual_tests: int | None) -> list[str]:
+    changes: list[str] = []
+    for path, _lines in docs:
+        if path in HISTORICAL_FILES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue  # 编码问题由 check_encoding() 报 FAIL，这里不碰二进制内容
+        new = text
+        for label, pat, actual in fix_targets(actual_tests):
+            if actual is None:  # 例如 CI 无 venv 时算不出用例数：留给人/Agent
+                continue
+
+            def repl(m: re.Match[str], label: str = label, actual: int = actual) -> str:
+                old = m.group(1)
+                if old == str(actual):
+                    return m.group(0)
+                changes.append(f"{path.relative_to(ROOT)} {label} {old} → {actual}")
+                s, e = m.start(1) - m.start(0), m.end(1) - m.start(0)
+                return m.group(0)[:s] + str(actual) + m.group(0)[e:]
+
+            new = pat.sub(repl, new)
+        if new != text:
+            path.write_bytes(new.encode("utf-8"))  # 保持无 BOM / 原换行
+    return changes
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    fix = "--fix" in argv
+    if not fix and argv:
+        print(f"未知参数 {argv}（只支持 --fix）")
+        return 2
     # 编码检查必须最先跑：文件是 UTF-16 时，后续任何 read_text 都会抛 UnicodeDecodeError，
     # 把这条唯一能解释事故的诊断淹成 traceback。
     check_encoding()
     docs = collect_docs()
     count = actual_test_count()
+    if fix:
+        changes = apply_fixes(docs, count)
+        for c in changes:
+            print(f"FIX  {c}")
+        print(f"自愈 {len(changes)} 处确定性计数" if changes else "无需自愈（确定性计数已一致）")
+        docs = collect_docs()  # 重新读，让下面的检查反映修复后的内容
     check_test_count(count, docs)
     check_migration_count(docs)
     check_tool_count(docs)
