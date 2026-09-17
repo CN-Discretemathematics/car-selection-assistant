@@ -203,7 +203,9 @@ def check_readme_structure() -> None:
 
 # ── 5. 反引号路径悬空检查 ─────────────────────────────────────────────────────
 PATH_TOKEN = re.compile(r"`([^`\n]+)`")
-ROOT_PREFIXES = ("backend/", "web/", "deploy/", "docs/", "skills/", "reviewer/", "resume/")
+# 根级 tools/（2026-09-16 起有 pre-push-guard.py）：同时加进 ROOT_PREFIXES，
+# 让 `tools/x` 先解析到根级 tools/，再回退 backend/tools/（两个目录都真实存在）
+ROOT_PREFIXES = ("backend/", "web/", "deploy/", "docs/", "skills/", "reviewer/", "resume/", "tools/")
 BACKEND_REL_PREFIXES = ("app/", "tools/", "tests/", "alembic/")
 ROOT_MD_FILES = {
     "README.md", "RAG.md", "CHANGES.md", "DELIVERY.md", "DEPLOYMENT.md",

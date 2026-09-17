@@ -258,8 +258,9 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
   退回只比月份，不误报。
 - **只部署 main 的代价**：未合并的改动不会上线（需要的验证放在 PR 阶段完成）。
 - **CI 门禁已接入（仍未设强制）**：`.github/workflows/ci.yml` 在 PR 与 main push 上跑三个 job——
-  backend（全量 pytest）、gates（`reviewer/scan_secrets.py` + `reviewer/scan_ui_copy.py`，
-  退出码必须 0；文案门禁定位不到唯一 footer 时返回 **2**，同样算失败）、
+  backend（全量 pytest）、gates（`reviewer/scan_secrets.py` + `reviewer/scan_ui_copy.py`
+  + `skills/doc_sync_check.py`，退出码必须 0；文案门禁定位不到唯一 footer 时返回 **2**，
+  同样算失败；doc-sync 在 CI 无 venv 时自动跳过用例数一项、其余检查照常）、
   web（`tsc --noEmit` + `next build`）。要真正拦住合并，需在仓库 Settings → Branches →
   main 分支保护里勾 Require status checks 并选中这三个 check；部署不受影响（服务器仍定时拉 main）。
 - **通知**：脚本只写日志与状态文件；如需微信/邮件通知，可在脚本末尾追加钩子。
