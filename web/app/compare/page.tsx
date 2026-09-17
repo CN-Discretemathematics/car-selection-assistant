@@ -172,10 +172,12 @@ function AnalysisPanel({
   analysis,
   aiComment,
   names,
+  trims,
 }: {
   analysis: ComparisonAnalysis;
   aiComment: string | null;
   names: Map<number, string>;
+  trims: Map<number, string>;
 }) {
   const significant = analysis.dimensions.filter((d) => d.significant);
   const notes = analysis.dimensions.filter((d) => !d.significant && d.note);
@@ -262,7 +264,14 @@ function AnalysisPanel({
                       <th className="py-2 font-medium">维度</th>
                       {analysis.variants.map((v) => (
                         <th key={v.variant_id} className="py-2 font-medium">
-                          {names.get(v.variant_id) ?? `款型 ${v.variant_id}`}
+                          {/* 同车系多款型对比时，两列若只显示「品牌 车系」会完全一样 →
+                              车系名做小字，款型名（含年款/配置）做正文，一眼分得清 */}
+                          <span className="block text-[11px] font-normal text-ash">
+                            {names.get(v.variant_id) ?? `款型 ${v.variant_id}`}
+                          </span>
+                          <span className="block font-medium text-ink">
+                            {trims.get(v.variant_id) ?? ""}
+                          </span>
                         </th>
                       ))}
                     </tr>
@@ -534,6 +543,7 @@ function CompareTable({ data }: { data: ComparisonDetail }) {
           analysis={analysis}
           aiComment={aiComment}
           names={new Map(data.variants.map((v) => [v.variant_id, `${v.brand_name} ${v.series_name}`]))}
+          trims={new Map(data.variants.map((v) => [v.variant_id, v.display_name]))}
         />
       )}
     </div>

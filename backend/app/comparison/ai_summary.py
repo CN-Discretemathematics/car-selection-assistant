@@ -22,26 +22,55 @@ _TIMEOUT_SECONDS = 12.0
 _CACHE: dict[tuple[int, ...], str] = {}
 
 
-def build_comment_messages(analysis: dict) -> list[dict[str, str]] | None:
-    """从确定性分析构造受限 prompt；没有可复述的事实时返回 None。"""
+def _facts_text(analysis: dict) -> list[str]:
+    """可复述的确定性事实（verdict + summary 头几条 + 取舍句）。"""
     facts = [
         analysis.get("verdict"),
         *(analysis.get("summary") or [])[:6],
         *(analysis.get("tradeoffs") or []),
     ]
-    facts = [f.strip() for f in facts if f and f.strip()]
+    return [f.strip() for f in facts if f and f.strip()]
+
+
+def build_comment_messages(analysis: dict) -> list[dict[str, str]] | None:
+    """从确定性分析构造受限 prompt；没有可复述的事实时返回 None。"""
+    facts = _facts_text(analysis)
     if not facts:
         return None
     system = (
         "你是家用新车选购助手。只允许依据「已核实事实」写一句中文点评；"
-        "不得出现任何数字（一个都不行）；不得提及优惠、库存、成交价、贷款或任何链接；"
+        "只能使用事实里已经出现过的数字，一个都不许新增或换算（没把握就不写数字）；"
+        "不得提及优惠、库存、成交价、贷款或任何链接；"
         "不超过 60 字；直接输出点评正文，不要任何前缀或引号。"
     )
     user = (
         "已核实事实：\n" + "\n".join(f"- {f}" for f in facts)
-        + "\n请写一句自然的点评（不超过 60 字，不得出现数字）。"
+        + "\n请写一句自然的点评（不超过 60 字；数字只能用上面出现过的）。"
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _allowed_numbers(analysis: dict) -> set[float]:
+    """点评允许出现的数字 = 事实文本里出现过的数字（含差距百分比、万元价差）。
+
+    比「零数字」宽松但同样防编造：模型只能复述事实里的数字，凭空换算/新增会被拦下。
+    """
+    pool: set[float] = set()
+    for text in _facts_text(analysis):
+        for token in re.findall(r"\d+(?:\.\d+)?", text):
+            pool.add(round(float(token), 3))
+    for value in analysis.get("allowed_numbers") or []:
+        pool.add(round(float(value), 3))
+    return pool
+
+
+def _numbers_within(text: str, allowed: set[float]) -> bool:
+    """点评里的每个数字都必须能在事实数字集合里找到（容差 0.01，与 Agent 同一口径）。"""
+    for token in re.findall(r"\d+(?:\.\d+)?", text):
+        value = float(token)
+        if not any(abs(value - candidate) < 0.01 for candidate in allowed):
+            return False
+    return True
 
 
 async def ai_comment_for(analysis: dict) -> str | None:
@@ -57,12 +86,13 @@ async def ai_comment_for(analysis: dict) -> str | None:
     client = get_llm_client()
     if not client.available:
         return None
+    allowed_numbers = _allowed_numbers(analysis)
     try:
         resp = await asyncio.wait_for(client.chat(messages, temperature=0.4), timeout=_TIMEOUT_SECONDS)
         text = ((resp.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
         text = re.sub(r"\s+", "", text).strip()
-        # 超长 = 跑题；含数字 = 失控（确定性层已负责数字）——一律丢弃
-        if not text or len(text) > _MAX_CHARS or re.search(r"\d", text):
+        # 超长 = 跑题；出现事实之外的数字 = 编造 —— 一律丢弃并回退确定性结论
+        if not text or len(text) > _MAX_CHARS or not _numbers_within(text, allowed_numbers):
             return None
     except (LLMError, asyncio.TimeoutError, OSError, KeyError, TypeError, IndexError, ValueError):
         return None

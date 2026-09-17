@@ -175,6 +175,10 @@ def parse_sku_config(result: dict) -> dict:
     groups: list[dict] = []
     for group in (result.get("paramitems") or []) + (result.get("configitems") or []):
         category = (group.get("groupname") or group.get("itemtype") or "").strip()
+        # itemtype（发动机/电动机/基本信息…）是同名参数的唯一区分依据：
+        # 混动车有两个「最大功率(kW)」分属 发动机 与 电动机/系统综合 两组，
+        # 丢掉 itemtype 会让两行不同值挤进同一个 fact_key（2026-09-16 假差异事故根因）
+        itemtype = (group.get("itemtype") or "").strip()
         items: list[dict] = []
         for item in group.get("items") or []:
             key = (item.get("name") or "").strip()
@@ -194,7 +198,7 @@ def parse_sku_config(result: dict) -> dict:
                 else:
                     values[spec_id] = value
             if values:
-                items.append({"key": key, "values": values})
+                items.append({"key": key, "itemtype": itemtype, "values": values})
         if items:
             groups.append({"category": category, "items": items})
     return {"condition_index": condition_index, "variants": variants, "groups": groups}
@@ -434,6 +438,102 @@ def _powertrain_label(energy_type: str, displacement: str) -> str:
     return displacement or "燃油"
 
 
+# 同名参数去重时的优先保留键：源参数页会给混动车两行同名「最大功率(kW)」
+# （系统综合功率与发动机净功率），二者在页面上另有专键承载，保留更权威的那个即可零信息损失
+DEDUPE_PREFERRED_KEYS = (
+    "系统综合功率(kW)", "发动机最大功率(kW)", "最大净功率(kW)", "电动机总功率(kW)",
+)
+
+
+def dedupe_duplicate_keys(facts: list[dict]) -> list[dict]:
+    """同键多行去重（零信息损失）——2026-09-16 卡罗拉锐放事故的根因修复。
+
+    源参数页对混动车给出两行同名「最大功率(kW)」：系统综合 144 与发动机净功率 116。
+    原实现直接入库 → 同键冲突值，对比分析取值随 DB 行序漂移，凭空得出「144 vs 116、差 24%」
+    （两款实际同为 144kW）。规则：
+
+    1. 同键各值相同 → 只保留一行（源页面重复项，无信息损失）；
+    2. 值不同但**同义不同粒度**（如 车身结构「5门5座两厢车」包含「两厢车」）→ 保留信息量
+       最大的那个（被丢弃的值字面上是它的子串，零信息损失）；
+    3. 值不同，但**每个**值都能在同款型的更具体键里读到（系统综合功率/发动机最大功率/
+       净功率/电动机总功率）→ 只保留优先键覆盖的那一行；
+    4. 有任何值不满足上述条件 → 全部保留（不丢数据），由分析层标注「存疑、不参与比较」。
+    """
+    by_key: dict[str, list[dict]] = {}
+    for fact in facts:
+        by_key.setdefault(str(fact.get("fact_key") or ""), []).append(fact)
+    values_by_key = {
+        key: {str(f.get("value") or "").strip() for f in group} for key, group in by_key.items()
+    }
+
+    out: list[dict] = []
+    for key, group in by_key.items():
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        distinct = {str(f.get("value") or "").strip() for f in group}
+        if len(distinct) == 1:
+            out.append(group[0])
+            continue
+
+        # ② 同义不同粒度：存在一个值包含其余全部值 → 保留它（它自带全部信息）
+        longest = max(distinct, key=len)
+        if all(value == longest or value in longest for value in distinct):
+            for fact in group:
+                if str(fact.get("value") or "").strip() == longest:
+                    out.append(fact)
+                    break
+            continue
+
+        def covered(value: str) -> bool:
+            return any(
+                value in values_by_key.get(sibling, set())
+                for sibling in DEDUPE_PREFERRED_KEYS if sibling != key
+            )
+
+        if not all(covered(value) for value in distinct):
+            out.extend(group)  # 保守：有值只在这一个键里 → 不能丢
+            continue
+        kept: dict | None = None
+        for sibling in DEDUPE_PREFERRED_KEYS:
+            if sibling == key or sibling not in values_by_key:
+                continue
+            for fact in group:
+                if str(fact.get("value") or "").strip() in values_by_key[sibling]:
+                    kept = fact
+                    break
+            if kept is not None:
+                break
+        out.extend([kept] if kept is not None else group)
+    return out
+
+
+def namespace_duplicate_keys(facts: list[dict]) -> list[dict]:
+    """去重后仍同键的（值互不相同、且无更权威承载）→ 第 2 项起按 itemtype 加前缀。
+
+    源接口本身用 itemtype 区分同名参数（发动机 vs 电动机/系统综合）；规范键（原名）
+    确定性地指向源页面靠前的 occurrence（实测为系统综合/主口径）。改名零信息损失
+    （值原样保留，只改键名），并让对比分析的动力维度取到确定性的系统口径。
+    """
+    seen: dict[str, int] = {}
+    out: list[dict] = []
+    for fact in facts:
+        key = str(fact.get("fact_key") or "")
+        index = seen.get(key, 0)
+        seen[key] = index + 1
+        if index == 0:
+            out.append(fact)
+            continue
+        itemtype = (fact.get("itemtype") or "").strip()
+        new_key = f"{itemtype}-{key}" if itemtype else f"{key}（重复{index + 1}）"
+        if any(existing.get("fact_key") == new_key for existing in out):
+            new_key = f"{itemtype or '重复'}{index + 1}-{key}"
+        renamed = dict(fact)
+        renamed["fact_key"] = new_key
+        out.append(renamed)
+    return out
+
+
 def build_sku_payload(brand_meta: dict, series_meta: dict, parsed: dict,
                       page_url: str) -> dict:
     """把一个车系的参数配置解析结果转换为 importer 兼容载荷（含 model_years/variants/facts）。"""
@@ -470,12 +570,21 @@ def build_sku_payload(brand_meta: dict, series_meta: dict, parsed: dict,
                     {
                         "category": group["category"],
                         "fact_key": item["key"],
+                        "itemtype": item.get("itemtype"),
                         "value": value,
                         "unit": unit,
                         "cycle": cycle,
                         "page_or_section": "汽车之家参数配置页",
                     }
                 )
+
+        # 同名参数去重（零信息损失）：源页面会给混动车两行「最大功率(kW)」，
+        # 直接入库会形成同键冲突值并让对比分析凭行序造出假差异（2026-09-16 事故）
+        facts = dedupe_duplicate_keys(facts)
+        # 去重后仍同键的（发动机 112 与系统综合 200 并存、且专键缺失）→
+        # 第 2 项起按 itemtype 加前缀（发动机-最大功率(kW)），规范键确定性地指向
+        # 源页面靠前的系统综合口径 —— 不再依赖 DB 行序
+        facts = namespace_duplicate_keys(facts)
 
         # 座位数写入结构化 fact（评审 M6）：Agent 乘客硬约束与检索可依赖真实数据；
         # 若参数组已自带「座位数」项则跳过，避免同键重复（复审 M-M6-1）

@@ -259,3 +259,45 @@ def test_render_text_leads_with_verdict(db_session: Session):
     result = analyze_comparison(db_session, [a_id, b_id])
     text = render_analysis_text(result)
     assert text.startswith(result["verdict"])
+
+
+def test_conflicting_duplicate_keys_are_flagged_not_compared(db_session: Session):
+    """真实事故回归（2026-09-16 卡罗拉锐放）：库内同名参数有两个不同取值时，
+    该维度必须标注「存疑」且**不参与比较**——绝不能任选一行造出假差异。
+
+    事故：混动车的 `最大功率(kW)` 在源页面出现两次（系统综合 144 / 发动机净功率 116），
+    两款实际同为 144kW，却因两行在不同款型里覆盖顺序不同，得出「144 vs 116、差 24%」。
+    """
+    source = make_source(db_session, name="汽车之家")
+    brand = make_brand(db_session, name="丰田", source=source)
+
+    def build(name: str, price: str) -> int:
+        series = make_series(db_session, brand, name=name, energy_types=("HEV",), source=source)
+        year = make_year(db_session, series)
+        variant = make_variant(db_session, series, year, config_version="先锋版",
+                               energy_type="HEV", price_cny=price, source=source)
+        # 同名键两行、值不同（顺序刻意在两款型间相反，复现事故的数据形态）
+        return variant.id
+
+    a_id = build("卡罗拉锐放A", "130000")
+    b_id = build("卡罗拉锐放B", "140000")
+    pairs = {a_id: [("144", "kW"), ("116", "kW")], b_id: [("116", "kW"), ("144", "kW")]}
+    for vid, rows in pairs.items():
+        for value, unit in rows:
+            db_session.add(SpecFact(variant_id=vid, category="参数信息", fact_key="最大功率(kW)",
+                                    fact_value=value, unit=unit, source_id=source.id))
+        # 系统综合功率与净功率各自有明确键（去重时的依据）
+        db_session.add(SpecFact(variant_id=vid, category="参数信息", fact_key="系统综合功率(kW)",
+                                fact_value="144", unit="kW", source_id=source.id))
+    db_session.commit()
+
+    result = analyze_comparison(db_session, [a_id, b_id])
+    power = next(d for d in result["dimensions"] if d["key"] == "power")
+    assert power["significant"] is False, "存疑维度不得判为显著差异"
+    assert power["gap"] is None
+    assert "存疑" in (power["note"] or ""), power["note"]
+    assert all("存疑" in v["display"] for v in power["values"]), power["values"]
+    # 不得进入 Top3、不得进入 verdict 的领先项
+    assert all(p["label"] != "动力（最大功率）" for p in result["key_points"])
+    verdict = result["verdict"] or ""
+    assert "动力" not in verdict, verdict

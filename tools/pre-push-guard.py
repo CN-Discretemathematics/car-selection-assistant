@@ -46,6 +46,18 @@ SCOPE_PATHS: dict[str, list[str]] = {
         "backend/tests/test_comparison",
         "backend/tests/test_compare",
     ],
+    # 事实数据正确性（同键冲突值 / 解析去重 / 存量修复 / 引擎存疑守卫）：
+    # 跨 comparison + sources + tools，故单列 scope（2026-09-16 卡罗拉锐放假差异事故）
+    "facts": [
+        "backend/app/comparison/",
+        "backend/app/sources/",
+        "backend/tools/",
+        "backend/tests/test_comparison",
+        "backend/tests/test_autohome",
+        "backend/tests/test_dedupe",
+        "web/app/compare/",
+        "skills/data-import-validation.md",
+    ],
     "vehicles": [
         "backend/app/vehicles/",
         "backend/app/variants/",
