@@ -89,6 +89,17 @@ def main() -> int:
         check(rc == 1 and "引用未入库" in out, "未跟踪且未忽略的引用判 FAIL（旧检查器的盲点）")
         check("悬空路径引用" in out, "真悬空引用仍判 FAIL（未因新规则放松）")
         probe.unlink()
+        shutil.rmtree(scratch, ignore_errors=True)  # 探针目录必须清掉，否则下一轮误触 README 模块核对
+
+        # 前瞻豁免：带「计划/待建」标记的行引用**尚未创建**的目标文件，不判悬空
+        #（2026-09-17 全方向执行计划：计划文档会点名 tools/verify_mobile_matrix.py 等待建产物）
+        probe = SANDBOX / "skills" / "_selftest_planned_probe.md"
+        probe.write_text("- 计划新建 `backend/app/planned_scratch/module.py`（待建）\n",
+                         encoding="utf-8")
+        rc, out = run_checker(SANDBOX)
+        check(rc == 0 and "悬空路径引用" not in out,
+              f"「计划/待建」标记的前瞻引用不判悬空（rc={rc}）")
+        probe.unlink()
     finally:
         subprocess.run(["git", "-C", str(ROOT), "worktree", "remove", "--force", str(SANDBOX)],
                        capture_output=True, text=True)
