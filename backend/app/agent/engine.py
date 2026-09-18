@@ -27,8 +27,10 @@ from app.agent.answer_contract import (
     validate_tool_answer,
 )
 from app.agent.llm_router import (
+    ROUTER_VERSION,
     arbitrate_route,
     get_router_mode,
+    get_router_thinking,
     log_shadow_record,
     route_with_llm,
 )
@@ -663,6 +665,11 @@ class AgentEngine:
             llm_elapsed_ms=(time.perf_counter() - started) * 1000,
             llm_error=last_error,
             arbitrated_intent=arbitrated.intent,
+            meta={
+                "router_version": ROUTER_VERSION,
+                "router_model": getattr(self._llm, "model", "?"),
+                "router_thinking": get_router_thinking(),
+            },
         )
 
     async def handle(self, db: Session, session_id: str, message: str) -> AgentMessageOut:

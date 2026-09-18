@@ -28,6 +28,7 @@ from app.agent.llm_router import (
     _ROUTER_SYSTEM_PROMPT,
     _cache_key,
     _router_client,
+    ROUTER_VERSION,
     arbitrate_route,
     clear_route_cache,
     get_router_min_confidence,
@@ -306,6 +307,8 @@ def test_shadow_route_retries_then_records(monkeypatch, caplog):
     assert records and records[-1]["arbitrated_intent"] == "catalog_count", (
         "regex 兜底 + LLM 高置信计数 → 仲裁补位"
     )
+    assert records[-1]["router_version"] == ROUTER_VERSION, "版本标记必须随记录落盘"
+    assert records[-1]["router_model"] and records[-1]["router_thinking"]
 
 
 def test_shadow_route_retry_exhausted_still_records(monkeypatch, caplog):

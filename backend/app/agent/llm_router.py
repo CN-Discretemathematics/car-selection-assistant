@@ -70,6 +70,10 @@ from app.common.llm import LLMClient
 # 识别日志行），改名必须同步改 shadow_report 的测试。
 SHADOW_LOGGER = "app.agent.router.shadow"
 
+# 路由版本标记：随 shadow 记录落盘（router_version 字段）。改提示词/仲裁策略/思考档位
+# 默认值时必须递增——跨版本对拍数据靠它切分（此前靠容器重建时间手工切分，脆弱易错）。
+ROUTER_VERSION = "router-v2.1"
+
 ROUTER_MODE_ENV = "AGENT_ROUTER_MODE"
 ROUTER_TIMEOUT_ENV = "AGENT_ROUTER_TIMEOUT_MS"
 ROUTER_MIN_CONFIDENCE_ENV = "AGENT_ROUTER_MIN_CONFIDENCE"
@@ -467,6 +471,7 @@ def log_shadow_record(
     llm_elapsed_ms: float,
     llm_error: str | None = None,
     arbitrated_intent: str | None = None,
+    meta: dict | None = None,
 ) -> None:
     """单行 JSON 对拍记录 → logger "app.agent.router.shadow"。
 
@@ -474,6 +479,8 @@ def log_shadow_record(
     null、agree=false，shadow_report 把这类记录单列为「无裁决」，不进一致率分母。
     arbitrated_intent：分歧仲裁（arbitrate_route）的最终裁定。随记录积累，直接回答
     「按今天的仲裁策略，LLM 在哪些问句上会被采纳」——是放宽/收紧策略的证据源。
+    meta：版本与环境标记（router_version/router_model/router_thinking），合并进记录，
+    使跨版本对拍数据可以按字段切分而不靠时间窗猜测。
     """
     payload: dict = {
         "utterance": _mask_pii(message or "")[:200],
@@ -486,6 +493,8 @@ def log_shadow_record(
         "llm_elapsed_ms": round(float(llm_elapsed_ms), 2),
         "arbitrated_intent": arbitrated_intent,
     }
+    if meta:
+        payload.update(meta)
     if llm_error:
         payload["llm_error"] = str(llm_error)[:120]
     logging.getLogger(SHADOW_LOGGER).info(json.dumps(payload, ensure_ascii=False))
