@@ -21,6 +21,45 @@ class LLMError(RuntimeError):
     """LLM 调用失败（网络/限流/服务端错误）。"""
 
 
+def _chat_payload(
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    temperature: float,
+    json_mode: bool,
+    thinking: str | None,
+) -> dict[str, Any]:
+    """构造 chat/completions 请求体（抽成纯函数：thinking 接线可单测，不走 HTTP）。
+
+    thinking 参数（DeepSeek Thinking Mode，OpenAI 格式，2026-09-18 官方文档核实）：
+    - None：不发任何思考参数 → 端点默认（deepseek-flash 默认 enabled 且 effort=high）；
+    - "disabled"：{"thinking": {"type": "disabled"}} —— 关闭思考链；
+    - "low"/"high"/"max"：{"thinking": {"type": "enabled"}, "reasoning_effort": <值>}
+      （文档映射 minimal→low、medium→high、xhigh→high、ultra→max，这里只收规范值）。
+    注意：思考模式下 temperature 被端点**静默忽略**（不报错、不生效，文档明示），
+    照发兼容不报错；思考输出走响应的 reasoning_content 字段，content 仍是最终答案。
+    """
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    if thinking == "disabled":
+        payload["thinking"] = {"type": "disabled"}
+    elif thinking in ("low", "high", "max"):
+        payload["thinking"] = {"type": "enabled"}
+        payload["reasoning_effort"] = thinking
+    elif thinking is not None:
+        raise ValueError(f"thinking 取值不合法：{thinking!r}（合法：disabled/low/high/max/None）")
+    return payload
+
+
 class LLMClient:
     def __init__(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None) -> None:
         settings = get_settings()
@@ -68,19 +107,17 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.2,
         json_mode: bool = False,
+        thinking: str | None = None,
     ) -> dict[str, Any]:
-        """非流式对话（可选工具调用；由调用方循环执行工具）。"""
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": False,
-        }
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
+        """非流式对话（可选工具调用；由调用方循环执行工具）。
+
+        thinking：DeepSeek 思考模式控制（None=端点默认；disabled/low/high/max），
+        语义见 _chat_payload。回答链路不传（保留思考提升答案质量）；路由等
+        「短输出、强枚举」任务传 disabled/low 换延迟。
+        """
+        payload = _chat_payload(
+            self._model, messages, tools, temperature, json_mode, thinking
+        )
         return await self._post("/chat/completions", payload)
 
     async def stream(

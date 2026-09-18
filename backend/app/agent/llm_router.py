@@ -186,6 +186,37 @@ def get_router_min_confidence() -> float:
     return DEFAULT_MIN_CONFIDENCE
 
 
+ROUTER_THINKING_ENV = "AGENT_ROUTER_THINKING"
+DEFAULT_ROUTER_THINKING = "disabled"
+_ROUTER_THINKING_VALUES = ("disabled", "low", "high", "max")
+
+
+def get_router_thinking() -> str:
+    """读 AGENT_ROUTER_THINKING（DeepSeek 思考档位）；未设置/非法值 → disabled。
+
+    路由是「8 选 1 枚举分类 + ~25 token JSON 输出」，思考链对它几乎没有增益
+    （prompt v2 已用 26 条金标 few-shot 兜住边界），而 thinking token 线性堆延迟——
+    生产首轮 HIGH 档 p50=814ms/p95=1500ms、1 条 1525ms 超时截断，就是为分类付思考税。
+    默认 disabled：deepseek-flash 思考模式默认 enabled+high（官方文档），必须显式关。
+    回答链路不传此参数，保留思考质量。缓存键不含思考档位（裁决不编码它，
+    与 MIN_CONFIDENCE 同理）；分档对拍需清进程缓存或重启，否则混档数据。
+    """
+    global _thinking_warned
+    value = (os.getenv(ROUTER_THINKING_ENV) or DEFAULT_ROUTER_THINKING).strip().lower()
+    if value not in _ROUTER_THINKING_VALUES:
+        if not _thinking_warned:
+            _logger.warning(
+                "%s=%r 不合法，回退 %r（合法值：%s）",
+                ROUTER_THINKING_ENV, value, DEFAULT_ROUTER_THINKING, "/".join(_ROUTER_THINKING_VALUES),
+            )
+            _thinking_warned = True
+        return DEFAULT_ROUTER_THINKING
+    return value
+
+
+_thinking_warned = False
+
+
 # ── LLM 调用与输出校验 ───────────────────────────────────────────────────────
 # 提示词 v2（2026-09-18 生产 shadow 首轮对拍后强化）。首轮 82 条记录：无裁决 27 条
 # （其中输出不合法 21 条）、有裁决分歧 14 条且全部是 LLM 偏离 regex 合同——v2 的改动点：
@@ -403,7 +434,9 @@ async def route_with_llm(
             timeout_ms = get_router_timeout_ms()
         try:
             resp = await asyncio.wait_for(
-                client.chat(_router_messages(message), json_mode=True),
+                client.chat(
+                    _router_messages(message), json_mode=True, thinking=get_router_thinking()
+                ),
                 timeout=max(int(timeout_ms), 1) / 1000.0,
             )
         except Exception as err:  # noqa: BLE001 — 超时/网络/任何异常一律回退（延迟硬约束）
