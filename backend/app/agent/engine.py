@@ -6,14 +6,44 @@ DeepSeek 只负责解释生成；车辆事实一律来自工具与数据库（�
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import re
+import time
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from app.agent.answer_contract import (
+    answer_numbers_allowed,
+    check_catalog_overview_text,
+    names_in,
+    numbers_in,
+    tool_result_universe,
+    validate_tool_answer,
+)
+from app.agent.llm_router import (
+    get_router_mode,
+    log_shadow_record,
+    route_with_llm,
+)
+from app.agent.routing import (
+    asks_brand_lineup,
+    asks_catalog_count,
+    asks_general_advice,
+    asks_tool_assist,
+    decide_route,
+    extract_comparison_variant_ids,
+    has_car_intent,
+    is_chatty,
+    llm_intent_executable,
+    log_route_decision,
+    mentions_known_brand,
+    profile_has_core_constraints,
+)
 from app.agent.schemas import (
     AgentMessageOut,
     Budget,
@@ -29,7 +59,7 @@ from app.agent.series_qa import (
     build_series_qa_answer,
     build_variant_diff_answer,
     negates_series,
-    should_answer,
+    should_answer,  # noqa: F401  # re-export：保持既有导入面（评审二轮建议 5）
 )
 from app.agent.session import SessionStore, get_session_store
 from app.agent.tools import (
@@ -43,8 +73,8 @@ from app.agent.tools import (
     vehicle_evidence,
     vehicle_search,
 )
-from app.catalog.brands import brand_entries, brand_series_overview, resolve_brand_mentions
-from app.catalog.series_index import display_name, normalize_name, resolve_series
+from app.catalog.brands import brand_series_overview, resolve_brand_mentions
+from app.catalog.series_index import display_name, resolve_series
 from app.common.enums import NEW_ENERGY_TYPES
 from app.common.llm import LLMClient, LLMError, get_llm_client
 from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, VehicleVariant
@@ -66,31 +96,14 @@ from app.catalog.series_constraints import (  # noqa: E402
 )
 _CN_DIGITS = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
-# ── 意图路由（确定性，不依赖模型）──────────────────────────────────────────
-# 闲聊/能力咨询：整句匹配才走闲聊路径；带购车内容的句子不受影响
-_CHATTY_RE = re.compile(
-    r"^(你好|您好|你好呀|hi|hello|嗨|哈喽|在吗|在不在|早上好|中午好|晚上好|早安|晚安|"
-    r"谢谢|多谢|感谢|再见|拜拜|你是谁|你叫什么|介绍一下你自己|你能做什么|你能帮我什么|"
-    r"能帮我什么|你可以帮我什么|有什么功能|你会什么|会什么|你能干什么|能干什么|能干嘛|"
-    r"怎么用|如何使用|怎么玩|帮助|help)[!！。？?\s]*$",
-    re.IGNORECASE,
-)
-# 购车意图：出现即走「真实数据推荐」链路
-_CAR_INTENT_RE = re.compile(
-    r"(买车|购车|选车|帮我选|帮我挑|推荐|预算|SUV|MPV|轿车|新能源|纯电|插混|增程|"
-    r"油混|混动|燃油|油车|汽油|车型|车款|续航|油耗|配置|四驱|两驱|落地价|落地|试驾|"
-    r"二手车|空间|价位|哪款|哪台|什么车|[一二三四五六七八九十\d]+[万座]|"
-    r"优点|优势|亮点|卖点|缺点|对比|相比|比较|差别|区别|值不值|性价比|怎么样|好不好|值得买|"
-    r"选哪|选台|选个|挑台|挑个)",
-    re.IGNORECASE,
-)
-_CAR_BUY_RE = re.compile(r"(?:买|购|选|提|试)[^。！？!?]{0,6}车")
-# 通用购车咨询（无画像时也给出有据可查的回答，而不是硬推“没预算的推荐”）
-_GENERAL_ADVICE_RE = re.compile(
-    r"(哪个好|怎么选|如何选|怎么挑|区别|优缺点|值得买|推荐吗|怎么样|好不好|适合我|"
-    r"如何选择|帮我分析|有没有|哪款更|更推荐|优点|优势|亮点|卖点|缺点|值不值|性价比|"
-    r"对比|相比|比较|差别|选哪个|选哪款|选什么)"
-)
+# ── 意图路由（P0 解耦）──────────────────────────────────────────────────────
+# 路由正则与判定谓词（is_chatty / has_car_intent / asks_* / mentions_known_brand /
+# extract_comparison_variant_ids / profile_has_core_constraints）已整体迁移到
+# app/agent/routing.py 并由本模块 re-export（既有调用点/测试导入路径不变）；
+# respond() 通过 decide_route 取得 RouteDecision 后按 intent 分发到既有私有方法。
+# answer_numbers_allowed 迁移到 app/agent/answer_contract.py（P2 回答契约），
+# 同样由本模块 re-export。
+
 # 用户明确要求「看其他车」：清空已锁定车系，回到广泛推荐。
 # 收窄为明确句式（评审 P1：「另外…」「再看…」等话语词不得误清空锁定）
 _UNLOCK_RE = re.compile(
@@ -100,115 +113,9 @@ _UNLOCK_RE = re.compile(
 # 用户授权「宽松推荐」的口语表达（「没想好/不知道」表示信息缺失，不算授权）
 _GIVE_UP_RE = re.compile(r"(随便|无所谓|都可以|你看着办|你推荐|听你的|你来定|相信你)")
 
-# 品牌盘点类提问（用户实测：「奔驰都有哪些车型」「没有燃油的吗」）：
-# 必须读库给出完整盘点，而不是靠模型记忆列举几款——2026-09 实测中模型凭记忆答
-# 「我这边能确认的奔驰在售车型有 3 款，都是纯电」，而库里实际有 57 款、燃油 37 款。
-_BRAND_LINEUP_RE = re.compile(
-    r"(有哪些车型|都有哪些|有哪些车|都有什么车|有什么车型|车型有哪些|车型列表|全系|"
-    r"都有啥|有哪些系列|哪些型号)"
-)
-_ENERGY_AVAILABILITY_RE = re.compile(
-    r"((有|要|想看|看看)?(没有|有没有|有)?\s*(燃油|汽油|纯电|插混|增程|油混|新能源)(的|款|车)?\s*(吗|么|嘛|呢|没有)?)"
-)
-# 明确询问能源是否有货的说法（避免把「我要燃油的」当成盘点：那属于约束，走推荐链）
-_ENERGY_ASK_RE = re.compile(
-    r"(有(没有)?(燃油|汽油|纯电|插混|增程|油混|新能源)|(燃油|汽油|纯电|插混|增程|油混|新能源)(的)?(吗|么|嘛|呢)|没有(燃油|汽油|纯电|插混|增程|油混|新能源))"
-)
-
-
-def is_chatty(message: str) -> bool:
-    return bool(_CHATTY_RE.match(message.strip()))
-
-
-def has_car_intent(message: str) -> bool:
-    return bool(_CAR_INTENT_RE.search(message) or _CAR_BUY_RE.search(message))
-
-
-def asks_general_advice(message: str) -> bool:
-    return bool(_GENERAL_ADVICE_RE.search(message))
-
 
 def gives_up_on_profile(message: str) -> bool:
     return bool(_GIVE_UP_RE.search(message))
-
-
-def asks_brand_lineup(message: str) -> bool:
-    """是否在问「某品牌有哪些车型 / 有没有燃油的」这类需要完整盘点的问题。
-
-    实测缺陷（2026-09）：这类问题此前落到通用对话，由模型凭记忆列举——答成
-    「奔驰在售就 3 款，都是纯电」，而库里是 57 款、燃油 37 款。
-    """
-    return bool(_BRAND_LINEUP_RE.search(message)) or bool(_ENERGY_ASK_RE.search(message))
-
-
-# 全库盘点计数（2026-09-17 用户实测：「全部车型有多少款车？」被当成选车需求去追问预算）。
-# 只认**数量问法**，不认列举问法（「有哪些车型」由品牌盘点/工具循环接管），
-# 也不认配置项计数（「有多少个座位」问的是配置，不是盘点车系）。
-# 分支覆盖（2026-09-17 评审 B2：只匹配「多少款+名词」会漏掉修饰词夹在中间的同类问句）：
-#   ① 多少/几 +（量词）+ 车系·车型·款型·品牌·车         「全部车型有多少款车」
-#   ② 多少/几 + 量词 + ≤5 字修饰 + 名词                 「有多少款新能源车」「有多少款纯电车」
-#   ③ 多少/几 + 量词 + 能源/车身类别（省略名词）          「有多少款SUV」
-#   ④ 名词 +（有|是）+ 几/多少 +（量词）+（句尾）      「车系有多少」「现在在售车系有几个」
-#   ⑤ 名词 + ≤6 字 + 几/多少 +（量词）+（句尾）        「现在在售车型一共几款」
-#   ⑥ 名词 + 的? + 总数/数量                            「车系总数是多少」
-#   ④⑤ 必须：名词后不得紧跟「的」（排除「这个车型的价格是多少」这类**属性**问句）、
-#   且「几/多少」后面要到量词或子句结束——否则「多少」修饰的是车系/品牌的某个属性，
-#   会把属性问句答成全库盘点数（2026-09-17 评审二轮阻塞项，16 条误命中全由此来）。
-_CATALOG_COUNT_RE = re.compile(
-    r"((多少|几)\s*(款|个|台|辆|种)?\s*(车系|车型|款型|品牌|车)"
-    r"|(多少|几)\s*(款|个|台|辆|种)\s*[\u4e00-\u9fa5A-Za-z0-9]{1,5}?(车系|车型|款型|品牌|车)"
-    r"|(多少|几)\s*(款|个|台|辆|种)\s*(新能源|纯电|插混|增程|油混|燃油|汽油|SUV|MPV|轿车)"
-    r"|(车系|车型|款型|品牌)(?!的)\s*(有|是)?\s*(几|多少)\s*(款|个|台|辆|种)?\s*(?=$|[。！？?!，,、；;\s])"
-    r"|(车系|车型|款型|品牌)(?!的)[^。！？，,]{0,6}?(几|多少)\s*(款|个|台|辆|种)?\s*(?=$|[。！？?!，,、；;\s])"
-    r"|(车系|车型|款型|品牌)\s*的?\s*(总数|数量|总数量))",
-    re.IGNORECASE,
-)
-# 排名/对比/解释语境问的不是「有多少」：拿总数回答排名问题等于答非所问（2026-09-17 评审建议 1）
-_CATALOG_COUNT_EXCLUDE_RE = re.compile(r"(最多|最少|排行|排名|对比|区别|解释|为什么|怎么算|是什么意思)")
-
-
-def asks_catalog_count(message: str) -> bool:
-    """是否在问「全库有多少款车/多少个车系」这类需要读库报数的盘点问题。
-
-    排名/对比/解释类措辞一律不算（「哪个品牌车型数量最多」问的是排名，不是总数）。
-    """
-    if _CATALOG_COUNT_EXCLUDE_RE.search(message):
-        return False
-    return bool(_CATALOG_COUNT_RE.search(message))
-
-
-# 对比页「帮我分析差异」会带上具体款型 ID（前端拼接），Agent 据此做确定性差异分析。
-# 两种写法都认：「（款型ID：11、12、13）」与「variant_ids=11,12,13」。
-_COMPARE_IDS_RE = re.compile(r"(?:款型\s*ID|variant_ids)\s*[:：=]\s*([0-9、,，\s]+)", re.IGNORECASE)
-
-
-def extract_comparison_variant_ids(message: str) -> list[int]:
-    """从消息里解析对比款型 ID（缺失则返回空列表，调用方据此决定是否走差异分析）。"""
-    match = _COMPARE_IDS_RE.search(message)
-    if not match:
-        return []
-    ids: list[int] = []
-    for token in re.findall(r"\d+", match.group(1)):
-        value = int(token)
-        if value not in ids:
-            ids.append(value)
-    return ids
-
-
-def answer_numbers_allowed(answer: str, allowed: set[float] | list[float]) -> tuple[bool, str | None]:
-    """答案数字校验：回答里的每个数字都必须能在分析结果的数值集合里找到（防编造）。
-
-    用**数值集合 + 容差**比较，不用子串匹配——子串会把「200km」误判为命中「20000」
-    （实测踩过）。比 `citation_verifier` 更严：后者校验「引用是否来自证据集」，
-    这里校验**数字本身**；模型凭空补一个数会立刻被拦下，改用确定性文案。
-    """
-    pool = {round(float(v), 3) for v in allowed}
-    for token in re.findall(r"\d+(?:\.\d+)?", answer):
-        value = float(token)
-        if any(abs(value - candidate) < 0.01 for candidate in pool):
-            continue
-        return False, f"答案包含分析结果之外的数字：{token}"
-    return True, None
 
 
 def energy_asked_in(message: str) -> list[str] | None:
@@ -233,10 +140,10 @@ def energy_asked_in(message: str) -> list[str] | None:
 #   * 步数上限 + 每步结果回灌 + 全部调用打日志；最终答案过 safety_guard，
 #     LLM 不可用/超步数/触发护栏时回退 `_plain_chat_reply`（原则 7）。
 TOOL_LOOP_MAX_STEPS = 4
-_TOOL_ASSIST_RE = re.compile(
-    r"(对比|区别|哪个好|选哪个|优缺点|解释|是什么意思|为什么|"
-    r"盘点|有哪些|有哪些系列|都有哪些车|靠谱吗|值得买吗|怎么样)"
-)
+# shadow 旁路 in-flight 上限（评审三轮非阻塞 3）：超过即丢弃本次对拍（shadow 采样可容忍丢失），
+# 防止旁路任务随并发无限堆积；单任务另有 1.5s 硬超时兜底。
+_SHADOW_MAX_PENDING = 64
+# （工具循环候选问法正则 _TOOL_ASSIST_RE 已迁移到 app/agent/routing.py）
 _TOOL_LOOP_SYSTEM = (
     "你是「选车助手」。你可以调用工具查询真实数据库（在售车型、月销量、款型配置、官方文档检索）。规则：\n"
     "1) 只能依据工具返回的数据回答；工具没给的数据一律说「官方资料未披露」，绝不编造；\n"
@@ -274,46 +181,7 @@ def _build_tool_arg_types() -> dict[str, dict[str, type]]:
 
 _TOOL_ARG_TYPES = _build_tool_arg_types()
 
-# 「汽车语境」判定：工具循环只接管与车相关的问法（防「量子纠缠 / 华为 vs 苹果」被劫持）
-_CAR_CONTEXT_RE = re.compile(
-    r"(车|SUV|MPV|轿车|混动|纯电|增程|燃油|新能源|续航|油耗|动力|配置|指导价|款型|车型|品牌)"
-)
-# 泛消费电子/无关品类 denylist：单字「车/配置」会误命中「车厘子」「手机配置」（第三轮审查 L2）
-# 注意：**不要用单字词**（曾写「表」「房」，把「销量表现」误判成非汽车话题；2026-09-15 实测）
-_NON_CAR_RE = re.compile(r"(手机|电脑|相机|耳机|平板|笔记本|车厘子|化妆品|房产|二手房|手表|股票|基金)")
-# 易混短品牌名（既是品牌也是日常词）：见 mentions_known_brand 的说明
-_AMBIGUOUS_BRAND_NAMES = frozenset(
-    {"大众", "现代", "银河", "北京", "长安", "理想", "未来", "启辰", "东风", "红旗", "长城"}
-)
-
-
-def asks_tool_assist(message: str) -> bool:
-    """是否属于盘点/对比/解释类自由提问（工具循环的候选问法）。"""
-    return bool(_TOOL_ASSIST_RE.search(message))
-
-
-def mentions_known_brand(db: Session, message: str) -> bool:
-    """消息里是否出现库内品牌名/别名（不看是否构成约束，仅用于判定「汽车语境」）。
-
-    实测缺口（2026-09-15 人工复现）：「解释一下比亚迪的销量表现怎么样」因为
-    「比亚迪」不构成硬约束（无「只要/必须」语气）而被判为无汽车语境，整句落到通用对话。
-
-    **易混短名排除**（第三轮审查 M1）：`大众/现代/银河/北京/长安` 既是品牌也是日常词
-    （「大众化」「现代人」「银河系」「北京堵车」），2 字子串匹配必然误命中；这些名字
-    只在句中已有其它汽车信号时才算数。
-    """
-    normalized = normalize_name(message)
-    if not normalized:
-        return False
-    ambiguous = _AMBIGUOUS_BRAND_NAMES
-    other_signal = bool(_CAR_CONTEXT_RE.search(message) or has_car_intent(message))
-    for name, _bid, _label in brand_entries(db):
-        if name not in normalized:
-            continue
-        if len(name) <= 2 and name in ambiguous and not other_signal:
-            continue
-        return True
-    return False
+# （asks_tool_assist / mentions_known_brand / 汽车语境正则已迁移到 app/agent/routing.py）
 
 
 def _dispatch_tool(db: Session, name: str, arguments: dict) -> dict:
@@ -341,19 +209,6 @@ def _dispatch_tool(db: Session, name: str, arguments: dict) -> dict:
     except Exception as err:  # noqa: BLE001 — 工具异常回灌给模型，让它换参数或如实说明
         return {"error": f"{type(err).__name__}: {str(err)[:160]}"}
     return {"error": f"工具未实现：{name}"}
-
-
-def profile_has_core_constraints(profile: UserProfile) -> bool:
-    """核心约束（预算/用途/人数/车身）——能源偏好单独出现（如「电动车和油车哪个好」）
-    不足以说明用户已有具体购车需求，通用咨询仍然作答。"""
-    return any(
-        (
-            profile.budget.min is not None or profile.budget.max is not None,
-            bool(profile.usage),
-            profile.passengers is not None,
-            bool(profile.body_type),
-        )
-    )
 
 
 # ── 会话锁定车系的冲突检测（用户反馈 P1）──────────────────────────────────────
@@ -733,6 +588,8 @@ class AgentEngine:
     def __init__(self, llm: LLMClient | None = None, store: SessionStore | None = None) -> None:
         self._llm = llm or get_llm_client()
         self._store = store or get_session_store()
+        # shadow 旁路任务的强引用集（asyncio 要求持有引用防止任务被 GC；完成即移除）
+        self._pending_shadow_tasks: set[asyncio.Task] = set()
 
     async def _emit(self, session_id: str, text: str, out: AgentMessageOut) -> None:
         """落库 assistant 消息与结构化结果。
@@ -743,7 +600,85 @@ class AgentEngine:
         await run_in_threadpool(self._store.append_message, session_id, "assistant", text)
         await run_in_threadpool(self._store.set_last_result, session_id, out.model_dump())
 
+    # ── 路由模式（W0 Phase 2）────────────────────────────────────────────────
+    # regex（默认）不进这里：respond() 里 router_mode 为 regex 时不做任何新动作。
+    def _spawn_shadow_route(self, message: str, profile: UserProfile, regex_decision) -> None:
+        """shadow 模式：LLM 路由放 create_task 旁路，**绝不在响应路径 await**。
+
+        对用户延迟贡献必须为 0；LLM 未配置时旁路必然空转，直接跳过（回答级耗时
+        日志的 mode 字段可排障）。旁路任务异常全兜底（_shadow_route 内）。
+        in-flight 旁路任务设上限（评审三轮非阻塞 3）：超过即丢弃本次对拍并计数——
+        shadow 采样可容忍丢失，不能让旁路无限堆积；进程退出时 in-flight 任务会被
+        静默丢弃（对拍样本可容忍）。
+        """
+        if not getattr(self._llm, "available", False):
+            return
+        if len(self._pending_shadow_tasks) >= _SHADOW_MAX_PENDING:
+            logging.getLogger("app.agent.router.shadow").info(
+                json.dumps({"shadow_skipped": True, "reason": "pending_full"}, ensure_ascii=False)
+            )
+            return
+        task = asyncio.create_task(self._shadow_route(message, profile, regex_decision.intent))
+        self._pending_shadow_tasks.add(task)
+        task.add_done_callback(self._pending_shadow_tasks.discard)
+
+    async def _shadow_route(self, message: str, profile: UserProfile, regex_intent: str) -> None:
+        """shadow 旁路体：结果只写对拍日志（logger "app.agent.router.shadow"）。
+
+        try/except 全兜底——任何未捕获异常都可能崩掉任务循环，这里吞掉并记日志。
+        min_confidence 传 0.0：对拍要记录 LLM 原始裁决（含低置信），阈值过滤是
+        llm 模式的采信逻辑，不该在对拍数据里丢失信息。
+        """
+        try:
+            started = time.perf_counter()
+            llm_decision = await route_with_llm(
+                message, profile, llm=self._llm, regex_intent=regex_intent, min_confidence=0.0
+            )
+            log_shadow_record(
+                message,
+                regex_intent=regex_intent,
+                llm_decision=llm_decision,
+                llm_elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+        except Exception as err:  # noqa: BLE001 — 旁路任务异常吞掉并记日志，不得崩任务循环
+            logging.getLogger("app.agent.router.shadow").warning(
+                "shadow 旁路异常（已吞掉，不影响响应）：%s: %s", type(err).__name__, str(err)[:160]
+            )
+
     async def handle(self, db: Session, session_id: str, message: str) -> AgentMessageOut:
+        """respond() 的对外入口：包一层回答级耗时结构化日志（每次请求一条）。
+
+        路由模式（AGENT_ROUTER_MODE）在这里读取**一次**并传入 respond()，保证同一次
+        请求内模式一致。耗时日志 logger "app.agent.respond"，单行 JSON
+        {sid(匿名), mode, elapsed_ms}——llm 模式切流判据第 4 条
+        （P95 回答延迟增幅 ≤300ms，对比 regex 基线）的数据来源。
+        """
+        router_mode = get_router_mode()
+        started = time.perf_counter()
+        failed = False
+        try:
+            return await self.respond(db, session_id, message, router_mode=router_mode)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            payload: dict = {
+                "sid": hashlib.sha256((session_id or "").encode("utf-8")).hexdigest()[:12] or "-",
+                "mode": router_mode,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            }
+            if failed:
+                payload["error"] = True
+            logging.getLogger("app.agent.respond").info(json.dumps(payload, ensure_ascii=False))
+
+    async def respond(
+        self,
+        db: Session,
+        session_id: str,
+        message: str,
+        router_mode: str = "regex",
+    ) -> AgentMessageOut:
+        """一次用户消息的完整回答（原 handle() 主体；handle() 只包耗时日志与模式读取）。"""
         await run_in_threadpool(self._store.append_message, session_id, "user", message)
 
         profile = UserProfile(**await run_in_threadpool(self._store.get_profile, session_id))
@@ -831,46 +766,51 @@ class AgentEngine:
             if target is not None:
                 return await self._variant_diff_reply(db, session_id, target[0], target[1], message)
 
-        # 0.6) 对比差异分析（对比页「帮我分析差异」会带上款型 ID）→ 确定性分析 + LLM 措辞。
-        #      必须排在**车系档案问答之前**：那句话里同时含车系名，早先会被车系问答截走，
-        #      结果退化成「参数罗列」（用户反馈的原问题）。
-        #      结论全部来自库内事实，LLM 只负责把结论讲清楚，且答案数字过白名单校验。
-        compare_ids = extract_comparison_variant_ids(message)
-        if len(compare_ids) >= 2:
-            return await self._comparison_analysis_reply(db, session_id, message, compare_ids)
+        # ── 意图路由（P0 决策/执行解耦）───────────────────────────────────────
+        # 0.6 之后的确定性分支（对比差异分析 → 车系问答 → 品牌盘点 → 全库盘点计数 →
+        # 工具循环 → 普通对话 → 通用咨询）已按**原顺序、原条件**整体提取到
+        # routing.decide_route；这里拿到 RouteDecision 后按 intent 分发到既有私有方法，
+        # 执行代码本身不动（零行为变更；原 0.6/0.71 两处重复的对比 ID 判定因提取
+        # 自然消解为一处，0.71 本就不可达）。
+        route_started = time.perf_counter()
+        decision = decide_route(message, hints, structured, profile, resolved, db)
+        # ── 路由模式分发（W0 Phase 2）────────────────────────────────────────
+        # regex（默认）：不进任何分支，完全现状（零新行为，全量测试钉住）；
+        # shadow：LLM 路由旁路对拍（create_task，绝不在本路径 await，延迟贡献 0）；
+        # llm：先等 LLM 决策（硬超时），合法高置信才采用，否则立即回退 regex
+        # 决策并打 router_fallback 标。路由失败绝不阻断响应。
+        if router_mode == "llm":
+            llm_decision = await route_with_llm(
+                message, profile, llm=self._llm, regex_intent=decision.intent
+            )
+            # 采纳前置（评审三轮 B1/B2）：LLM intent 必须在当前上下文下「可执行」——
+            # series_qa 需 resolved、brand_lineup 需品牌、catalog_count/tool_loop
+            # 不得带核心约束且 tool_loop 需汽车语境。没有这道校验：
+            # series_qa+空 resolved 会 500、约束问句会被答成全库数、寒暄会启动工具循环。
+            if llm_decision is not None and llm_intent_executable(
+                llm_decision.intent, message, hints, structured, profile, resolved, db
+            ):
+                decision = llm_decision
+            else:
+                decision.signals["router_fallback"] = True
+        elif router_mode == "shadow":
+            self._spawn_shadow_route(message, profile, decision)
+        log_route_decision(
+            session_id,
+            message,
+            decision,
+            elapsed_ms=(time.perf_counter() - route_started) * 1000,
+        )
 
-        if resolved and should_answer(resolved, message):
+        if decision.intent == "comparison":
+            return await self._comparison_analysis_reply(
+                db, session_id, message, decision.slots["variant_ids"]
+            )
+        if decision.intent == "series_qa":
             return await self._series_qa_reply(db, session_id, message, resolved)
-
-        # 0.7) 品牌盘点（「奔驰都有哪些车型」「没有燃油的吗」「奔驰有多少款车」）→ 读库完整盘点。
-        #      必须在「无购车意图 → 普通对话」gate 之前：这类问句不一定是购车意图措辞，
-        #      但需要的是库内完整事实，不能交给模型记忆。
-        if profile.brand_ids and not resolved and (
-            asks_brand_lineup(message) or asks_catalog_count(message)
-        ):
+        if decision.intent == "brand_lineup":
             return await self._brand_overview_reply(db, session_id, profile, message)
-
-        # 0.7b) 全库盘点计数（「全部车型有多少款车」）→ 读库如实报数。
-        #       必须在推荐链与工具循环之前：这句话既不含「有哪些」也不含约束词，此前直接落到
-        #       「先问一下购车预算」的追问里（2026-09-17 用户实测）。
-        #       守卫：① 带核心约束（预算/人数/用途）的计数属筛选场景，交回推荐链；
-        #       ② 排名/对比/解释语境不算计数（在 asks_catalog_count 内排除）——
-        #          这类问题拿总数回答等于答非所问（评审建议 1）；
-        #       ③ 车身/能源偏好不排除，改为按画像报该子集计数——否则「SUV 有多少款车」
-        #          会被答成全库数（评审建议 2）。
-        #       注：**不**把「盘点」类措辞推给工具循环。评审建议加上 `not asks_tool_assist`，
-        #       但工具循环只能看到被截断的工具结果，让它数总数有编造风险（例如把 limit=50 的
-        #       结果答成「50 款」）；数量问题一律以确定性计数为准，故此处有意不加该条件。
-        if (
-            asks_catalog_count(message)
-            and not resolved
-            and not profile.brand_ids
-            and not ({"budget", "passengers", "usage"} & set(hints))
-            and profile.budget.min is None
-            and profile.budget.max is None
-            and not profile.usage
-            and profile.passengers is None
-        ):
+        if decision.intent == "catalog_count":
             energy_allowed = _expand_energy_prefs(list(profile.energy_preference or []))
             return await self._catalog_overview_reply(
                 db,
@@ -879,55 +819,21 @@ class AgentEngine:
                 energy_allowed=energy_allowed or None,
                 energy_labels=[_ENERGY_LABEL.get(t, t) for t in (profile.energy_preference or [])],
             )
-
-        # 0.71) 对比差异分析（对比页「帮我分析差异」会带上款型 ID）→ 确定性分析 + LLM 措辞。
-        #      必须排在**车系档案问答与工具循环之前**：那句话里同时含车系名，早先会被
-        #      车系问答截走并退化成「参数罗列」（用户反馈的原问题）。
-        #      结论全部来自库内事实，LLM 只负责把结论讲清楚，且答案数字过白名单校验。
-        compare_ids = extract_comparison_variant_ids(message)
-        if len(compare_ids) >= 2:
-            return await self._comparison_analysis_reply(db, session_id, message, compare_ids)
-
-        # 0.75) 盘点/对比/解释类自由提问 → LLM 工具调用循环（步数受限、全程审计）。
-        #       两个前置条件（第二轮审查）：
-        #       a) 必须有「汽车语境」（命中车系/品牌/锁定车系/购车词/汽车名词），
-        #          防「量子纠缠」「华为 vs 苹果」这类通用问题被劫持；
-        #       b) 不得带核心约束（预算/人数/用途）——带约束的继续走推荐链；
-        #          车身类型（如「有哪些增程SUV」）不算核心约束：那正是要「列一批」的问法，
-        #          实测把它算作核心线索会把这类问题错误地交给追问预算的推荐链（2026-09-15）。
-        car_context = bool(
-            resolved
-            or profile.brand_ids
-            or profile.locked_series_ids
-            or _CAR_CONTEXT_RE.search(message)
-            or has_car_intent(message)
-            or mentions_known_brand(db, message)   # 本条消息提到库内品牌（如「解释一下比亚迪的销量」）
-        ) and not _NON_CAR_RE.search(message)
-        core_hint_keys = {"budget", "passengers", "usage"} & set(hints)
-        # 画像层同样只看预算/人数/用途：不能直接用 profile_has_core_constraints（它把 body_type
-        # 也算核心约束，而 merge_profile 已把本轮消息里的「SUV」写进画像 → 自己把自己拦掉，
-        # 2026-09-15 实测「有哪些增程SUV…」因此落回追问预算）。
-        profile_core = (
-            profile.budget.min is not None
-            or profile.budget.max is not None
-            or bool(profile.usage)
-            or profile.passengers is not None
-        )
-        if asks_tool_assist(message) and car_context and not core_hint_keys and not profile_core:
+        if decision.intent == "tool_loop":
             return await self._tool_loop_reply(db, session_id, profile, message, resolved=resolved)
-
-        # 1) 无购车意图的普通对话（如「今天天气不错」「帮我算个题」）→ 自然回复
-        if not (has_car_intent(message) or structured):
+        if decision.intent == "chitchat":
+            # 1) 无购车意图的普通对话（如「今天天气不错」「帮我算个题」）→ 自然回复
             return await self._plain_chat_reply(
                 db, session_id, message, resolved=resolved, locked_series_ids=profile.locked_series_ids
             )
-
-        # 2) 通用购车咨询但还没有核心画像（「电动车和油车哪个好」）→ 有据可查的回答，
-        #    不硬推「没有预算的推荐」
-        if asks_general_advice(message) and not profile_has_core_constraints(profile):
+        if decision.intent == "general_advice":
+            # 2) 通用购车咨询但还没有核心画像（「电动车和油车哪个好」）→ 有据可查的回答，
+            #    不硬推「没有预算的推荐」
             return await self._plain_chat_reply(
                 db, session_id, message, resolved=resolved, locked_series_ids=profile.locked_series_ids
             )
+        # intent == "recommendation"：落入下方既有推荐链（最小化追问 → 冲突解锁 → 硬筛选软评分），
+        # 决策层不在这里返回，保持与原控制流逐行等价。
 
         # 4) 结构化画像链路：最小化追问 → 硬筛选 → 软评分
         clarification = next_clarification(profile)
@@ -1223,6 +1129,14 @@ class AgentEngine:
         else:
             parts.append("这个范围内目前没有在售车系数据，可以换个条件试试。")
         text = "".join(parts)
+        # 回答契约（P2）轻量自检：正文数字必须 ⊆ overview 数值 ∪ 派生（防止以后文案
+        # 模板与数据键脱节）。文案是确定性渲染、正常恒合格，这里只做日志绊线，
+        # 不打断用户请求（真正会打断的重闸在 _tool_loop_reply 的回答契约上）。
+        overview_problems = check_catalog_overview_text(text, overview)
+        if overview_problems:
+            logging.getLogger("app.agent.answer_contract").warning(
+                "catalog 盘点文案与数据脱节：%s", overview_problems
+            )
         citations: list[Citation] = []
         source_ids = overview.get("source_ids") or []
         if source_ids:
@@ -1397,6 +1311,21 @@ class AgentEngine:
         call_count = 0
         final_text = ""
         log = logging.getLogger("app.agent.tool_loop")
+        # 回答契约（P2）的「允许集合」：起点 = 用户消息 + 会话上下文里出现过的名字
+        # （模型复述用户/画像里的车系/品牌不是编造），工具每返回一步再累积数值与名字。
+        # 数值起点同样并入用户消息与画像（评审二轮实测误杀：复述预算「15 万」、人数
+        # 「5 口」、年份「2025 款」都曾被判成编造数字 → 重写甚至降级）。
+        allowed_numbers: set[float] = set(numbers_in(message))
+        if profile.budget.min is not None:
+            allowed_numbers.add(float(profile.budget.min))
+        if profile.budget.max is not None:
+            allowed_numbers.add(float(profile.budget.max))
+        if profile.passengers is not None:
+            allowed_numbers.add(float(profile.passengers))
+        allowed_names: set[str] = set(names_in(message))
+        allowed_names.update(locked_names)
+        allowed_names.update(profile.brand_labels or [])
+        allowed_names.update(s.name for s, _b in (resolved or []))
         try:
             for _step in range(TOOL_LOOP_MAX_STEPS):
                 resp = await self._llm.chat(msgs, tools=_TOOL_LOOP_SCHEMAS, temperature=0.3)
@@ -1419,6 +1348,10 @@ class AgentEngine:
                         arguments = {}
                     result = await run_in_threadpool(_dispatch_tool, db, name, arguments)
                     call_count += 1
+                    # 回答契约（P2）：把本轮工具返回的数值与名字并入允许集合
+                    step_numbers, step_names = tool_result_universe(result)
+                    allowed_numbers |= step_numbers
+                    allowed_names |= step_names
                     items = result.get("results") if isinstance(result, dict) else None
                     for item in items if isinstance(items, list) else [result]:
                         if isinstance(item, dict) and item.get("source_id"):
@@ -1472,6 +1405,55 @@ class AgentEngine:
                 "tool_calls": call_count,
             }
             return fallback
+
+        # 回答契约自证（P2）：最终答案的数字/名字必须 ⊆ 本轮工具返回 ∪ 用户/会话上下文。
+        # 违规 → 把违规项回灌给模型重写一次 → 再校验 → 仍不合格 → 回退既有
+        # `_plain_chat_reply` 兜底并在 filters["contract_fallback"]=True 打标
+        # （「错误在发送前被自证拦截」：宁可话糙，不编数据）。
+        contract_violations = validate_tool_answer(final_text, allowed_numbers, allowed_names)
+        if contract_violations:
+            log.info("回答契约违规（%s），要求模型重写一次", "；".join(contract_violations))
+            rewritten = False
+            try:
+                rewrite_msgs = [
+                    *msgs,
+                    {
+                        "role": "user",
+                        "content": (
+                            "你上一条回答包含工具结果之外的内容，违反「只依据工具返回数据回答」的规则：\n"
+                            + "\n".join(f"- {v}" for v in contract_violations)
+                            + "\n请重新给出最终回答：只保留工具结果里有依据的数字与车系/品牌名"
+                            "（复述用户自己说过的数字可以保留），"
+                            "没有依据的内容写「官方资料未披露」，"
+                            "不要引入任何工具结果与用户消息之外的新数字。"
+                        ),
+                    },
+                ]
+                resp = await self._llm.chat(rewrite_msgs, temperature=0.3)
+                assistant = resp["choices"][0]["message"]
+                candidate = (
+                    (assistant.get("content") if isinstance(assistant, dict) else None) or ""
+                ).strip()
+                if candidate:
+                    rewrite_guard_ok, _rewrite_guard = safety_guard(candidate)
+                    if rewrite_guard_ok and not validate_tool_answer(candidate, allowed_numbers, allowed_names):
+                        final_text = candidate
+                        rewritten = True
+            except (LLMError, KeyError, TypeError, IndexError, ValueError):
+                pass  # 重写失败按不合格处理（原则 7）
+            if not rewritten:
+                log.info("回答契约重写仍不合格，回退普通对话")
+                fallback = await self._plain_chat_reply(
+                    db, session_id, message, locked_series_ids=profile.locked_series_ids
+                )
+                fallback.filters = {
+                    **(fallback.filters or {}),
+                    "tool_loop": False,
+                    "contract_fallback": True,
+                    "contract_violations": len(contract_violations),
+                    "tool_calls": call_count,
+                }
+                return fallback
 
         # 引用只在「答案里确实出现数字」时附加：纯解释/拒答类回答不制造误导性溯源
         citations: list[Citation] = []

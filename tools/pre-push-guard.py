@@ -72,7 +72,13 @@ SCOPE_PATHS: dict[str, list[str]] = {
         "backend/tests/test_agent",
         "backend/tests/test_tool_loop",
         "backend/tests/test_brand_constraint.py",
+        "backend/tests/test_routing_golden.py",
+        "backend/tests/routing_golden.jsonl",
         "web/app/components/AgentChat.tsx",
+        # W0-P0 路由可观测化接线：启动日志装配与入口（2026-09-17，具体文件而非目录）
+        "backend/app/main.py",
+        "backend/app/common/logging_setup.py",
+        "backend/tests/test_log_setup.py",
         "skills/",
     ],
     "search": ["web/app/components/", "web/app/page.tsx", "backend/app/retrieval/"],

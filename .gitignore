@@ -13,6 +13,9 @@ vendor/
 
 # Local data / env
 *.db
+# 仅供维护者本地追踪进度的文档（用户口径：不入远程仓库、也不进 doc-sync 扫描范围），
+# 如 roadmap / 执行计划
+docs-local/
 *.sqlite3
 .env
 snapshots/

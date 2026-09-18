@@ -30,6 +30,8 @@ SKIP_DIRS = {
     ".git", "node_modules", ".venv", "vendor", ".tools", ".next", ".pnpm-store",
     ".dsh-test", ".arkcli-install", ".deploy", "__pycache__", ".tmp", ".zcode",
     ".pytest_cache", ".wheels", "snapshots", "logs",
+    # 维护者本地进度文档（gitignored，用户口径不入远程仓库）——个人备忘不受项目门禁约束
+    "docs-local",
 }
 DOC_DIRS = [ROOT] + [ROOT / d for d in ("docs", "skills", "deploy", "reviewer", "resume")]
 # 历史快照/事故记录文件：旧数字与过期字符串是**有意引用**的案例，豁免计数与过期表述检查

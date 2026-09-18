@@ -37,6 +37,13 @@ services:
       - ../backend/.tmp:/srv/carsel/backend/.tmp
     ports:
       - "127.0.0.1:8000:8000"
+    # 日志留存（2026-09-17 用户定「常用合理值」）：json-file 滚动 10MB × 3，
+    # 路由决策/回答级耗时/回答契约的结构化日志都在 stdout，随此轮转保留（约 30 天量级）
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       redis:
         condition: service_healthy
@@ -70,6 +77,11 @@ services:
       BACKEND_URL: http://api:8000
     ports:
       - "127.0.0.1:3000:3000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # 容器加固（同 api）
     security_opt:
       - no-new-privileges:true
