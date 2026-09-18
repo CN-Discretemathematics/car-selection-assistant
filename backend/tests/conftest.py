@@ -34,6 +34,18 @@ from app.common import models  # noqa: F401  确保模型注册
 from app.common.database import Base, get_session
 from app.main import app
 
+# 路由 env 清场（必须在 app 导入之后）：本机 backend/.env 可能写了 AGENT_ROUTER_*
+# （本地 shadow E2E 用），app/retrieval/config.py 的 load_dotenv() 会把它们灌进
+# os.environ——测试必须对环境免疫：显式清除，恢复「未设置 → 默认」语义
+# （test_env_fallbacks 依赖；2026-09-18 实测：.env 带 shadow 时 9 个模式相关测试全偏）。
+for _router_env in (
+    "AGENT_ROUTER_MODE",
+    "AGENT_ROUTER_TIMEOUT_MS",
+    "AGENT_ROUTER_MIN_CONFIDENCE",
+    "AGENT_ROUTER_MODEL",
+):
+    os.environ.pop(_router_env, None)
+
 # 注意：本机受限沙箱会拒绝枚举 pytest 的 basetemp 目录，tmp_path fixture 不可用；
 # 需要临时文件时请写到 tests/.tmp（已 gitignore），不要用 tmp_path。
 

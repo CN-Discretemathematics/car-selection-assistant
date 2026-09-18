@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.engine import get_agent_engine
 from app.agent.llm_router import (
+    _ROUTER_SYSTEM_PROMPT,
     _cache_key,
     _router_client,
     clear_route_cache,
@@ -153,6 +154,32 @@ def test_route_with_llm_rejects_malformed_verdicts(content: str):
         CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=fake, regex_intent="catalog_count",
         min_confidence=0.0,
     )) is None
+
+
+def test_route_with_llm_logs_invalid_output_head(caplog):
+    """输出不合法时记 INFO 归因日志（掩码+截断）——生产首轮 21 条无裁决无法归因的补课。
+
+    断言两点：回退行为不变（None）；日志携带原始输出头部供下一轮提示词迭代归因。
+    """
+    fake = _RouterFakeLLM("您好！我判断这条消息应该是咨询购车意向。")
+    with caplog.at_level(logging.INFO, logger="app.agent.router"):
+        decision = asyncio.run(route_with_llm(
+            CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=fake, regex_intent="catalog_count",
+        ))
+    assert decision is None
+    assert any("输出不合法" in r.message and "购车意向" in r.message for r in caplog.records)
+
+
+def test_router_system_prompt_pins_enum_and_boundary_examples():
+    """提示词 v2 纪律：8 个枚举值必须逐字出现（防编辑时漏掉）；分歧集中区的金标
+    few-shot 锚点必须在场。金标改判时本测试与提示词示例需同步更新。"""
+    from app.agent.routing import INTENTS
+
+    for name in INTENTS:
+        assert name in _ROUTER_SYSTEM_PROMPT, f"提示词缺少枚举值 {name}"
+    for anchor in ("款型ID：11、12、13", "汉兰达有几个版本", "车系的销量是多少",
+                   "哪个品牌车型数量最多", "电动车和油车哪个好"):
+        assert anchor in _ROUTER_SYSTEM_PROMPT, f"提示词缺少金标边界示例 {anchor}"
 
 
 def test_router_client_uses_model_env(monkeypatch):
