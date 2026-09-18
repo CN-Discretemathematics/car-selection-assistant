@@ -39,6 +39,7 @@ from app.agent.routing import (
     extract_comparison_variant_ids,
     has_car_intent,
     is_chatty,
+    llm_intent_executable,
     log_route_decision,
     mentions_known_brand,
     profile_has_core_constraints,
@@ -139,6 +140,9 @@ def energy_asked_in(message: str) -> list[str] | None:
 #   * 步数上限 + 每步结果回灌 + 全部调用打日志；最终答案过 safety_guard，
 #     LLM 不可用/超步数/触发护栏时回退 `_plain_chat_reply`（原则 7）。
 TOOL_LOOP_MAX_STEPS = 4
+# shadow 旁路 in-flight 上限（评审三轮非阻塞 3）：超过即丢弃本次对拍（shadow 采样可容忍丢失），
+# 防止旁路任务随并发无限堆积；单任务另有 1.5s 硬超时兜底。
+_SHADOW_MAX_PENDING = 64
 # （工具循环候选问法正则 _TOOL_ASSIST_RE 已迁移到 app/agent/routing.py）
 _TOOL_LOOP_SYSTEM = (
     "你是「选车助手」。你可以调用工具查询真实数据库（在售车型、月销量、款型配置、官方文档检索）。规则：\n"
@@ -603,8 +607,16 @@ class AgentEngine:
 
         对用户延迟贡献必须为 0；LLM 未配置时旁路必然空转，直接跳过（回答级耗时
         日志的 mode 字段可排障）。旁路任务异常全兜底（_shadow_route 内）。
+        in-flight 旁路任务设上限（评审三轮非阻塞 3）：超过即丢弃本次对拍并计数——
+        shadow 采样可容忍丢失，不能让旁路无限堆积；进程退出时 in-flight 任务会被
+        静默丢弃（对拍样本可容忍）。
         """
         if not getattr(self._llm, "available", False):
+            return
+        if len(self._pending_shadow_tasks) >= _SHADOW_MAX_PENDING:
+            logging.getLogger("app.agent.router.shadow").info(
+                json.dumps({"shadow_skipped": True, "reason": "pending_full"}, ensure_ascii=False)
+            )
             return
         task = asyncio.create_task(self._shadow_route(message, profile, regex_decision.intent))
         self._pending_shadow_tasks.add(task)
@@ -771,7 +783,13 @@ class AgentEngine:
             llm_decision = await route_with_llm(
                 message, profile, llm=self._llm, regex_intent=decision.intent
             )
-            if llm_decision is not None:
+            # 采纳前置（评审三轮 B1/B2）：LLM intent 必须在当前上下文下「可执行」——
+            # series_qa 需 resolved、brand_lineup 需品牌、catalog_count/tool_loop
+            # 不得带核心约束且 tool_loop 需汽车语境。没有这道校验：
+            # series_qa+空 resolved 会 500、约束问句会被答成全库数、寒暄会启动工具循环。
+            if llm_decision is not None and llm_intent_executable(
+                llm_decision.intent, message, hints, structured, profile, resolved, db
+            ):
                 decision = llm_decision
             else:
                 decision.signals["router_fallback"] = True

@@ -126,6 +126,71 @@ def test_route_with_llm_rejects_out_of_allowlist_intent():
     assert fake.router_calls == 1
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"intent":"catalog_count","confidence":NaN,"slots":{}}',   # NaN
+        '{"intent":"catalog_count","confidence":true,"slots":{}}',  # bool 冒充数值
+        '{"intent":"catalog_count","confidence":1.5,"slots":{}}',   # 越上界
+        '{"intent":"catalog_count","confidence":-0.1,"slots":{}}',  # 越下界
+        '{"intent":"catalog_count","slots":{}}',                    # 缺 confidence
+        '{"intent":"catalog_count","confidence":"0.9","slots":{}}', # 字符串置信
+        '{"intent":"catalog_count","confidence":0.9,"slots":[]}',   # slots 非 dict
+        '{"intent":"catalog_count","confidence":0.9}',              # 缺 slots
+        '{"confidence":0.9,"slots":{}}',                            # 缺 intent
+        '{"intent":123,"confidence":0.9,"slots":{}}',               # intent 非字符串
+        "垃圾前缀 {\"intent\":\"catalog_count\",\"confidence\":0.9,\"slots\":{}} 垃圾后缀",
+    ],
+)
+def test_route_with_llm_rejects_malformed_verdicts(content: str):
+    """评审三轮非阻塞 4：13 种非法输出逐条钉住——实现必须全部回退 None。"""
+    fake = _RouterFakeLLM(content)
+    assert asyncio.run(route_with_llm(
+        CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=fake, regex_intent="catalog_count",
+        min_confidence=0.0,
+    )) is None
+
+
+def test_route_with_llm_non_string_content_and_empty_choices():
+    """content 非 str / choices 空：同样必须回退 None（评审三轮探针覆盖的路径）。"""
+    fake = _RouterFakeLLM({"choices": [{"message": {"content": 123}}]})
+    assert asyncio.run(route_with_llm(
+        CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=fake,
+    )) is None
+    fake2 = _RouterFakeLLM({"choices": []})
+    assert asyncio.run(route_with_llm(
+        CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=fake2,
+    )) is None
+
+
+def test_llm_intent_executable_preconditions(db_session: Session):
+    """评审三轮 B1/B2 的前置条件谓词：各 intent 与 decide_route 守卫逐条一致。"""
+    from app.agent.routing import llm_intent_executable
+
+    _seed(db_session)
+    empty = UserProfile()
+    assert not llm_intent_executable(
+        "series_qa", CATALOG_ASK, {}, False, empty, [], db_session
+    ), "series_qa 无 resolved 不可执行（修复前会 500）"
+    assert not llm_intent_executable(
+        "brand_lineup", "奔驰有多少款车", {}, False, empty, [], db_session
+    ), "brand_lineup 无品牌不可执行"
+    assert not llm_intent_executable(
+        "catalog_count", "15万以内有多少款车", {"budget": {"max": 150000}}, True,
+        empty, [], db_session,
+    ), "带核心约束的计数不可执行（不得答全库数）"
+    assert not llm_intent_executable(
+        "tool_loop", "今天天气不错", {}, False, empty, [], db_session
+    ), "无汽车语境不得启动工具循环"
+    assert llm_intent_executable(
+        "tool_loop", "SUV有多少款车", {}, False, empty, [], db_session
+    ), "有汽车语境的 tool_loop 可执行"
+    assert llm_intent_executable(
+        "catalog_count", CATALOG_ASK, {}, False, empty, [], db_session
+    ), "无约束的全库计数可执行"
+    assert llm_intent_executable("recommendation", CATALOG_ASK, {}, True, empty, [], db_session)
+
+
 def test_route_with_llm_timeout_returns_none():
     """asyncio.wait_for 硬超时：fake 拖 0.4s、限时 30ms → 立即回退，不挂死。"""
     fake = _RouterFakeLLM(_verdict("chitchat", 0.9), router_latency=0.4)
@@ -262,33 +327,76 @@ def test_regex_default_mode_never_calls_llm(client: TestClient, db_session: Sess
 
 
 def test_llm_mode_adopts_llm_intent_end_to_end(client: TestClient, db_session: Session, monkeypatch):
-    """「LLM intent ≠ regex intent 且 LLM 合法」：执行走向 LLM 意图分支。
-
-    同一问法「全部车型有多少款车？」：regex 判 catalog_count（读库报数，filters
-    带 catalog_count 标记）；FakeLLM 高置信改判 chitchat → 回答变成自然对话分支，
-    filters 不再带 catalog_count——执行分支的差异可从响应精确区分。
-    """
+    """LLM 路由的价值场景：regex 漏识别（金标 known_gap「一共有几款」）由 LLM 补上，
+    且该 intent 在当前上下文可执行（无核心约束/无 resolved/无品牌）→ 采纳并读库报数。"""
     _seed(db_session)
     monkeypatch.setenv("AGENT_ROUTER_MODE", "llm")
-    fake = _RouterFakeLLM(_verdict("chitchat", 0.9))
+    fake = _RouterFakeLLM(_verdict("catalog_count", 0.9))
     restore = _swap_llm(fake)
     try:
-        out_llm = _post(client, CATALOG_ASK)
-        out_cached = _post(client, CATALOG_ASK)          # 同 utterance 第二次请求
-        # 对照组：切回 regex，同一问法必须走 catalog_count
+        out_llm = _post(client, "一共有几款")
+        out_cached = _post(client, "一共有几款")            # 同 utterance 第二次请求
+        # 对照组：切回 regex，同一问法回到既有链路（known_gap：不报数）
         monkeypatch.setenv("AGENT_ROUTER_MODE", "regex")
-        out_regex = _post(client, CATALOG_ASK)
+        out_regex = _post(client, "一共有几款")
     finally:
         restore()
-    assert "catalog_count" not in out_llm["filters"], "执行应走向 LLM 改判的 chitchat 分支"
-    assert out_llm["need_clarification"] is False
-    assert out_llm["explanation"], "chitchat 分支应有兜底回复"
-    assert out_regex["filters"].get("catalog_count") is True
-    assert out_regex["explanation"] != out_llm["explanation"]
+    assert out_llm["filters"].get("catalog_count") is True, "LLM 补判的计数应被采纳"
+    assert "1 个在售车系" in out_llm["explanation"]
+    assert out_regex["filters"].get("catalog_count") is None, "regex 模式维持现状（known_gap）"
     # 缓存：同 utterance 第二次请求不得再触发路由 LLM
     assert out_cached["filters"] == out_llm["filters"]
     assert out_cached["explanation"] == out_llm["explanation"]
     assert fake.router_calls == 1, "同 utterance 第二次路由不得再调 LLM（缓存命中）"
+
+
+def test_llm_mode_rejects_intent_without_execution_precondition(
+    client: TestClient, db_session: Session, monkeypatch
+):
+    """评审三轮 B1 回归：LLM 判 series_qa 但消息里没有可解析车系（resolved=[]）
+    → 不可执行 → 回退 regex 决策；绝不允许 500（修复前 _series_qa_reply IndexError）。"""
+    _seed(db_session)
+    monkeypatch.setenv("AGENT_ROUTER_MODE", "llm")
+    fake = _RouterFakeLLM(_verdict("series_qa", 0.95))
+    restore = _swap_llm(fake)
+    try:
+        out = _post(client, CATALOG_ASK)                    # 消息里没有任何车系名
+    finally:
+        restore()
+    assert out["filters"].get("catalog_count") is True, "应回退 regex 的 catalog_count"
+    assert fake.router_calls == 1
+
+
+def test_llm_mode_respects_core_constraint_guard(client: TestClient, db_session: Session, monkeypatch):
+    """评审三轮 B2 回归：带预算约束的计数问句不得被 llm 模式答成全库数
+    （修复前「15万以内有多少款车？」被答成全库计数，无视用户约束）。"""
+    _seed(db_session)
+    monkeypatch.setenv("AGENT_ROUTER_MODE", "llm")
+    fake = _RouterFakeLLM(_verdict("catalog_count", 0.95))
+    restore = _swap_llm(fake)
+    try:
+        out = _post(client, "15万以内有多少款车？")
+    finally:
+        restore()
+    assert out["filters"].get("catalog_count") is None, (
+        f"带核心约束的计数不得走全库盘点，实际 filters={out['filters']}"
+    )
+    assert out["need_clarification"] is True, "应回到既有推荐链的追问（Phase 1 语义）"
+
+
+def test_llm_mode_respects_car_context_guard(client: TestClient, db_session: Session, monkeypatch):
+    """评审三轮 B2 回归：无汽车语境的寒暄不得被 llm 模式启动工具循环。"""
+    _seed(db_session)
+    monkeypatch.setenv("AGENT_ROUTER_MODE", "llm")
+    fake = _RouterFakeLLM(_verdict("tool_loop", 0.95))
+    restore = _swap_llm(fake)
+    try:
+        out = _post(client, "今天天气不错")
+    finally:
+        restore()
+    assert out["filters"].get("tool_loop") is None, "汽车语境守卫不得被绕过"
+    assert "tool_loop_fallback" not in out["filters"]
+    assert out.get("explanation"), "应走既有寒暄/通用对话分支"
 
 
 def test_llm_mode_falls_back_to_regex_on_bad_output(client: TestClient, db_session: Session, monkeypatch):
@@ -443,6 +551,26 @@ def test_shadow_report_aggregate():
     assert report["confusion_pairs"] == [
         {"regex_intent": "catalog_count", "llm_intent": "chitchat", "count": 1}
     ]
+
+
+def test_shadow_report_parses_prefixed_log_lines():
+    """评审三轮 B3 回归：生产日志带 formatter/docker 前缀也必须能解析
+    （修复前 `--file shadow.log` 产出空报告且无从分辨）。"""
+    from app.agent.shadow_report import aggregate
+
+    prefixed = [
+        '2026-09-18 13:39:18,051 INFO app.agent.router.shadow {"utterance":"你好",'
+        '"regex_intent":"chitchat","llm_intent":"chitchat","llm_confidence":0.8,'
+        '"agree":true,"llm_elapsed_ms":50.0}',
+        'backend-1  | 2026-09-18 13:39:19,000 INFO app.agent.router.shadow {"utterance":"你好",'
+        '"regex_intent":"chitchat","llm_intent":null,"llm_confidence":null,'
+        '"agree":false,"llm_elapsed_ms":1500.0,"llm_error":"asyncio.TimeoutError"}',
+        "2026-09-18 13:39:20 INFO app.agent.respond {\"sid\":\"x\",\"mode\":\"shadow\",\"elapsed_ms\":5}",
+    ]
+    report = aggregate(prefixed)
+    assert report["total"] == 2, f"带前缀的真实日志行必须能解析，实际 {report}"
+    assert report["judged"] == 1 and report["no_verdict"] == 1
+    assert report["agreement_rate"] == pytest.approx(1.0)
 
 
 def test_shadow_report_markdown_and_cli_roundtrip():

@@ -28,6 +28,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
+from app.agent.llm_router import SHADOW_LOGGER
+
 
 def _percentile(sorted_values: list[float], pct: float) -> float | None:
     """线性插值百分位；入参必须已升序。空列表返回 None。"""
@@ -43,7 +45,14 @@ def _percentile(sorted_values: list[float], pct: float) -> float | None:
 
 
 def _parse_rows(lines: Iterable[Any]) -> list[dict]:
-    """容忍脏行：空行 / 非 JSON / 非对象一律跳过（日志可能有截断）。"""
+    """容忍脏行：空行 / 非 JSON / 非对象一律跳过（日志可能有截断）。
+
+    生产日志带 logging formatter 前缀（时间/级别/logger 名），形如
+    `2026-09-18 13:39:18,051 INFO app.agent.router.shadow {"utterance": ...}`；
+    docker logs 还会再加容器前缀。裸 JSON 解析失败时：若行内含 shadow logger 名
+    则截取首尾大括号之间的内容再试一次（评审三轮 B3：否则 `--file shadow.log`
+    产出空报告且无从分辨）；不含标记的行（如回答级耗时日志）不误收。
+    """
     rows: list[dict] = []
     for raw in lines:
         if isinstance(raw, dict):
@@ -52,13 +61,22 @@ def _parse_rows(lines: Iterable[Any]) -> list[dict]:
         text = str(raw).strip()
         if not text:
             continue
-        try:
-            value = json.loads(text)
-        except ValueError:
-            continue
+        value = _loads_object(text)
+        if value is None and SHADOW_LOGGER in text:
+            start, end = text.find("{"), text.rfind("}")
+            if 0 <= start < end:
+                value = _loads_object(text[start:end + 1])
         if isinstance(value, dict):
             rows.append(value)
     return rows
+
+
+def _loads_object(text: str) -> Any:
+    """只做直接解析；大括号截取兜底在 _parse_rows 里由 logger 名标记守门。"""
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
 
 
 def aggregate(lines: Iterable[Any]) -> dict:
@@ -144,6 +162,11 @@ def render_markdown(report: dict) -> str:
         "- LLM 路由耗时："
         + (
             f"p50 {p50} ms / p95 {p95} ms（{elapsed.get('count', 0)} 条有耗时记录）"
+            + (
+                "；样本不足 20 条，p95 仅供参考、不作为切流判据 4 的依据"
+                if elapsed.get("count", 0) < 20
+                else ""
+            )
             if p50 is not None
             else "无有耗时记录"
         ),

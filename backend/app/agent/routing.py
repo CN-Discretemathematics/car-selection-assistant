@@ -392,6 +392,63 @@ def decide_route(
     )
 
 
+def llm_intent_executable(
+    intent: str,
+    message: str,
+    hints: dict,
+    structured: bool,
+    profile: UserProfile,
+    resolved: list,
+    db: Session,
+) -> bool:
+    """LLM 路由改写 intent 的执行前置条件校验（2026-09-17 评审三轮 B1/B2）。
+
+    LLM 只允许在「该 intent 的确定性执行在当前上下文下确实有效」时改写路由；
+    各 intent 的前置条件与 decide_route 对应分支的守卫逐条一致：
+    - series_qa 需要 resolved（否则 _series_qa_reply 把空列表当车系对比 → IndexError/500）；
+    - brand_lineup 需要 brand_ids（否则答出空品牌名的盘点）；
+    - catalog_count / tool_loop 不得带核心约束（预算/人数/用途）——执行层会无视约束
+      给出错误答案（「15万以内有多少款车」曾被 llm 模式答成全库数）；
+    - tool_loop 还要求汽车语境（「今天天气不错」曾被 llm 模式启动工具循环）；
+    - chitchat 要求无购车意图且无结构化线索；
+    - general_advice 要求确属通用咨询且无核心约束（profile_has_core_constraints 口径）；
+    - comparison / recommendation 恒可执行（前者 slots 已确定性补齐，后者是兜底链）。
+    无法判定 → False（回退 regex 决策：宁可不改写，也不错答）。
+    """
+    core_constraints = (
+        bool({"budget", "passengers", "usage"} & set(hints))
+        or profile.budget.min is not None
+        or profile.budget.max is not None
+        or bool(profile.usage)
+        or profile.passengers is not None
+    )
+    if intent == "comparison":
+        return True
+    if intent == "series_qa":
+        return bool(resolved)
+    if intent == "brand_lineup":
+        return bool(profile.brand_ids)
+    if intent == "catalog_count":
+        return not core_constraints and not resolved and not profile.brand_ids
+    if intent == "tool_loop":
+        car_context = bool(
+            resolved
+            or profile.brand_ids
+            or profile.locked_series_ids
+            or _CAR_CONTEXT_RE.search(message)
+            or has_car_intent(message)
+            or mentions_known_brand(db, message)
+        ) and not _NON_CAR_RE.search(message)
+        return car_context and not core_constraints
+    if intent == "chitchat":
+        return not has_car_intent(message) and not structured
+    if intent == "general_advice":
+        return asks_general_advice(message) and not profile_has_core_constraints(profile)
+    if intent == "recommendation":
+        return True
+    return False
+
+
 # 路由日志的轻量 PII 掩码：手机号（CN）/邮箱/身份证等长数字串 → ***
 # （utterance 是用户原话，可能带个人信息；日志一旦真正落盘就不能原文跟着进去）
 _PII_PATTERNS = (
@@ -423,6 +480,7 @@ def log_route_decision(
         "utterance": _mask_pii(message or "")[:200],
         "intent": decision.intent,
         "matched_rule": decision.matched_rule,
+        "signals": dict(decision.signals or {}),
         "elapsed_ms": round(float(elapsed_ms), 2),
     }
     logging.getLogger("app.agent.routing").info(json.dumps(payload, ensure_ascii=False))
