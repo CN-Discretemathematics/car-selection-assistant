@@ -236,7 +236,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.file:
-        lines: list[str] = Path(args.file).read_text(encoding="utf-8").splitlines()
+        lines: list[str] = Path(args.file).read_text(
+        encoding="utf-8", errors="replace"  # 日志可能混入非 UTF-8 字节（本地控制台编码），容错不崩
+    ).splitlines()
     else:
         # Windows 控制台管道默认非 UTF-8：显式重配，避免中文日志读成乱码
         if hasattr(sys.stdin, "reconfigure"):
