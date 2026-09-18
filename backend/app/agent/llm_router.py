@@ -16,13 +16,16 @@ Phase 1 的 `routing.decide_route` 是纯 regex 决策；本模块在同一个�
 环境变量（直读 os.getenv，不改 app/common/config.py；非法值一律回退默认）：
 - AGENT_ROUTER_MODE           regex | shadow | llm，默认 regex；
 - AGENT_ROUTER_TIMEOUT_MS     llm 模式路由调用硬超时（毫秒），默认 1500；
-- AGENT_ROUTER_MIN_CONFIDENCE llm 模式采用 LLM intent 的最低置信度，默认 0.6。
+- AGENT_ROUTER_MIN_CONFIDENCE llm 模式采用 LLM intent 的最低置信度，默认 0.6；
+- AGENT_ROUTER_MODEL          路由专用模型 ID（如更快/更便宜的 flash 档）；未设置
+  → 与回答链路同一模型。
 
 缓存：归一化 utterance（strip + lower + 连续空白折叠）精确命中 → 跳过 LLM；
-进程内模块级 LRU，容量 512。只缓存「解析成功的裁决 (intent, confidence)」，
-不缓存失败（超时/异常可能是瞬态的，失败回退由调用方每次重新兜底）；
-裁决只依赖 utterance 本身（profile 当前不进 prompt，见 route_with_llm 说明），
-按 utterance 做 key 是健全的。**缓存无 TTL/版本键：换模型或改路由提示词必须重启
+key = 模型名 + 归一化 utterance——切换 AGENT_ROUTER_MODEL 不会命中旧裁决，
+也无需重启进程（评审三轮建议 2 就此闭环）。进程内模块级 LRU，容量 512。
+只缓存「解析成功的裁决 (intent, confidence)」，不缓存失败（超时/异常可能是瞬态的，
+失败回退由调用方每次重新兜底）；裁决只依赖 utterance 本身（profile 当前不进 prompt，
+见 route_with_llm 说明），按 utterance 做 key 是健全的。**缓存无 TTL/版本键：换模型或改路由提示词必须重启
 进程**（否则旧裁决在进程生命周期内残留）；并发同 key 无 single-flight（事件循环
 单线程内各自调用一次，代价是多付几次 LLM 调用，不影响正确性）。
 
@@ -60,7 +63,7 @@ from app.agent.routing import (
     extract_comparison_variant_ids,
 )
 from app.agent.schemas import UserProfile
-from app.common.llm import get_llm_client
+from app.common.llm import LLMClient
 
 # shadow 对拍日志（单行 JSON；PII 掩码沿用 routing._mask_pii 同一口径）。
 # 注意：改名此常量会破坏 shadow_report 的 --file 前缀解析（_parse_rows 依赖此字面名
@@ -70,6 +73,11 @@ SHADOW_LOGGER = "app.agent.router.shadow"
 ROUTER_MODE_ENV = "AGENT_ROUTER_MODE"
 ROUTER_TIMEOUT_ENV = "AGENT_ROUTER_TIMEOUT_MS"
 ROUTER_MIN_CONFIDENCE_ENV = "AGENT_ROUTER_MIN_CONFIDENCE"
+# 路由专用模型（2026-09-17 用户决策：路由用更快/更便宜的 flash 档）：
+# 在服务器 backend/.env 里把 AGENT_ROUTER_MODEL 设为服务方接受的模型 ID 即可，
+# 未设置 → 与回答链路同一客户端/模型。缓存 key 含模型名（见 _cache_key），
+# 因此切换模型不会命中旧裁决，也无需重启进程。
+ROUTER_MODEL_ENV = "AGENT_ROUTER_MODEL"
 
 DEFAULT_ROUTER_MODE = "regex"
 DEFAULT_TIMEOUT_MS = 1500
@@ -79,6 +87,24 @@ _CACHE_CAPACITY = 512
 
 _logger = logging.getLogger("app.agent.router")
 
+# ── 路由专用 LLM 客户端（按 AGENT_ROUTER_MODEL 惰性构建一个实例）──────────────
+_router_llm: LLMClient | None = None
+
+
+def _router_client() -> LLMClient:
+    global _router_llm
+    if _router_llm is None:
+        model = (os.getenv(ROUTER_MODEL_ENV) or "").strip()
+        _router_llm = LLMClient(model=model) if model else LLMClient()
+    return _router_llm
+
+
+def reset_router_client() -> None:
+    """清掉路由专用客户端（测试用；改 AGENT_ROUTER_MODEL 后如不重启进程也可调用）。"""
+    global _router_llm
+    _router_llm = None
+
+
 # ── LRU 缓存（模块级；事件循环单线程内读写，无锁）────────────────────────────
 # value = 解析成功的 LLM 裁决 (intent, confidence)
 _cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
@@ -87,6 +113,11 @@ _cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
 def normalize_utterance(message: str) -> str:
     """缓存 key：去首尾空白、lower、连续空白折叠为单空格。"""
     return " ".join((message or "").split()).lower()
+
+
+def _cache_key(message: str, model: str) -> str:
+    """缓存 key 含模型名：切换 AGENT_ROUTER_MODEL 时不命中旧裁决（评审三轮建议 2）。"""
+    return f"{model}::{normalize_utterance(message)}"
 
 
 def clear_route_cache() -> None:
@@ -275,7 +306,8 @@ async def route_with_llm(
       profile 纳入缓存 key，故先按规范保留参数；
     - timeout_ms   asyncio.wait_for 硬超时；None → 读 AGENT_ROUTER_TIMEOUT_MS；
     - llm          LLM 客户端（engine 同款接口：`await llm.chat(msgs, json_mode=True)`，
-      返回 {"choices":[{"message":{"content": ...}}]}）；None → get_llm_client()；
+      返回 {"choices":[{"message":{"content": ...}}]}）；None → 路由专用客户端
+      （AGENT_ROUTER_MODEL，未设置则与回答链路同模型）；
       传 FakeLLM 即可测试；
     - regex_intent 当前 regex 决策的 intent：写入 signals 供对拍，并在 comparison
       提不出款型 ID 时作为维持意图；None 表示调用方没有 regex 决策可对照；
@@ -285,11 +317,11 @@ async def route_with_llm(
     超时/异常/输出不合法/低置信 → 返回 None。异常按「硬约束：延迟优先」宽捕获
     （Exception 级）——路由器是旁路组件，绝不能让它的任何异常打断响应路径。
     """
-    client = llm if llm is not None else get_llm_client()
+    client = llm if llm is not None else _router_client()
     if not getattr(client, "available", False):
         return None
-    key = normalize_utterance(message)
-    if not key:
+    key = _cache_key(message, getattr(client, "model", "fake"))
+    if not normalize_utterance(message):
         return None
 
     verdict = _cache_get(key)

@@ -25,11 +25,14 @@ from sqlalchemy.orm import Session
 
 from app.agent.engine import get_agent_engine
 from app.agent.llm_router import (
+    _cache_key,
+    _router_client,
     clear_route_cache,
     get_router_min_confidence,
     get_router_mode,
     get_router_timeout_ms,
     normalize_utterance,
+    reset_router_client,
     route_with_llm,
 )
 from app.agent.schemas import UserProfile
@@ -150,6 +153,25 @@ def test_route_with_llm_rejects_malformed_verdicts(content: str):
         CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=fake, regex_intent="catalog_count",
         min_confidence=0.0,
     )) is None
+
+
+def test_router_client_uses_model_env(monkeypatch):
+    """用户决策（2026-09-17）：路由用独立模型档（如 v4.1 flash）——env 即插即用。"""
+    monkeypatch.setenv("AGENT_ROUTER_MODEL", "deepseek-v4.1-flash")
+    reset_router_client()
+    assert _router_client().model == "deepseek-v4.1-flash"
+    reset_router_client()
+    monkeypatch.delenv("AGENT_ROUTER_MODEL", raising=False)
+    from app.common.config import get_settings
+
+    assert _router_client().model == get_settings().deepseek_model, "未设置 → 回答链路同模型"
+    reset_router_client()
+
+
+def test_cache_key_includes_model():
+    """缓存 key 含模型名：切换 AGENT_ROUTER_MODEL 不命中旧裁决（评审三轮建议 2）。"""
+    assert _cache_key("a", "m1") != _cache_key("a", "m2")
+    assert _cache_key(" A  b ", "m1") == _cache_key("a b", "m1")
 
 
 def test_route_with_llm_non_string_content_and_empty_choices():

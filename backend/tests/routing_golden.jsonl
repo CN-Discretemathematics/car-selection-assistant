@@ -7,7 +7,7 @@
 {"utterance": "有多少款新能源车", "expect_intent": "catalog_count", "known_gap": false, "note": "评审 B2：修饰词夹在中间的问法"}
 {"utterance": "有多少款SUV", "expect_intent": "catalog_count", "known_gap": false, "note": "分支③：省略名词；车身偏好不排除，按子集计数"}
 {"utterance": "有多少款纯电车", "expect_intent": "catalog_count", "known_gap": false, "note": "评审 B2 正例"}
-{"utterance": "有多少款电动车", "expect_intent": "catalog_count", "known_gap": false, "note": "「电动车」以车字收尾命中分支②；口径缺口：「电动车」不在能源词表，实际答全库数而非电动车子集（评审二轮建议 1，待产品决策）"}
+{"utterance": "有多少款电动车", "expect_intent": "catalog_count", "known_gap": false, "note": "「电动车」以车字收尾命中分支②；产品决策 2026-09-17：「电动车」不进能源词表，此问句按全库口径作答（保留 note 以防被误当成已支持能源子集）"}
 {"utterance": "现在在售车型一共几款", "expect_intent": "catalog_count", "known_gap": false, "note": "分支⑤：名词在前"}
 {"utterance": "车系有多少", "expect_intent": "catalog_count", "known_gap": false, "note": "分支④：句尾省略量词"}
 {"utterance": "现在在售车系有几个", "expect_intent": "catalog_count", "known_gap": false, "note": "分支④⑤组合"}
