@@ -7,8 +7,9 @@
     comparison → series_qa → brand_lineup → catalog_count → tool_loop
     → chitchat → general_advice → recommendation
 
-`decide_route` 只回答「走哪条链路」，不执行任何回复生成；`AgentEngine.handle()`
-拿到 `RouteDecision` 后按 intent 分发到既有私有方法，执行代码本身不动。
+`decide_route` 只回答「走哪条链路」，不执行任何回复生成；`AgentEngine.respond()`
+（handle() 只在外层包回答级耗时日志与路由模式读取）拿到 `RouteDecision` 后按
+intent 分发到既有私有方法，执行代码本身不动。
 分支顺序与判定条件与提取前的内联实现逐条等价（零行为变更，由 370 项既有
 测试与 routing 金标集共同钉住）。
 
@@ -250,7 +251,7 @@ def decide_route(
 ) -> RouteDecision:
     """把 respond() 的确定性分支判定提取为纯决策（顺序/条件与原实现逐条等价）。
 
-    参数与 engine.handle() 中游变量一一对应：
+    参数与 engine.respond() 中游变量一一对应：
     - hints       extract_hints(message) 的结果（本轮可解析线索）；
     - structured  本轮是否有可解析输入（bool(hints)，品牌线索也会置 True）；
     - profile     会话累积画像（含本轮 merge 结果）；

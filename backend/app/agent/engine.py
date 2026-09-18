@@ -6,6 +6,8 @@ DeepSeek 只负责解释生成；车辆事实一律来自工具与数据库（�
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -22,6 +24,11 @@ from app.agent.answer_contract import (
     numbers_in,
     tool_result_universe,
     validate_tool_answer,
+)
+from app.agent.llm_router import (
+    get_router_mode,
+    log_shadow_record,
+    route_with_llm,
 )
 from app.agent.routing import (
     asks_brand_lineup,
@@ -577,6 +584,8 @@ class AgentEngine:
     def __init__(self, llm: LLMClient | None = None, store: SessionStore | None = None) -> None:
         self._llm = llm or get_llm_client()
         self._store = store or get_session_store()
+        # shadow 旁路任务的强引用集（asyncio 要求持有引用防止任务被 GC；完成即移除）
+        self._pending_shadow_tasks: set[asyncio.Task] = set()
 
     async def _emit(self, session_id: str, text: str, out: AgentMessageOut) -> None:
         """落库 assistant 消息与结构化结果。
@@ -587,7 +596,77 @@ class AgentEngine:
         await run_in_threadpool(self._store.append_message, session_id, "assistant", text)
         await run_in_threadpool(self._store.set_last_result, session_id, out.model_dump())
 
+    # ── 路由模式（W0 Phase 2）────────────────────────────────────────────────
+    # regex（默认）不进这里：respond() 里 router_mode 为 regex 时不做任何新动作。
+    def _spawn_shadow_route(self, message: str, profile: UserProfile, regex_decision) -> None:
+        """shadow 模式：LLM 路由放 create_task 旁路，**绝不在响应路径 await**。
+
+        对用户延迟贡献必须为 0；LLM 未配置时旁路必然空转，直接跳过（回答级耗时
+        日志的 mode 字段可排障）。旁路任务异常全兜底（_shadow_route 内）。
+        """
+        if not getattr(self._llm, "available", False):
+            return
+        task = asyncio.create_task(self._shadow_route(message, profile, regex_decision.intent))
+        self._pending_shadow_tasks.add(task)
+        task.add_done_callback(self._pending_shadow_tasks.discard)
+
+    async def _shadow_route(self, message: str, profile: UserProfile, regex_intent: str) -> None:
+        """shadow 旁路体：结果只写对拍日志（logger "app.agent.router.shadow"）。
+
+        try/except 全兜底——任何未捕获异常都可能崩掉任务循环，这里吞掉并记日志。
+        min_confidence 传 0.0：对拍要记录 LLM 原始裁决（含低置信），阈值过滤是
+        llm 模式的采信逻辑，不该在对拍数据里丢失信息。
+        """
+        try:
+            started = time.perf_counter()
+            llm_decision = await route_with_llm(
+                message, profile, llm=self._llm, regex_intent=regex_intent, min_confidence=0.0
+            )
+            log_shadow_record(
+                message,
+                regex_intent=regex_intent,
+                llm_decision=llm_decision,
+                llm_elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+        except Exception as err:  # noqa: BLE001 — 旁路任务异常吞掉并记日志，不得崩任务循环
+            logging.getLogger("app.agent.router.shadow").warning(
+                "shadow 旁路异常（已吞掉，不影响响应）：%s: %s", type(err).__name__, str(err)[:160]
+            )
+
     async def handle(self, db: Session, session_id: str, message: str) -> AgentMessageOut:
+        """respond() 的对外入口：包一层回答级耗时结构化日志（每次请求一条）。
+
+        路由模式（AGENT_ROUTER_MODE）在这里读取**一次**并传入 respond()，保证同一次
+        请求内模式一致。耗时日志 logger "app.agent.respond"，单行 JSON
+        {sid(匿名), mode, elapsed_ms}——llm 模式切流判据第 4 条
+        （P95 回答延迟增幅 ≤300ms，对比 regex 基线）的数据来源。
+        """
+        router_mode = get_router_mode()
+        started = time.perf_counter()
+        failed = False
+        try:
+            return await self.respond(db, session_id, message, router_mode=router_mode)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            payload: dict = {
+                "sid": hashlib.sha256((session_id or "").encode("utf-8")).hexdigest()[:12] or "-",
+                "mode": router_mode,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            }
+            if failed:
+                payload["error"] = True
+            logging.getLogger("app.agent.respond").info(json.dumps(payload, ensure_ascii=False))
+
+    async def respond(
+        self,
+        db: Session,
+        session_id: str,
+        message: str,
+        router_mode: str = "regex",
+    ) -> AgentMessageOut:
+        """一次用户消息的完整回答（原 handle() 主体；handle() 只包耗时日志与模式读取）。"""
         await run_in_threadpool(self._store.append_message, session_id, "user", message)
 
         profile = UserProfile(**await run_in_threadpool(self._store.get_profile, session_id))
@@ -683,6 +762,21 @@ class AgentEngine:
         # 自然消解为一处，0.71 本就不可达）。
         route_started = time.perf_counter()
         decision = decide_route(message, hints, structured, profile, resolved, db)
+        # ── 路由模式分发（W0 Phase 2）────────────────────────────────────────
+        # regex（默认）：不进任何分支，完全现状（零新行为，全量测试钉住）；
+        # shadow：LLM 路由旁路对拍（create_task，绝不在本路径 await，延迟贡献 0）；
+        # llm：先等 LLM 决策（硬超时），合法高置信才采用，否则立即回退 regex
+        # 决策并打 router_fallback 标。路由失败绝不阻断响应。
+        if router_mode == "llm":
+            llm_decision = await route_with_llm(
+                message, profile, llm=self._llm, regex_intent=decision.intent
+            )
+            if llm_decision is not None:
+                decision = llm_decision
+            else:
+                decision.signals["router_fallback"] = True
+        elif router_mode == "shadow":
+            self._spawn_shadow_route(message, profile, decision)
         log_route_decision(
             session_id,
             message,
