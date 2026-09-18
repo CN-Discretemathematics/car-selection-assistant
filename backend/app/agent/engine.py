@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
 import re
 import time
 
@@ -26,6 +27,7 @@ from app.agent.answer_contract import (
     validate_tool_answer,
 )
 from app.agent.llm_router import (
+    arbitrate_route,
     get_router_mode,
     log_shadow_record,
     route_with_llm,
@@ -143,6 +145,10 @@ TOOL_LOOP_MAX_STEPS = 4
 # shadow 旁路 in-flight 上限（评审三轮非阻塞 3）：超过即丢弃本次对拍（shadow 采样可容忍丢失），
 # 防止旁路任务随并发无限堆积；单任务另有 1.5s 硬超时兜底。
 _SHADOW_MAX_PENDING = 64
+# shadow 旁路异常重试退避（秒，±30% 抖动）：DeepSeek 对 flash 的并发连接有快速重置
+# 行为（I-20260918-01，生产首试失败约 13%），重试只针对异常、耗尽只记 warning——
+# 旁路尽力而为，绝不影响响应路径。测试可 monkeypatch 本常量归零。
+_SHADOW_RETRY_DELAYS = (0.8, 2.5)
 # （工具循环候选问法正则 _TOOL_ASSIST_RE 已迁移到 app/agent/routing.py）
 _TOOL_LOOP_SYSTEM = (
     "你是「选车助手」。你可以调用工具查询真实数据库（在售车型、月销量、款型配置、官方文档检索）。规则：\n"
@@ -610,6 +616,8 @@ class AgentEngine:
         in-flight 旁路任务设上限（评审三轮非阻塞 3）：超过即丢弃本次对拍并计数——
         shadow 采样可容忍丢失，不能让旁路无限堆积；进程退出时 in-flight 任务会被
         静默丢弃（对拍样本可容忍）。
+        派发时机：handle() 在**回答产出后**调用（I-20260918-01，避免与回答链路
+        LLM 调用并发）；传入完整 RouteDecision（仲裁与对拍需要 matched_rule）。
         """
         if not getattr(self._llm, "available", False):
             return
@@ -618,32 +626,44 @@ class AgentEngine:
                 json.dumps({"shadow_skipped": True, "reason": "pending_full"}, ensure_ascii=False)
             )
             return
-        task = asyncio.create_task(self._shadow_route(message, profile, regex_decision.intent))
+        task = asyncio.create_task(self._shadow_route(message, profile, regex_decision))
         self._pending_shadow_tasks.add(task)
         task.add_done_callback(self._pending_shadow_tasks.discard)
 
-    async def _shadow_route(self, message: str, profile: UserProfile, regex_intent: str) -> None:
+    async def _shadow_route(self, message: str, profile: UserProfile, regex_decision) -> None:
         """shadow 旁路体：结果只写对拍日志（logger "app.agent.router.shadow"）。
 
-        try/except 全兜底——任何未捕获异常都可能崩掉任务循环，这里吞掉并记日志。
-        min_confidence 传 0.0：对拍要记录 LLM 原始裁决（含低置信），阈值过滤是
-        llm 模式的采信逻辑，不该在对拍数据里丢失信息。
+        2026-09-18 起带抖动重试（_SHADOW_RETRY_DELAYS，I-20260918-01）：route_with_llm
+        把一切失败（网络重置/超时/输出不合法）折叠为 None，无法区分——因此**无裁决即
+        重试**；重试耗尽后仍按 None 落记录（保持「无裁决不丢样本」语义），失败类型由
+        route_with_llm 的 INFO 归因日志区分。旁路尽力而为，绝不影响响应路径。
+        记录携带 arbitrated_intent（分歧仲裁的最终裁定）。
         """
-        try:
+        llm_decision = None
+        last_error: str | None = None
+        for attempt in range(len(_SHADOW_RETRY_DELAYS) + 1):
             started = time.perf_counter()
-            llm_decision = await route_with_llm(
-                message, profile, llm=self._llm, regex_intent=regex_intent, min_confidence=0.0
-            )
-            log_shadow_record(
-                message,
-                regex_intent=regex_intent,
-                llm_decision=llm_decision,
-                llm_elapsed_ms=(time.perf_counter() - started) * 1000,
-            )
-        except Exception as err:  # noqa: BLE001 — 旁路任务异常吞掉并记日志，不得崩任务循环
-            logging.getLogger("app.agent.router.shadow").warning(
-                "shadow 旁路异常（已吞掉，不影响响应）：%s: %s", type(err).__name__, str(err)[:160]
-            )
+            try:
+                llm_decision = await route_with_llm(
+                    message, profile, llm=self._llm, regex_intent=regex_decision.intent,
+                    min_confidence=0.0,
+                )
+                last_error = None
+            except Exception as err:  # noqa: BLE001 — 防御：route_with_llm 理论上不抛
+                llm_decision = None
+                last_error = f"{type(err).__name__}: {str(err)[:120]}"
+            if llm_decision is not None or attempt >= len(_SHADOW_RETRY_DELAYS):
+                break
+            await asyncio.sleep(_SHADOW_RETRY_DELAYS[attempt] * (0.7 + 0.6 * random.random()))
+        arbitrated = arbitrate_route(regex_decision, llm_decision)
+        log_shadow_record(
+            message,
+            regex_intent=regex_decision.intent,
+            llm_decision=llm_decision,
+            llm_elapsed_ms=(time.perf_counter() - started) * 1000,
+            llm_error=last_error,
+            arbitrated_intent=arbitrated.intent,
+        )
 
     async def handle(self, db: Session, session_id: str, message: str) -> AgentMessageOut:
         """respond() 的对外入口：包一层回答级耗时结构化日志（每次请求一条）。
@@ -656,8 +676,14 @@ class AgentEngine:
         router_mode = get_router_mode()
         started = time.perf_counter()
         failed = False
+        # shadow 旁路用：respond() 把 (决策, 画像) 放进来，回答产出后在此派发——
+        # 保证路由 LLM 调用与回答链路 LLM 调用不并发（I-20260918-01：DeepSeek 对
+        # flash 的并发连接有快速重置行为，并发时 flash 恒输）。
+        decision_sink: list = []
         try:
-            return await self.respond(db, session_id, message, router_mode=router_mode)
+            out = await self.respond(
+                db, session_id, message, router_mode=router_mode, decision_sink=decision_sink
+            )
         except Exception:
             failed = True
             raise
@@ -670,6 +696,12 @@ class AgentEngine:
             if failed:
                 payload["error"] = True
             logging.getLogger("app.agent.respond").info(json.dumps(payload, ensure_ascii=False))
+        # shadow 旁路：回答产出**之后**才派发（原先在路由点派发，会与同请求的回答
+        # 链路并发）。is_chatty 提前返回时 sink 为空 → 不派发（与既有行为一致）。
+        if router_mode == "shadow" and decision_sink:
+            decision, profile = decision_sink[0]
+            self._spawn_shadow_route(message, profile, decision)
+        return out
 
     async def respond(
         self,
@@ -677,8 +709,14 @@ class AgentEngine:
         session_id: str,
         message: str,
         router_mode: str = "regex",
+        decision_sink: list | None = None,
     ) -> AgentMessageOut:
-        """一次用户消息的完整回答（原 handle() 主体；handle() 只包耗时日志与模式读取）。"""
+        """一次用户消息的完整回答（原 handle() 主体；handle() 只包耗时日志与模式读取）。
+
+        decision_sink：shadow 模式的决策回传通道——respond() 把 (决策, 画像) 追加进去，
+        由 handle() 在**回答产出后**统一派发 shadow 旁路（避免与回答链路 LLM 调用并发，
+        I-20260918-01）。其余模式忽略。
+        """
         await run_in_threadpool(self._store.append_message, session_id, "user", message)
 
         profile = UserProfile(**await run_in_threadpool(self._store.get_profile, session_id))
@@ -783,24 +821,28 @@ class AgentEngine:
             llm_decision = await route_with_llm(
                 message, profile, llm=self._llm, regex_intent=decision.intent
             )
-            # 采纳前置（评审三轮 B1/B2）：LLM intent 必须在当前上下文下「可执行」——
-            # series_qa 需 resolved、brand_lineup 需品牌、catalog_count/tool_loop
-            # 不得带核心约束且 tool_loop 需汽车语境。没有这道校验：
-            # series_qa+空 resolved 会 500、约束问句会被答成全库数、寒暄会启动工具循环。
-            if llm_decision is not None and llm_intent_executable(
-                llm_decision.intent, message, hints, structured, profile, resolved, db
-            ):
-                decision = llm_decision
-            else:
-                decision.signals["router_fallback"] = True
-        elif router_mode == "shadow":
-            self._spawn_shadow_route(message, profile, decision)
+            # 采纳前置（评审三轮 B1/B2 + 2026-09-18 分歧仲裁）：先由 arbitrate_route
+            # 按证据定策——regex 具体规则命中时不越权（金标 97.2%），regex 兜底时允许
+            # 高置信 LLM 具体意图补位；放行的还要过 llm_intent_executable（series_qa
+            # 需 resolved、计数/工具循环不得带核心约束等），任一不过即回退 regex 决策。
+            if llm_decision is not None:
+                chosen = arbitrate_route(decision, llm_decision)
+                if chosen is not llm_decision:
+                    decision.signals["router_fallback"] = True
+                elif not llm_intent_executable(
+                    chosen.intent, message, hints, structured, profile, resolved, db
+                ):
+                    decision.signals["router_fallback"] = True
+                else:
+                    decision = chosen
         log_route_decision(
             session_id,
             message,
             decision,
             elapsed_ms=(time.perf_counter() - route_started) * 1000,
         )
+        if decision_sink is not None:
+            decision_sink.append((decision, profile))
 
         if decision.intent == "comparison":
             return await self._comparison_analysis_reply(

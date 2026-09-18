@@ -36,7 +36,12 @@ BASELINE_COVERAGE = 1.0
 
 
 def _seed(db: Session) -> None:
-    """标准种子：5 品牌 / 6 在售车系（覆盖品牌盘点、车系问答、能源构成）。"""
+    """标准种子：5 品牌 / 8 在售车系（覆盖品牌盘点、车系问答、能源构成、对比措辞）。
+
+    秦PLUS/海豹06 于 2026-09-18 补种：金标 row36/41（「对比一下秦PLUS和海豹06」→
+    tool_loop）在此前种子下 resolve 不到这两个车系，走了与生产不同的路径（生产可
+    解析 → 误入 series_qa），把生产缺陷掩蔽了（I-20260918-04 同类教训：测试环境
+    必须能复现生产路径）。"""
     source = make_source(db, name="汽车之家")
     toyota = make_brand(db, name="丰田", source=source)
     byd = make_brand(db, name="比亚迪", source=source)
@@ -47,6 +52,8 @@ def _seed(db: Session) -> None:
         (toyota, "凯美瑞", "sedan", "ICE", "200000"),
         (toyota, "汉兰达", "suv", "HEV", "280000"),
         (byd, "汉L", "suv", "PHEV", "259800"),
+        (byd, "秦PLUS", "sedan", "PHEV", "120000"),
+        (byd, "海豹06", "sedan", "BEV", "130000"),
         (geely, "星愿", "sedan", "BEV", "74000"),
         (benz, "奔驰A级", "sedan", "ICE", "260000"),
         (leapmotor, "零跑A10", "suv", "BEV", "89000"),

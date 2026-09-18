@@ -440,7 +440,9 @@ async def route_with_llm(
                 timeout=max(int(timeout_ms), 1) / 1000.0,
             )
         except Exception as err:  # noqa: BLE001 — 超时/网络/任何异常一律回退（延迟硬约束）
-            _logger.debug(
+            # INFO（2026-09-18 提级，I-20260918-02）：无裁决率是切流判据的核心观测量，
+            # 异常类型（超时/网络重置/HTTP 状态）缺失导致归因只能靠外部探针反推。
+            _logger.info(
                 "router LLM 调用失败（回退 regex）：%s: %s", type(err).__name__, str(err)[:160]
             )
             return None
@@ -464,11 +466,14 @@ def log_shadow_record(
     llm_decision: RouteDecision | None,
     llm_elapsed_ms: float,
     llm_error: str | None = None,
+    arbitrated_intent: str | None = None,
 ) -> None:
     """单行 JSON 对拍记录 → logger "app.agent.router.shadow"。
 
     llm_decision 为 None（超时/异常/输出不合法）时 llm_intent/llm_confidence 记
     null、agree=false，shadow_report 把这类记录单列为「无裁决」，不进一致率分母。
+    arbitrated_intent：分歧仲裁（arbitrate_route）的最终裁定。随记录积累，直接回答
+    「按今天的仲裁策略，LLM 在哪些问句上会被采纳」——是放宽/收紧策略的证据源。
     """
     payload: dict = {
         "utterance": _mask_pii(message or "")[:200],
@@ -479,7 +484,46 @@ def log_shadow_record(
         ),
         "agree": bool(llm_decision is not None and llm_decision.intent == regex_intent),
         "llm_elapsed_ms": round(float(llm_elapsed_ms), 2),
+        "arbitrated_intent": arbitrated_intent,
     }
     if llm_error:
         payload["llm_error"] = str(llm_error)[:120]
     logging.getLogger(SHADOW_LOGGER).info(json.dumps(payload, ensure_ascii=False))
+
+
+# ── 路由分歧仲裁（2026-09-18 生产对拍证据定策）─────────────────────────────────
+# v2 生产对拍（83 条真实回放）：regex 金标 69/71（97.2%）、LLM 68/71（95.8%），
+# 两者错误集完全不相交。结论：regex **具体规则命中**时不可被 LLM 越权（它几乎不出错，
+# LLM 的 3 个分歧全部栽在 regex 有意为之的特化 quirk 上）；LLM 的价值通道是
+# **regex 兜底时的补位**——兜底规则（1: 无购车词落闲聊 / 4: 推荐兜底）是 regex 自认
+# 的盲区（金标 known_gap「一共有几款」正属此类），高置信的 LLM 具体意图在此补位。
+_LLM_FILL_INTENTS = frozenset(
+    {"catalog_count", "series_qa", "brand_lineup", "tool_loop", "comparison"}
+)
+_LLM_FILL_MIN_CONFIDENCE = 0.75
+_REGEX_FALLBACK_RULES = ("1:", "4:")
+
+
+def arbitrate_route(
+    regex_decision: RouteDecision, llm_decision: RouteDecision | None
+) -> RouteDecision:
+    """regex 与 LLM 裁决分歧时的确定性仲裁（llm 模式采信前 + shadow 记录共用）。
+
+    规则（按序短路）：
+    1. LLM 无裁决或与 regex 同 intent → regex 决策原样返回；
+    2. regex 命中具体规则（matched_rule 非 1:/4: 兜底）→ regex（金标 97.2%，不越权）；
+    3. LLM intent 不是可补位的具体意图（chitchat/general_advice/recommendation 是
+       兜底型意图，用它们改写等于换一个兜底）→ regex；
+    4. LLM 置信 < 0.75 → regex；
+    5. 其余（regex 兜底 + LLM 高置信具体意图）→ LLM 补位，signals 打 arbitration 标。
+    """
+    if llm_decision is None or llm_decision.intent == regex_decision.intent:
+        return regex_decision
+    if not str(regex_decision.matched_rule or "").startswith(_REGEX_FALLBACK_RULES):
+        return regex_decision
+    if llm_decision.intent not in _LLM_FILL_INTENTS:
+        return regex_decision
+    if float(llm_decision.signals.get("confidence") or 0.0) < _LLM_FILL_MIN_CONFIDENCE:
+        return regex_decision
+    llm_decision.signals["arbitration"] = "fallback_fill"
+    return llm_decision

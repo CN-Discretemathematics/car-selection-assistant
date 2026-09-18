@@ -23,11 +23,12 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.agent.engine import get_agent_engine
+from app.agent.engine import _SHADOW_RETRY_DELAYS, get_agent_engine
 from app.agent.llm_router import (
     _ROUTER_SYSTEM_PROMPT,
     _cache_key,
     _router_client,
+    arbitrate_route,
     clear_route_cache,
     get_router_min_confidence,
     get_router_mode,
@@ -38,6 +39,7 @@ from app.agent.llm_router import (
     route_with_llm,
 )
 from app.agent.schemas import UserProfile
+from app.agent.routing import RouteDecision
 from app.catalog.series_index import resolve_series
 from app.common.llm import LLMError, _chat_payload
 from tests.seed import make_brand, make_series, make_source, make_variant, make_year
@@ -54,10 +56,12 @@ class _RouterFakeLLM:
     模式下回答内容与「无 LLM 的 regex 模式」可比。
     """
 
-    def __init__(self, verdict: str | None = None, router_latency: float = 0.0):
+    def __init__(self, verdict: str | None = None, router_latency: float = 0.0,
+                 fail_first: int = 0):
         self.available = True
         self.verdict = verdict
         self.router_latency = router_latency
+        self.fail_first = fail_first
         self.calls: list[dict] = []
         self.router_calls = 0
 
@@ -66,6 +70,8 @@ class _RouterFakeLLM:
         if not json_mode:
             raise LLMError("非路由调用：回答链路应回退确定性模板")
         self.router_calls += 1
+        if self.fail_first and self.router_calls <= self.fail_first:
+            raise LLMError("模拟瞬态网络失败（DeepSeek 并发重置复现）")
         if self.router_latency:
             await asyncio.sleep(self.router_latency)
         return {"choices": [{"message": {"content": self.verdict}}]}
@@ -222,6 +228,109 @@ def test_router_thinking_env(monkeypatch):
     assert get_router_thinking() == "disabled"          # 非法值回退
     monkeypatch.delenv("AGENT_ROUTER_THINKING", raising=False)
     assert get_router_thinking() == "disabled"          # 未设置 → 默认关思考
+
+
+# ── 路由分歧仲裁（arbitrate_route，2026-09-18 生产对拍证据定策）───────────────
+
+def _rd(intent: str, rule: str) -> RouteDecision:
+    return RouteDecision(intent=intent, matched_rule=rule, slots={}, signals={})
+
+
+def _ld(intent: str, conf: float) -> RouteDecision:
+    decision = RouteDecision(intent=intent, matched_rule="llm-router", slots={}, signals={})
+    decision.signals["confidence"] = conf
+    return decision
+
+
+def test_arbitrate_route_policy():
+    """仲裁五规则：同向/LLM 缺位 → regex；regex 具体命中 → 不越权；regex 兜底时
+    高置信具体意图补位、低置信或兜底型意图不补位（证据见 arbitrate_route docstring）。"""
+    regex_specific = _rd(
+        "catalog_count", "0.7b:asks_catalog_count+no_resolved+no_brand+no_core_hints"
+    )
+    regex_fallback = _rd("chitchat", "1:not(has_car_intent or structured)")
+
+    assert arbitrate_route(regex_specific, None) is regex_specific
+    assert arbitrate_route(regex_specific, _ld("catalog_count", 0.9)) is regex_specific  # 同向
+    assert arbitrate_route(regex_specific, _ld("tool_loop", 0.95)) is regex_specific    # 不越权
+    # regex 兜底 + LLM 高置信具体意图 → 补位（known_gap「一共有几款」的修复通道）
+    fill = arbitrate_route(regex_fallback, _ld("catalog_count", 0.9))
+    assert fill.intent == "catalog_count"
+    assert fill.signals["arbitration"] == "fallback_fill"
+    assert arbitrate_route(regex_fallback, _ld("chitchat", 0.95)) is regex_fallback
+    assert arbitrate_route(regex_fallback, _ld("recommendation", 0.95)) is regex_fallback
+    assert arbitrate_route(regex_fallback, _ld("catalog_count", 0.5)) is regex_fallback
+
+
+def test_route_with_llm_exception_logged_at_info(caplog):
+    """P0-2（I-20260918-02）：路由 LLM 异常必须 INFO 可见——无裁决归因的直接证据，
+    生产首轮 11 条失败只能靠外部探针反推的补课。"""
+
+    class _ExplodingLLM:
+        available = True
+
+        async def chat(self, msgs, **kwargs):
+            raise LLMError("DeepSeek API 网络失败：ReadError")
+
+    with caplog.at_level(logging.INFO, logger="app.agent.router"):
+        decision = asyncio.run(route_with_llm(
+            CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=_ExplodingLLM(),
+            regex_intent="catalog_count",
+        ))
+    assert decision is None
+    assert any(
+        "调用失败" in rec.getMessage() and "ReadError" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_shadow_route_retries_then_records(monkeypatch, caplog):
+    """P0-1：shadow 旁路异常重试——首试网络失败、次试成功，记录仍落且带仲裁字段。"""
+    monkeypatch.setattr("app.agent.engine._SHADOW_RETRY_DELAYS", (0, 0))
+    fake = _RouterFakeLLM(_verdict("catalog_count", 0.9), fail_first=1)
+    engine = get_agent_engine()
+    original = engine._llm
+    engine._llm = fake
+    regex_decision = _rd("chitchat", "1:not(has_car_intent or structured)")
+    try:
+        with caplog.at_level(logging.INFO, logger="app.agent.router.shadow"):
+            asyncio.run(engine._shadow_route("一共有几款", UserProfile(), regex_decision))
+    finally:
+        engine._llm = original
+    assert fake.router_calls == 2, "首试异常应重试一次"
+    records = [
+        json.loads(rec.getMessage())
+        for rec in caplog.records
+        if rec.name == "app.agent.router.shadow"
+    ]
+    assert records and records[-1]["arbitrated_intent"] == "catalog_count", (
+        "regex 兜底 + LLM 高置信计数 → 仲裁补位"
+    )
+
+
+def test_shadow_route_retry_exhausted_still_records(monkeypatch, caplog):
+    """重试耗尽后仍按 None 落记录（无裁决不丢样本）；旁路尽力而为，绝不影响响应路径。"""
+    monkeypatch.setattr("app.agent.engine._SHADOW_RETRY_DELAYS", (0, 0))
+    fake = _RouterFakeLLM(None, fail_first=99)
+    engine = get_agent_engine()
+    original = engine._llm
+    engine._llm = fake
+    regex_decision = _rd(
+        "catalog_count", "0.7b:asks_catalog_count+no_resolved+no_brand+no_core_hints"
+    )
+    try:
+        with caplog.at_level(logging.INFO, logger="app.agent.router.shadow"):
+            asyncio.run(engine._shadow_route(CATALOG_ASK, UserProfile(), regex_decision))
+    finally:
+        engine._llm = original
+    assert fake.router_calls == len(_SHADOW_RETRY_DELAYS) + 1, "初试 + 全部重试"
+    records = [
+        json.loads(rec.getMessage())
+        for rec in caplog.records
+        if rec.name == "app.agent.router.shadow"
+    ]
+    assert records and records[-1]["llm_intent"] is None, "重试耗尽 → 无裁决记录"
+    assert records[-1]["arbitrated_intent"] == "catalog_count", "无裁决时仲裁维持 regex"
 
 
 def test_router_client_uses_model_env(monkeypatch):
@@ -628,9 +737,9 @@ def test_shadow_mode_response_identical_and_zero_llm_latency(
     assert max(shadow_elapsed) < 1500, (
         f"shadow 响应耗时不得包含 LLM 等待（fake 拖慢 1.5s）：{shadow_elapsed}"
     )
-    assert fake.router_calls == 1, "shadow 旁路应发起过一次路由 LLM 调用"
     assert _respond_elapsed(caplog, "regex"), "对照组的耗时日志应存在"
-    # 3) 对拍记录（旁路 1.5s 后落日志，轮询等待）
+    # 3) 对拍记录（旁路在回答产出后才派发——轮询等待；router_calls 断言必须放在
+    #    轮询之后：派发点后移使 chat 进入晚于响应返回，旧断言位置会读到 0）
     deadline = time.monotonic() + 8.0
     while time.monotonic() < deadline and not _shadow_records(caplog):
         time.sleep(0.05)
@@ -643,6 +752,7 @@ def test_shadow_mode_response_identical_and_zero_llm_latency(
     assert record["llm_confidence"] == pytest.approx(0.9)
     assert record["agree"] is False
     assert record["llm_elapsed_ms"] >= 1400, "对拍记录应包含真实的 LLM 等待耗时"
+    assert fake.router_calls == 1, "shadow 旁路应发起过一次路由 LLM 调用（轮询后断言）"
 
 
 # ── shadow_report ────────────────────────────────────────────────────────────
