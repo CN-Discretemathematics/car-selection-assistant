@@ -62,7 +62,9 @@ from app.agent.routing import (
 from app.agent.schemas import UserProfile
 from app.common.llm import get_llm_client
 
-# shadow 对拍日志（单行 JSON；PII 掩码沿用 routing._mask_pii 同一口径）
+# shadow 对拍日志（单行 JSON；PII 掩码沿用 routing._mask_pii 同一口径）。
+# 注意：改名此常量会破坏 shadow_report 的 --file 前缀解析（_parse_rows 依赖此字面名
+# 识别日志行），改名必须同步改 shadow_report 的测试。
 SHADOW_LOGGER = "app.agent.router.shadow"
 
 ROUTER_MODE_ENV = "AGENT_ROUTER_MODE"

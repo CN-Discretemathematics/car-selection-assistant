@@ -403,17 +403,21 @@ def llm_intent_executable(
 ) -> bool:
     """LLM 路由改写 intent 的执行前置条件校验（2026-09-17 评审三轮 B1/B2）。
 
-    LLM 只允许在「该 intent 的确定性执行在当前上下文下确实有效」时改写路由；
-    各 intent 的前置条件与 decide_route 对应分支的守卫逐条一致：
-    - series_qa 需要 resolved（否则 _series_qa_reply 把空列表当车系对比 → IndexError/500）；
-    - brand_lineup 需要 brand_ids（否则答出空品牌名的盘点）；
-    - catalog_count / tool_loop 不得带核心约束（预算/人数/用途）——执行层会无视约束
-      给出错误答案（「15万以内有多少款车」曾被 llm 模式答成全库数）；
-    - tool_loop 还要求汽车语境（「今天天气不错」曾被 llm 模式启动工具循环）；
-    - chitchat 要求无购车意图且无结构化线索；
-    - general_advice 要求确属通用咨询且无核心约束（profile_has_core_constraints 口径）；
-    - comparison / recommendation 恒可执行（前者 slots 已确定性补齐，后者是兜底链）。
-    无法判定 → False（回退 regex 决策：宁可不改写，也不错答）。
+    LLM 只允许在「该 intent 的确定性执行在当前上下文下确实有效」时改写路由。
+    与 decide_route 守卫的关系（评审四轮实测矩阵后定稿，**勿按「逐条一致」回改**）：
+
+    - **保留的门**：series_qa 的 resolved+should_answer（用户刚否定/闲聊提及车系时
+      不出档案）；brand_lineup 的 brand_ids+not resolved+盘点问法（会话已锁品牌时的
+      车系问答不得被抢成品牌盘点）；catalog_count/tool_loop 的核心约束禁用
+      （带预算/人数/用途时执行层会无视约束给出错误答案）；tool_loop 的汽车语境 +
+      **计数问法不走工具循环**（工具结果被截断，数总数会编造——Phase 1 决策）；
+      chitchat 的无购车意图；general_advice 的 profile_has_core_constraints 口径；
+    - **有意放宽的门**：catalog_count/tool_loop 不再要求各自的计数/盘点问法正则——
+      这正是 LLM 修 regex 漏识别的价值（「一共有几款」已由金标 known_gap 转正为
+      用例钉住）。代价：寒暄句被 LLM 判成 catalog_count 时会答真实库内计数
+      （答案本身为真，可接受）；
+    - comparison/recommendation 恒可执行（前者 slots 已确定性补齐，后者是兜底链）；
+    - 未知 intent 一律 False（回退 regex 决策：宁可不改写，也不错答）。
     """
     core_constraints = (
         bool({"budget", "passengers", "usage"} & set(hints))
@@ -425,9 +429,11 @@ def llm_intent_executable(
     if intent == "comparison":
         return True
     if intent == "series_qa":
-        return bool(resolved)
+        return bool(resolved) and should_answer(resolved, message)
     if intent == "brand_lineup":
-        return bool(profile.brand_ids)
+        return bool(profile.brand_ids) and not resolved and (
+            asks_brand_lineup(message) or asks_catalog_count(message)
+        )
     if intent == "catalog_count":
         return not core_constraints and not resolved and not profile.brand_ids
     if intent == "tool_loop":
@@ -439,7 +445,7 @@ def llm_intent_executable(
             or has_car_intent(message)
             or mentions_known_brand(db, message)
         ) and not _NON_CAR_RE.search(message)
-        return car_context and not core_constraints
+        return car_context and not core_constraints and not asks_catalog_count(message)
     if intent == "chitchat":
         return not has_car_intent(message) and not structured
     if intent == "general_advice":

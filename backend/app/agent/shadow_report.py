@@ -80,9 +80,14 @@ def _loads_object(text: str) -> Any:
 
 
 def aggregate(lines: Iterable[Any]) -> dict:
-    """shadow 单行 JSON 记录列表 → 对拍聚合结果（一致率、分歧清单、LLM 耗时分位）。"""
+    """shadow 单行 JSON 记录列表 → 对拍聚合结果（一致率、分歧清单、LLM 耗时分位）。
+
+    `shadow_skipped`（旁路 in-flight 满被丢弃的采样）单列 `skipped`，不计入
+    total/judged/no_verdict——丢弃不是「LLM 无裁决」，混入会让切流期的
+    可用性口径失真（评审四轮建议 2）。
+    """
     rows = _parse_rows(lines)
-    total = len(rows)
+    skipped = 0
     judged = 0
     no_verdict = 0
     agreed = 0
@@ -92,7 +97,15 @@ def aggregate(lines: Iterable[Any]) -> dict:
     llm_counter: Counter = Counter()
     elapsed_values: list[float] = []
 
+    kept: list[dict] = []
     for row in rows:
+        if row.get("shadow_skipped"):
+            skipped += 1
+            continue
+        kept.append(row)
+    total = len(kept)
+
+    for row in kept:
         elapsed = row.get("llm_elapsed_ms")
         if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
             elapsed_values.append(float(elapsed))
@@ -120,6 +133,7 @@ def aggregate(lines: Iterable[Any]) -> dict:
     elapsed_values.sort()
     return {
         "total": total,
+        "skipped": skipped,
         "judged": judged,
         "no_verdict": no_verdict,
         "agreed": agreed,
@@ -152,7 +166,8 @@ def render_markdown(report: dict) -> str:
         "# Shadow 路由对拍报告",
         "",
         f"- 记录总数：{report.get('total', 0)}"
-        f"（LLM 无裁决 {report.get('no_verdict', 0)} 条——超时/异常/输出不合法，不进一致率分母）",
+        f"（LLM 无裁决 {report.get('no_verdict', 0)} 条——超时/异常/输出不合法，不进一致率分母；"
+        f"旁路丢弃 {report.get('skipped', 0)} 条——in-flight 满，单列不计入）",
         "- 一致率："
         + (
             f"{rate:.2%}（一致 {report.get('agreed', 0)} / 有裁决 {report.get('judged', 0)}）"

@@ -33,6 +33,7 @@ from app.agent.llm_router import (
     route_with_llm,
 )
 from app.agent.schemas import UserProfile
+from app.catalog.series_index import resolve_series
 from app.common.llm import LLMError
 from tests.seed import make_brand, make_series, make_source, make_variant, make_year
 
@@ -182,13 +183,51 @@ def test_llm_intent_executable_preconditions(db_session: Session):
     assert not llm_intent_executable(
         "tool_loop", "今天天气不错", {}, False, empty, [], db_session
     ), "无汽车语境不得启动工具循环"
-    assert llm_intent_executable(
+    assert not llm_intent_executable(
         "tool_loop", "SUV有多少款车", {}, False, empty, [], db_session
-    ), "有汽车语境的 tool_loop 可执行"
+    ), "计数问法不得走工具循环（Phase 1 决策：截断结果数总数会编造）"
+    assert llm_intent_executable(
+        "tool_loop", "解释一下凯美瑞的混动技术", {}, False, empty, [], db_session
+    ), "有汽车语境的非计数问法 → tool_loop 可执行"
     assert llm_intent_executable(
         "catalog_count", CATALOG_ASK, {}, False, empty, [], db_session
     ), "无约束的全库计数可执行"
     assert llm_intent_executable("recommendation", CATALOG_ASK, {}, True, empty, [], db_session)
+    # 评审四轮：保留的门——否定车系不出档案；已解析车系不被抢成品牌盘点；
+    # 计数问法不走工具循环（Phase 1 决策：截断结果数总数会编造）
+    from app.common.models import Brand
+
+    toyota_id = db_session.query(Brand).filter_by(name="丰田").first().id
+    with_brand = UserProfile()
+    with_brand.brand_ids = [toyota_id]
+    resolved_kamai = resolve_series(db_session, "我不买凯美瑞了")
+    assert resolved_kamai, "种子库应能解析出凯美瑞"
+    assert not llm_intent_executable(
+        "series_qa", "我不买凯美瑞了", {}, False, empty, resolved_kamai, db_session
+    ), "用户刚否定车系时不应出档案（should_answer 门，评审四轮）"
+    assert not llm_intent_executable(
+        "brand_lineup", "凯美瑞怎么样", {}, False, with_brand, resolved_kamai, db_session
+    ), "已解析车系不得被抢成品牌盘点（not resolved 门，评审四轮）"
+    assert llm_intent_executable(
+        "brand_lineup", "丰田有多少款车", {}, False, with_brand, [], db_session
+    ), "品牌 + 盘点/计数问法 → 可执行"
+    assert not llm_intent_executable(
+        "tool_loop", "盘点一下有多少款车", {}, False, empty, [], db_session
+    ), "计数问法不得交给工具循环（截断报数风险，Phase 1 决策）"
+    resolved_q = resolve_series(db_session, "凯美瑞的油耗是多少")
+    assert llm_intent_executable(
+        "series_qa", "凯美瑞的油耗是多少", {}, False, empty, resolved_q, db_session
+    ), "正常车系问答可执行"
+    # 评审四轮：保留的门——否定车系不出档案；已解析车系不被抢成品牌盘点；
+    # 计数问法不走工具循环（Phase 1 决策：截断结果数总数会编造）
+    kamaid = resolve_series(db_session, "凯美瑞")
+    resolved_kamai = [(kamaid, None)] if kamaid else []
+    assert not llm_intent_executable(
+        "series_qa", "我不买凯美瑞了", {}, False, empty, resolved_kamai, db_session
+    ), "用户刚否定车系时不应出档案（should_answer 门）"
+    assert not llm_intent_executable(
+        "tool_loop", "盘点一下有多少款车", {}, False, empty, [], db_session
+    ), "计数问法不得交给工具循环（截断报数风险，Phase 1 决策）"
 
 
 def test_route_with_llm_timeout_returns_none():
