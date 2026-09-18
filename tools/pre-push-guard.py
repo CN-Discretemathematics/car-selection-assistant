@@ -79,6 +79,8 @@ SCOPE_PATHS: dict[str, list[str]] = {
         "backend/app/main.py",
         "backend/app/common/logging_setup.py",
         "backend/tests/test_log_setup.py",
+        # W0-P2 思考档位：LLMClient.chat 的 thinking 参数只由路由调用方使用
+        "backend/app/common/llm.py",
         "skills/",
     ],
     "search": ["web/app/components/", "web/app/page.tsx", "backend/app/retrieval/"],

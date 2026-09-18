@@ -25,11 +25,13 @@ from sqlalchemy.orm import Session
 
 from app.agent.engine import get_agent_engine
 from app.agent.llm_router import (
+    _ROUTER_SYSTEM_PROMPT,
     _cache_key,
     _router_client,
     clear_route_cache,
     get_router_min_confidence,
     get_router_mode,
+    get_router_thinking,
     get_router_timeout_ms,
     normalize_utterance,
     reset_router_client,
@@ -37,7 +39,7 @@ from app.agent.llm_router import (
 )
 from app.agent.schemas import UserProfile
 from app.catalog.series_index import resolve_series
-from app.common.llm import LLMError
+from app.common.llm import LLMError, _chat_payload
 from tests.seed import make_brand, make_series, make_source, make_variant, make_year
 
 # regex 判 catalog_count（金标行）；FakeLLM 改判 chitchat —— 执行分支可从 filters 区分
@@ -59,8 +61,8 @@ class _RouterFakeLLM:
         self.calls: list[dict] = []
         self.router_calls = 0
 
-    async def chat(self, msgs, tools=None, temperature=0.2, json_mode=False):
-        self.calls.append({"json_mode": json_mode, "n_msgs": len(msgs)})
+    async def chat(self, msgs, tools=None, temperature=0.2, json_mode=False, thinking=None):
+        self.calls.append({"json_mode": json_mode, "n_msgs": len(msgs), "thinking": thinking})
         if not json_mode:
             raise LLMError("非路由调用：回答链路应回退确定性模板")
         self.router_calls += 1
@@ -153,6 +155,73 @@ def test_route_with_llm_rejects_malformed_verdicts(content: str):
         CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=fake, regex_intent="catalog_count",
         min_confidence=0.0,
     )) is None
+
+
+def test_route_with_llm_logs_invalid_output_head(caplog):
+    """输出不合法时记 INFO 归因日志（掩码+截断）——生产首轮 21 条无裁决无法归因的补课。
+
+    断言两点：回退行为不变（None）；日志携带原始输出头部供下一轮提示词迭代归因。
+    """
+    fake = _RouterFakeLLM("您好！我判断这条消息应该是咨询购车意向。")
+    with caplog.at_level(logging.INFO, logger="app.agent.router"):
+        decision = asyncio.run(route_with_llm(
+            CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=fake, regex_intent="catalog_count",
+        ))
+    assert decision is None
+    assert any("输出不合法" in r.message and "购车意向" in r.message for r in caplog.records)
+
+
+def test_router_system_prompt_pins_enum_and_boundary_examples():
+    """提示词 v2 纪律：8 个枚举值必须逐字出现（防编辑时漏掉）；分歧集中区的金标
+    few-shot 锚点必须在场。金标改判时本测试与提示词示例需同步更新。"""
+    from app.agent.routing import INTENTS
+
+    for name in INTENTS:
+        assert name in _ROUTER_SYSTEM_PROMPT, f"提示词缺少枚举值 {name}"
+    for anchor in ("款型ID：11、12、13", "汉兰达有几个版本", "车系的销量是多少",
+                   "哪个品牌车型数量最多", "电动车和油车哪个好"):
+        assert anchor in _ROUTER_SYSTEM_PROMPT, f"提示词缺少金标边界示例 {anchor}"
+
+
+# ── 思考档位（DeepSeek Thinking Mode）────────────────────────────────────────
+# 背景（2026-09-18）：deepseek-flash 默认 enabled+effort=high，路由为 8 选 1 分类
+# 却付思考税（HIGH 档 p50=814ms、1 条 1525ms 超时截断）；默认改 disabled，
+# 档位经 AGENT_ROUTER_THINKING 可调（用户问「降低思考强度能否提速」的落地）。
+
+def test_chat_payload_thinking_semantics():
+    """请求体构造三态：None 不发参数（端点默认）；disabled 关思考；low/max 开思考+档位。"""
+    msgs = [{"role": "user", "content": "x"}]
+    p = _chat_payload("m", msgs, None, 0.2, True, None)
+    assert "thinking" not in p and "reasoning_effort" not in p
+    p = _chat_payload("m", msgs, None, 0.2, True, "disabled")
+    assert p["thinking"] == {"type": "disabled"} and "reasoning_effort" not in p
+    p = _chat_payload("m", msgs, None, 0.2, True, "low")
+    assert p["thinking"] == {"type": "enabled"} and p["reasoning_effort"] == "low"
+    p = _chat_payload("m", msgs, None, 0.2, True, "max")
+    assert p["reasoning_effort"] == "max"
+    with pytest.raises(ValueError):
+        _chat_payload("m", msgs, None, 0.2, True, "yolo"), "非法值构建期响亮失败"
+
+
+def test_route_with_llm_sends_thinking_disabled_by_default():
+    fake = _RouterFakeLLM(_verdict("tool_loop", 0.9))
+    asyncio.run(route_with_llm(
+        CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=fake, regex_intent="catalog_count",
+    ))
+    assert fake.calls[0]["thinking"] == "disabled"
+
+
+def test_router_thinking_env(monkeypatch):
+    monkeypatch.setenv("AGENT_ROUTER_THINKING", "low")
+    fake = _RouterFakeLLM(_verdict("tool_loop", 0.9))
+    asyncio.run(route_with_llm(
+        CATALOG_ASK, UserProfile(), timeout_ms=1000, llm=fake, regex_intent="catalog_count",
+    ))
+    assert fake.calls[0]["thinking"] == "low"
+    monkeypatch.setenv("AGENT_ROUTER_THINKING", "yolo")
+    assert get_router_thinking() == "disabled"          # 非法值回退
+    monkeypatch.delenv("AGENT_ROUTER_THINKING", raising=False)
+    assert get_router_thinking() == "disabled"          # 未设置 → 默认关思考
 
 
 def test_router_client_uses_model_env(monkeypatch):
