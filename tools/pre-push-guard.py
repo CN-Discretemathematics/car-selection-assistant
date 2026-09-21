@@ -83,6 +83,12 @@ SCOPE_PATHS: dict[str, list[str]] = {
         "backend/app/common/llm.py",
         "skills/",
     ],
+    # 推荐评分（§15.2 硬约束 + §17.2 软评分）：工具在 app/agent/tools.py，
+    # 评分语义单测独立成文件（2026-09-21 软评分 8 维逐维单测）
+    "recommendation": [
+        "backend/app/agent/tools.py",
+        "backend/tests/test_recommendation",
+    ],
     "search": ["web/app/components/", "web/app/page.tsx", "backend/app/retrieval/"],
     "home": ["web/app/page.tsx", "web/app/components/", "web/app/layout.tsx"],
     "rag": [
