@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -27,8 +28,10 @@ from app.agent.answer_contract import (
     validate_tool_answer,
 )
 from app.agent.llm_router import (
+    ROUTER_MODEL_ENV,
     ROUTER_VERSION,
     arbitrate_route,
+    get_router_client,
     get_router_mode,
     get_router_thinking,
     log_shadow_record,
@@ -629,6 +632,19 @@ class AgentEngine:
         # shadow 旁路任务的强引用集（asyncio 要求持有引用防止任务被 GC；完成即移除）
         self._pending_shadow_tasks: set[asyncio.Task] = set()
 
+    def _routing_llm(self) -> LLMClient:
+        """路由调用（shadow / llm 模式）使用的 LLM 客户端。
+
+        配置了 AGENT_ROUTER_MODEL 时使用路由专用客户端（2026-09-17 用户决策：路由用
+        更快/更便宜的 flash 档）；未配置时与回答链路同一客户端——这也保住既有测试
+        注入点（测试替换 engine._llm 即可驱动路由）。
+        修复背景（v2.2）：此前两个路由调用点硬编码传 self._llm，使 AGENT_ROUTER_MODEL
+        在 shadow/llm 模式下均不生效（生产 shadow 记录 router_model=v4-flash 实证）。
+        """
+        if (os.getenv(ROUTER_MODEL_ENV) or "").strip():
+            return get_router_client()
+        return self._llm
+
     async def _emit(self, session_id: str, text: str, out: AgentMessageOut) -> None:
         """落库 assistant 消息与结构化结果。
 
@@ -673,11 +689,12 @@ class AgentEngine:
         """
         llm_decision = None
         last_error: str | None = None
+        routing_llm = self._routing_llm()
         for attempt in range(len(_SHADOW_RETRY_DELAYS) + 1):
             started = time.perf_counter()
             try:
                 llm_decision = await route_with_llm(
-                    message, profile, llm=self._llm, regex_intent=regex_decision.intent,
+                    message, profile, llm=routing_llm, regex_intent=regex_decision.intent,
                     min_confidence=0.0,
                 )
                 last_error = None
@@ -697,7 +714,8 @@ class AgentEngine:
             arbitrated_intent=arbitrated.intent,
             meta={
                 "router_version": ROUTER_VERSION,
-                "router_model": getattr(self._llm, "model", "?"),
+                # 必须是**实际执行路由的客户端**（v2.2 前误记回答链模型，排障误导）
+                "router_model": getattr(routing_llm, "model", "?"),
                 "router_thinking": get_router_thinking(),
             },
         )
@@ -856,7 +874,7 @@ class AgentEngine:
         # 决策并打 router_fallback 标。路由失败绝不阻断响应。
         if router_mode == "llm":
             llm_decision = await route_with_llm(
-                message, profile, llm=self._llm, regex_intent=decision.intent
+                message, profile, llm=self._routing_llm(), regex_intent=decision.intent
             )
             # 采纳前置（评审三轮 B1/B2 + 2026-09-18 分歧仲裁）：先由 arbitrate_route
             # 按证据定策——regex 具体规则命中时不越权（金标 97.2%），regex 兜底时允许
