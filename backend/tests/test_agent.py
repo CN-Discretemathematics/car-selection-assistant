@@ -312,3 +312,81 @@ def test_merge_profile_accumulates_weights():
     profile = merge_profile(UserProfile(), extract_hints("空间优先"))
     profile = merge_profile(profile, extract_hints("更看重续航"))
     assert profile.weights == {"space": 0.2, "energy": 0.2}
+
+
+def test_passenger_options_family_aware():
+    """2026-09 用户反馈：家庭出行默认多人乘坐，人数建议选项不得含「1~2人」。"""
+    from app.agent.engine import _budget_options, _passenger_options
+    from app.agent.schemas import UserProfile
+
+    assert _passenger_options(UserProfile()) == ["1~2人", "3~5人", "5人以上"]
+    family = UserProfile()
+    family.usage = ["家庭"]
+    assert _passenger_options(family) == ["3~5人", "5人以上"]
+    # 空画像的预算追问不带「不限预算」出口（评审 S1：空画像不得全市场硬推）
+    assert _budget_options(UserProfile()) == ["10万以内", "10~20万", "20~30万", "30万以上"]
+    commuter = UserProfile()
+    commuter.usage = ["通勤"]
+    assert "不限预算，先看推荐" in _budget_options(commuter)
+
+
+def test_family_usage_hides_solo_passenger_option(client: TestClient, db_session: Session):
+    """家庭出行 → 人数追问的选项不再出现「1~2人」（2026-09 用户反馈）。"""
+    _seed_agent_data(db_session)
+    session_id = _create_session(client)
+    assert _send(client, session_id, "我想买台车")["need_clarification"] is True
+    assert _send(client, session_id, "10万以内")["need_clarification"] is True  # 追问用途
+    out = _send(client, session_id, "家庭出行")
+    assert out["need_clarification"] is True
+    assert "几个人乘坐" in out["clarification"]["question"]
+    assert "1~2人" not in out["clarification"]["options"]
+    assert out["clarification"]["options"] == ["3~5人", "5人以上"]
+
+
+def test_scenario_sentence_budget_ask_offers_waiver(client: TestClient, db_session: Session):
+    """场景句「推荐一款适合短途自驾游的车」：预算追问带「不限预算」出口，
+    选择后不再追问（含人数），直接按场景给出带来源的推荐（2026-09 用户反馈）。"""
+    _seed_agent_data(db_session)
+    session_id = _create_session(client)
+    first = _send(client, session_id, "推荐一款适合短途自驾游的车")
+    assert first["need_clarification"] is True
+    assert "预算" in first["clarification"]["question"]
+    assert "不限预算，先看推荐" in first["clarification"]["options"]
+
+    out = _send(client, session_id, "不限预算，先看推荐")
+    assert out["need_clarification"] is False
+    assert out["recommended_variants"], "选择不限预算后应直接给出场景推荐"
+    assert out["citations"], "推荐必须带来源"
+    assert any("未限定预算" in r for r in out["reasons"]), "口径变化必须对用户可见"
+
+
+def test_budget_waiver_in_first_sentence_skips_asking(client: TestClient, db_session: Session):
+    """「预算不限，推荐一款适合短途自驾游的车」：首句已放弃预算 → 不追问直接推荐。"""
+    _seed_agent_data(db_session)
+    session_id = _create_session(client)
+    out = _send(client, session_id, "预算不限，推荐一款适合短途自驾游的车")
+    assert out["need_clarification"] is False
+    assert out["recommended_variants"], "首句声明不限预算应直接推荐"
+    assert any("未限定预算" in r for r in out["reasons"])
+
+
+def test_targeted_budget_guidance_offers_waiver(client: TestClient, db_session: Session):
+    """targeted 文本引导路径同样提供「不限预算」出口（与 chips 路径口径一致）。"""
+    _seed_agent_data(db_session)
+    session_id = _create_session(client)
+    assert _send(client, session_id, "我想买台车")["need_clarification"] is True
+    out = _send(client, session_id, "家庭出行")  # 本轮给了用途、还差预算 → targeted 文本
+    text = out["explanation"] or ""
+    assert "用途：家庭" in text
+    assert "不限预算，先看推荐" in text
+
+
+def test_budget_unanswered_still_guides_gently(client: TestClient, db_session: Session):
+    """回归钉住：「还没想好预算」是信息缺失不是不限预算，仍走温和引导而非硬推。"""
+    _seed_agent_data(db_session)
+    session_id = _create_session(client)
+    assert _send(client, session_id, "我想买台车")["need_clarification"] is True
+    out = _send(client, session_id, "我还没想好预算呢")
+    assert out["need_clarification"] is False
+    assert out["recommended_variants"] == []
+    assert out["explanation"], "应给出温和引导而不是推荐列表"
