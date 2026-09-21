@@ -38,6 +38,24 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             购车助手内容由 AI 生成，仅供参考
           </p>
           <p className="mt-2 px-4 text-ash/80">本站不提供站内交易入口；价格与配置以品牌官网为准。</p>
+          <p className="mt-2 px-4">
+            <span className="text-ash/80">联系我们：</span>
+            <a
+              href="mailto:ryanpan0311@163.com"
+              className="text-ash underline-offset-4 transition hover:text-apple hover:underline"
+            >
+              ryanpan0311@163.com
+            </a>
+            <span className="mx-2 text-hair">|</span>
+            <a
+              href="https://github.com/CN-Discretemathematics/car-selection-assistant"
+              target="_blank"
+              rel="noreferrer"
+              className="text-ash underline-offset-4 transition hover:text-apple hover:underline"
+            >
+              GitHub 开源仓库
+            </a>
+          </p>
           {/* 备案号：备案通过后由环境变量注入；按规范须链接到工信部备案系统 */}
           {process.env.ICP_NUMBER && (
             <p className="mt-2">
