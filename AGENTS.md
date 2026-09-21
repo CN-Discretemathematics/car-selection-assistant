@@ -44,6 +44,15 @@
   机械计数交给 `doc_sync_check.py --fix`；两道都过再 commit
 - 端到端判据先定义再动手（真后端 + 真 DOM 断言），参考 `skills/` 同类脚本。
 
+## Instincts（0.9 级教训，每次会话生效；完整库见 docs-local/instincts.md）
+
+1. **测试环境必须能复现生产路径**：种子/夹具缺生产实体时，断言的是与生产不同的
+   代码路径，生产 bug 被测试掩蔽（金标 row36 教训）——补种子时要问「生产库里有没有它」。
+2. **改 async 任务/协程签名必须全仓搜调用点**：旁路任务（create_task）异常不传播，
+   调用点不匹配 = 静默死亡、日志零痕迹（_shadow_route 教训）——E2E 测试是唯一信号。
+3. **测试必须对环境免疫**：conftest 显式固定/清除环境变量，不要求本机 .env 保持
+   特定内容（retrieval/config.py 的 load_dotenv 会把 .env 灌进 os.environ）。
+
 ## 其他
 
 - Windows/PowerShell 命令卫生、分支同步、冲突解决、密钥处理：见 `skills/git-branch-sync.md`
