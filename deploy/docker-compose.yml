@@ -75,6 +75,9 @@ services:
     environment:
       # 服务端渲染调用后端（容器内直连 api 服务）
       BACKEND_URL: http://api:8000
+      # 备案号悬挂（法规要求：页脚展示并链接工信部备案系统）；值由运营者在
+      # deploy/.env 配置（ICP_NUMBER=浙ICP备XXXX号-1），缺省为空=页脚不显示
+      ICP_NUMBER: ${ICP_NUMBER:-}
     ports:
       - "127.0.0.1:3000:3000"
     logging:
