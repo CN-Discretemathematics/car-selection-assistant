@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -27,8 +28,10 @@ from app.agent.answer_contract import (
     validate_tool_answer,
 )
 from app.agent.llm_router import (
+    ROUTER_MODEL_ENV,
     ROUTER_VERSION,
     arbitrate_route,
+    get_router_client,
     get_router_mode,
     get_router_thinking,
     log_shadow_record,
@@ -114,8 +117,14 @@ _UNLOCK_RE = re.compile(
     r"(看看其他|看看别的|其他车|别的车|其他选择|别的选择|还有什么选择|更多选择|"
     r"换个|换一换|换别的|不要只看|不只看|都看看|别的车型|其他车型)"
 )
-# 用户授权「宽松推荐」的口语表达（「没想好/不知道」表示信息缺失，不算授权）
-_GIVE_UP_RE = re.compile(r"(随便|无所谓|都可以|你看着办|你推荐|听你的|你来定|相信你)")
+# 用户授权「宽松推荐」的口语表达（「没想好/不知道」表示信息缺失，不算授权）。
+# 2026-09 用户反馈补充：「先看推荐/直接推荐/先推荐」= 明确要求跳过剩余追问、
+# 按已有画像直接出推荐（与「随便」同一语义档；仍受 profile_has_core_constraints 门控）。
+_GIVE_UP_RE = re.compile(r"(随便|无所谓|都可以|你看着办|你推荐|听你的|你来定|相信你|先看推荐|直接推荐|先推荐)")
+# 明确「不限预算」的表达（2026-09 用户反馈：场景句「推荐一款适合短途自驾游的车」
+# 被反复追问预算，需要一个放掉预算硬门槛的出口）。注意「还没想好预算/没定预算」
+# 是信息缺失不是放弃，绝不入列——那类表述仍走温和引导。
+_BUDGET_WAIVER_RE = re.compile(r"(不限预算|预算不限|不用管预算|预算没上限|没有预算上限)")
 
 
 def gives_up_on_profile(message: str) -> bool:
@@ -517,6 +526,30 @@ _MISSING_ASK: dict[str, tuple[str, list[str]]] = {
 }
 
 
+def _budget_options(profile: UserProfile) -> list[str]:
+    """预算追问的示例选项（随画像收敛，2026-09 用户反馈）。
+
+    已有场景画像（用途/人数/车身）时追加「不限预算，先看推荐」出口：用户可能
+    只想要场景匹配的推荐而不想报价格档。空画像（首次「我想买车」）不提供——
+    无任何约束的「不限预算」等于全市场硬推（评审 S1 禁止的空画像硬推）。
+    """
+    options = ["10万以内", "10~20万", "20~30万", "30万以上"]
+    if profile.usage or profile.passengers is not None or profile.body_type:
+        options.append("不限预算，先看推荐")
+    return options
+
+
+def _passenger_options(profile: UserProfile) -> list[str]:
+    """人数追问的示例选项（随画像收敛，2026-09 用户反馈）。
+
+    家庭出行默认多人乘坐（≥3 人）：用途含「家庭」时不再把「1~2人」列为建议
+    选项，避免出现与用途自相矛盾的引导；用户自由输入「1~2人」仍按显式口径生效。
+    """
+    if any("家庭" in u for u in (profile.usage or [])):
+        return ["3~5人", "5人以上"]
+    return ["1~2人", "3~5人", "5人以上"]
+
+
 def _profile_summary(profile: UserProfile) -> str:
     """已收集画像的一句话复述（用于「已记住：…」引导）。"""
     parts: list[str] = []
@@ -574,7 +607,7 @@ def next_clarification(profile: UserProfile) -> Clarification | None:
     if profile.budget.min is None and profile.budget.max is None:
         return Clarification(
             question="为了帮你挑到合适的车，先问一下：购车预算大概是多少？",
-            options=["10万以内", "10~20万", "20~30万", "30万以上"],
+            options=_budget_options(profile),
             missing=["budget"],
         )
     if not profile.usage:
@@ -586,7 +619,7 @@ def next_clarification(profile: UserProfile) -> Clarification | None:
     if profile.passengers is None:
         return Clarification(
             question="平时一般几个人乘坐？",
-            options=["1~2人", "3~5人", "5人以上"],
+            options=_passenger_options(profile),
             missing=["passengers"],
         )
     return None
@@ -598,6 +631,19 @@ class AgentEngine:
         self._store = store or get_session_store()
         # shadow 旁路任务的强引用集（asyncio 要求持有引用防止任务被 GC；完成即移除）
         self._pending_shadow_tasks: set[asyncio.Task] = set()
+
+    def _routing_llm(self) -> LLMClient:
+        """路由调用（shadow / llm 模式）使用的 LLM 客户端。
+
+        配置了 AGENT_ROUTER_MODEL 时使用路由专用客户端（2026-09-17 用户决策：路由用
+        更快/更便宜的 flash 档）；未配置时与回答链路同一客户端——这也保住既有测试
+        注入点（测试替换 engine._llm 即可驱动路由）。
+        修复背景（v2.2）：此前两个路由调用点硬编码传 self._llm，使 AGENT_ROUTER_MODEL
+        在 shadow/llm 模式下均不生效（生产 shadow 记录 router_model=v4-flash 实证）。
+        """
+        if (os.getenv(ROUTER_MODEL_ENV) or "").strip():
+            return get_router_client()
+        return self._llm
 
     async def _emit(self, session_id: str, text: str, out: AgentMessageOut) -> None:
         """落库 assistant 消息与结构化结果。
@@ -643,11 +689,12 @@ class AgentEngine:
         """
         llm_decision = None
         last_error: str | None = None
+        routing_llm = self._routing_llm()
         for attempt in range(len(_SHADOW_RETRY_DELAYS) + 1):
             started = time.perf_counter()
             try:
                 llm_decision = await route_with_llm(
-                    message, profile, llm=self._llm, regex_intent=regex_decision.intent,
+                    message, profile, llm=routing_llm, regex_intent=regex_decision.intent,
                     min_confidence=0.0,
                 )
                 last_error = None
@@ -667,7 +714,8 @@ class AgentEngine:
             arbitrated_intent=arbitrated.intent,
             meta={
                 "router_version": ROUTER_VERSION,
-                "router_model": getattr(self._llm, "model", "?"),
+                # 必须是**实际执行路由的客户端**（v2.2 前误记回答链模型，排障误导）
+                "router_model": getattr(routing_llm, "model", "?"),
                 "router_thinking": get_router_thinking(),
             },
         )
@@ -826,7 +874,7 @@ class AgentEngine:
         # 决策并打 router_fallback 标。路由失败绝不阻断响应。
         if router_mode == "llm":
             llm_decision = await route_with_llm(
-                message, profile, llm=self._llm, regex_intent=decision.intent
+                message, profile, llm=self._routing_llm(), regex_intent=decision.intent
             )
             # 采纳前置（评审三轮 B1/B2 + 2026-09-18 分歧仲裁）：先由 arbitrate_route
             # 按证据定策——regex 具体规则命中时不越权（金标 97.2%），regex 兜底时允许
@@ -888,7 +936,18 @@ class AgentEngine:
         clarification = next_clarification(profile)
         if clarification is not None:
             missing = clarification.missing[0]
-            if missing in profile.unknowns:
+            # 本轮已明确「不限预算」（且有场景画像：用途/人数/车身）→ 不再追问预算，
+            # 直接按已有画像推荐（2026-09 用户反馈：场景句被反复追问预算）。
+            # 与下方「随便/你推荐」的宽松授权分开：这里只针对预算项、且放在首次追问
+            # 之前——否则「预算不限，推荐一款适合短途自驾游的车」仍会先被问一遍预算。
+            # 「还没想好预算」不匹配 _BUDGET_WAIVER_RE，仍走原有追问/温和引导。
+            if (
+                missing == "budget"
+                and _BUDGET_WAIVER_RE.search(message)
+                and (profile.usage or profile.passengers is not None or profile.body_type)
+            ):
+                clarification = None
+            elif missing in profile.unknowns:
                 # 「授权宽松推荐」必须已有核心画像（预算/用途/人数/车身）；
                 # 仅能源偏好或 avoid 不足以授权，避免空画像硬推（评审 S1）
                 if gives_up_on_profile(message) and profile_has_core_constraints(profile):
@@ -1547,6 +1606,12 @@ class AgentEngine:
         question, options = _MISSING_ASK.get(
             missing, ("还差一些购车信息，请补充一下。", [])
         )
+        # 选项随画像收敛（2026-09 用户反馈）：家庭出行不建议 1~2 人；
+        # 已有场景画像时预算项提供「不限预算」出口
+        if missing == "passengers":
+            options = _passenger_options(profile)
+        elif missing == "budget":
+            options = _budget_options(profile)
         collected = _profile_summary(profile)
         if collected:
             text = f"已记住：{collected}。还差一项：{question}\n（回复其一即可：{' / '.join(options)}）"
@@ -1798,6 +1863,9 @@ class AgentEngine:
         reasons: list[str] = []
         if profile.budget.max is not None:
             reasons.append(f"预算不超过 {profile.budget.max / 10000:g} 万元")
+        elif profile.budget.min is None:
+            # 「不限预算/宽松推荐」路径：口径变化必须对用户可见（与解锁说明同一原则）
+            reasons.append("未限定预算：按场景匹配度排序（补充预算可让筛选更精准）")
         if profile.energy_preference:
             reasons.append(f"能源偏好：{'/'.join(profile.energy_preference)}")
         if profile.body_type:

@@ -311,6 +311,23 @@ def test_shadow_route_retries_then_records(monkeypatch, caplog):
     assert records[-1]["router_model"] and records[-1]["router_thinking"]
 
 
+def test_routing_llm_client_selection(monkeypatch):
+    """v2.2：AGENT_ROUTER_MODEL 配置时路由走专用客户端（此前被 self._llm 硬编码旁路）；
+    未配置时保持回答链路客户端（既有的测试注入点不变）。"""
+    engine = get_agent_engine()
+    monkeypatch.delenv("AGENT_ROUTER_MODEL", raising=False)
+    assert engine._routing_llm() is engine._llm, "未配置时用回答链客户端（测试注入点）"
+    monkeypatch.setenv("AGENT_ROUTER_MODEL", "deepseek-flash")
+    reset_router_client()
+    try:
+        dedicated = engine._routing_llm()
+        assert dedicated is _router_client()
+        assert dedicated.model == "deepseek-flash"
+        assert dedicated is not engine._llm
+    finally:
+        reset_router_client()  # 不让测试环境变量泄漏进其他测试的客户端单例
+
+
 def test_shadow_route_retry_exhausted_still_records(monkeypatch, caplog):
     """重试耗尽后仍按 None 落记录（无裁决不丢样本）；旁路尽力而为，绝不影响响应路径。"""
     monkeypatch.setattr("app.agent.engine._SHADOW_RETRY_DELAYS", (0, 0))

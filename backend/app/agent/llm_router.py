@@ -72,7 +72,11 @@ SHADOW_LOGGER = "app.agent.router.shadow"
 
 # 路由版本标记：随 shadow 记录落盘（router_version 字段）。改提示词/仲裁策略/思考档位
 # 默认值时必须递增——跨版本对拍数据靠它切分（此前靠容器重建时间手工切分，脆弱易错）。
-ROUTER_VERSION = "router-v2.1"
+# v2.2（2026-09-21）：修复引擎路由调用硬编码传回答链客户端导致 AGENT_ROUTER_MODEL
+# 形同虚设的旁路缺陷——路由专用客户端自此真正生效；shadow meta 的 router_model
+# 同步修正为**实际执行路由的客户端**模型（此前记录的是回答链模型，排障误导）。
+# 跨版本对拍数据（路由模型 v4-flash → AGENT_ROUTER_MODEL 指定档）按本标记切分。
+ROUTER_VERSION = "router-v2.2"
 
 ROUTER_MODE_ENV = "AGENT_ROUTER_MODE"
 ROUTER_TIMEOUT_ENV = "AGENT_ROUTER_TIMEOUT_MS"
@@ -101,6 +105,15 @@ def _router_client() -> LLMClient:
         model = (os.getenv(ROUTER_MODEL_ENV) or "").strip()
         _router_llm = LLMClient(model=model) if model else LLMClient()
     return _router_llm
+
+
+def get_router_client() -> LLMClient:
+    """路由专用客户端（按 AGENT_ROUTER_MODEL 惰性构建；未设置 → 与回答链路同一客户端）。
+
+    引擎的路由调用（shadow / llm 模式）经由此客户端发请求——AGENT_ROUTER_MODEL
+    自此真正生效（v2.2 前，引擎硬编码传回答链客户端把它旁路了）。
+    """
+    return _router_client()
 
 
 def reset_router_client() -> None:
