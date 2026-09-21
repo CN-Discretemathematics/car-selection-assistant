@@ -102,6 +102,12 @@ _CATALOG_COUNT_RE = re.compile(
 # 排名/对比/解释语境问的不是「有多少」：拿总数回答排名问题等于答非所问（2026-09-17 评审建议 1）
 _CATALOG_COUNT_EXCLUDE_RE = re.compile(r"(最多|最少|排行|排名|对比|区别|解释|为什么|怎么算|是什么意思)")
 
+# 「对比」动词（深度对比诉求）：「对比一下X和Y」无款型 ID 时归工具循环，不进车系问答
+# （2026-09-18 生产 shadow 对拍：双车系解析成功时误入 series_qa，与金标 row36/41 相悖——
+# 金标测试种子目录此前缺秦PLUS/海豹06，把这条生产路径掩蔽了）。金标 row27「相比有什么
+# 优点」不带「对比」动词，仍是车系问答。
+_CONTRAST_ASK_RE = re.compile(r"对比")
+
 # 对比页「帮我分析差异」会带上具体款型 ID（前端拼接），Agent 据此做确定性差异分析。
 # 两种写法都认：「（款型ID：11、12、13）」与「variant_ids=11,12,13」。
 _COMPARE_IDS_RE = re.compile(r"(?:款型\s*ID|variant_ids)\s*[:：=]\s*([0-9、,，\s]+)", re.IGNORECASE)
@@ -273,11 +279,14 @@ def decide_route(
 
     # 车系档案问答（原内联：if resolved and should_answer(resolved, message)）
     if resolved and should_answer(resolved, message):
-        return RouteDecision(
-            intent="series_qa",
-            matched_rule="series_qa:resolved+should_answer",
-            signals={"resolved_count": len(resolved), "should_answer": True},
-        )
+        # 0.65) 对比措辞守卫：「对比」动词 + ≥2 个解析车系 → 落 0.75 工具循环（见
+        # _CONTRAST_ASK_RE 注），不进车系问答。
+        if not (_CONTRAST_ASK_RE.search(message) and len(resolved) >= 2):
+            return RouteDecision(
+                intent="series_qa",
+                matched_rule="series_qa:resolved+should_answer",
+                signals={"resolved_count": len(resolved), "should_answer": True},
+            )
 
     # 0.7) 品牌盘点（「奔驰都有哪些车型」「没有燃油的吗」「奔驰有多少款车」）→ 读库完整盘点。
     #      必须在「无购车意图 → 普通对话」gate 之前：这类问句不一定是购车意图措辞，
