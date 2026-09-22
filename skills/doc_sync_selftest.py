@@ -100,6 +100,22 @@ def main() -> int:
         check(rc == 0 and "悬空路径引用" not in out,
               f"「计划/待建」标记的前瞻引用不判悬空（rc={rc}）")
         probe.unlink()
+
+        # 2026-09 备案上线事故回归：过期表述黑名单（规则 8）
+        probe = SANDBOX / "skills" / "_selftest_stale_probe.md"
+        probe.write_text("- 备案通过前对外只能用 IP 访问（过渡期口径）\n", encoding="utf-8")
+        rc, out = run_checker(SANDBOX)
+        check(rc == 1 and "过期表述" in out, "备案过渡期表述命中过期表述黑名单")
+        probe.unlink()
+
+        # 跨源对账（规则 9）：HEAD 检出含 deploy/nginx-https.conf（listen 443 ssl），
+        # 文档仍写「HTTPS 待备案完成后配置」必须 FAIL——两个仓库内真相源不许矛盾
+        probe = SANDBOX / "skills" / "_selftest_tlspending_probe.md"
+        probe.write_text("- 已知待办：HTTPS/HSTS（备案完成后配置）\n", encoding="utf-8")
+        rc, out = run_checker(SANDBOX)
+        check(rc == 1 and "跨源对账" in out,
+              "nginx 实态已含 listen 443 ssl 时，文档 HTTPS 待办口径判 FAIL")
+        probe.unlink()
     finally:
         subprocess.run(["git", "-C", str(ROOT), "worktree", "remove", "--force", str(SANDBOX)],
                        capture_output=True, text=True)

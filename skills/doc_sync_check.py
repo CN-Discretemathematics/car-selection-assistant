@@ -16,6 +16,9 @@
   6. 环境变量：文档表格里的 VAR 是否在代码/示例配置中真实可读
   7. 编码卫生：全部项目 .md 必须是合法 UTF-8 无 BOM（拦截 PowerShell 重定向写出的 UTF-16）
   8. 已知过期表述（stale patterns）：出现即 FAIL
+  9. 跨源对账：`deploy/*.conf` 已含 `listen 443 ssl`（TLS 已配置）时，文档不得再称
+     HTTPS/443「待办/待配置/备案完成后」——2026-09 备案上线事故：nginx 实态进仓（PR #41）
+     而 README 待办节未同步，两个仓库内真相源矛盾却无规则对读
 """
 from __future__ import annotations
 
@@ -44,6 +47,10 @@ STALE_PATTERNS = [
     "路权重按 query_type",    # 同上（RAG_TECH_SELECTION 旧文）
     "deploy/systemd",         # 非容器方案已废弃，deploy/ 下无该目录
     "deploy.sh 自动安装",     # systemd 装载路径已不存在
+    # 2026-09 备案上线事故残留口径（ICP 已通过、域名+HTTPS 已上线后 README 仍保留过渡期表述）：
+    # 收录当时实际命中的两句原文防复发；同类的「待办 vs nginx 实态」矛盾由规则 9 跨源对账兜住
+    "备案通过前对外只能用 IP 访问",
+    "HTTPS/HSTS（备案完成后配置）",
 ]
 
 # 行内出现这些词 = 有意的历史/删除记录，跳过该行的悬空引用与过期表述检查；
@@ -428,7 +435,46 @@ def check_stale_patterns(docs: list[tuple[Path, list[str]]]) -> None:
                     fail(f"过期表述 {path.relative_to(ROOT)}:{i} 含「{pat}」")
 
 
-# ── 9. --fix：确定性计数自愈（可选，默认只读）────────────────────────────────
+# ── 9. 跨源对账：nginx TLS 实态 vs 文档「HTTPS 待办」类声明 ──────────────────
+# 真值仍是 git 索引（deploy/*.conf 是仓库文件，本地跑 == CI 跑），不引入仓库外依赖。
+# 只做单向判定：conf 已含 TLS 而文档仍称待办 → FAIL；反向（conf 无 TLS 而文档称已上线）
+# 暂不判——「已上线」类措辞变体多，宽匹配误报代价高，交由人工/文档评审兜底。
+_DOC_TLS_PENDING = [
+    re.compile(r"HTTPS[^\n]{0,24}(待办|待配置|未配置|备案完成后)"),
+    re.compile(r"备案通过后再上[^\n]{0,16}(HTTPS|HSTS|443)"),
+    re.compile(r"(待办|待配置)[^\n]{0,40}(HTTPS|HSTS)"),
+]
+
+
+def nginx_tls_ready() -> bool:
+    """deploy/*.conf 任一文件含 `listen 443 ssl` 即视为 TLS 已配置（仓库内实态）。"""
+    for conf in sorted(ROOT.glob("deploy/*.conf")):
+        try:
+            if "listen 443 ssl" in conf.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def check_nginx_tls_vs_docs(docs: list[tuple[Path, list[str]]]) -> None:
+    if not nginx_tls_ready():
+        return
+    for path, lines in docs:
+        if path in HISTORICAL_FILES:
+            continue
+        for i, line in enumerate(lines, 1):
+            if any(w in line for w in ALLOW_WORDS):
+                continue
+            if any(pat.search(line) for pat in _DOC_TLS_PENDING):
+                fail(
+                    f"跨源对账 {path.relative_to(ROOT)}:{i} 文档称 HTTPS/443 待办，"
+                    "而 deploy/*.conf 已含 listen 443 ssl（线上实态）——口径需随实态滚动"
+                )
+                break  # 每文件报首处即可，避免同一句式刷屏
+
+
+# ── 10. --fix：确定性计数自愈（可选，默认只读）────────────────────────────────
 # 只改写「能从仓库事实直接算出来」的计数：用例数（实测 pytest 收集数）、迁移数（文件数）、
 # LLM 工具 schema 数（tools.py 里的 name 去重数）。判读类的 FAIL（悬空引用、过期表述、
 # 环境变量存疑、README 结构）不自动改——猜错会把门禁变成「改文档骗过检查」。
@@ -494,6 +540,7 @@ def main(argv: list[str] | None = None) -> int:
     env_source = env_sources_text()
     check_env_vars(docs, env_source, env_source.lower())
     check_stale_patterns(docs)
+    check_nginx_tls_vs_docs(docs)
 
     print(f"doc-sync 检查报告（pytest 实测：{count if count is not None else '跳过'}）")
     for w in warns:
