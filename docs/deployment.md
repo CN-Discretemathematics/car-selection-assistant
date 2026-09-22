@@ -11,7 +11,7 @@
 | 主机 | 阿里云轻量应用服务器（2C2G，Alinux 3），公网 `121.41.4.12` |
 | 目录 | `/srv/carsel`（**文件同步式**，服务器上**没有 git**） |
 | 运行 | Docker Compose 三服务：`deploy-api` / `deploy-web` / `deploy-redis`，端口只绑 `127.0.0.1` |
-| 入口 | 宿主 nginx（`:80`）→ `/` 与 `/api` 反代到容器；备案通过后再上 443/HSTS |
+| 入口 | 宿主 nginx（`:80` + `:443`）→ `/` 与 `/api` 反代到容器；HTTPS 已上线（ACME 证书，HTTP 301 → HTTPS，2026-09，实态见 `deploy/nginx-https.conf`） |
 | 配置 | `/srv/carsel/backend/.env`（600，**不入库、不被部署覆盖**） |
 
 > README 早期写的 `git clone <repo> /srv/carsel` 与实际不符：服务器上不装 git，

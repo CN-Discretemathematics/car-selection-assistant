@@ -284,8 +284,10 @@ nginx -t && systemctl reload nginx
 - **数据库**：容器化部署与 RDS 不同 VPC 时须使用**外网 endpoint**，并把出口 IP 加入白名单
 - **定时任务**：看门狗（每 5 分钟自愈）+ 夜间 02:30 销量导入 → 条件触发稠密重建
   + 早上 05:00 自动部署 `main`
-- **备案**：中国内地节点须完成 ICP 备案；页脚备案号由环境变量 `ICP_NUMBER` 注入并链接工信部；
-  备案通过前对外只能用 IP 访问（`http://121.41.4.12`），域名在大陆节点对外服务属违规
+- **备案**：中国内地节点须完成 ICP 备案；页脚备案号由环境变量 `ICP_NUMBER` 注入并链接工信部。
+  **ICP 备案已于 2026-09 通过**，当前以域名 + HTTPS 对外服务（`https://hp-car-selection-assistant.cn`，
+  HTTP 301 → HTTPS，nginx 实态见 `deploy/nginx-https.conf`）；此前备案审查期间曾以 IP 过渡访问
+  （`http://121.41.4.12`），域名在大陆节点对外服务须以完成备案为前提
 
 ## 安全实践
 
@@ -320,7 +322,8 @@ nginx -t && systemctl reload nginx
 - 数据库访问全部参数化（无字符串拼接 SQL）；图片代理为域名白名单（拒绝内网/元数据地址）
 - 会话 ID 为 122 位随机值；CORS 非通配
 
-> 已知待办：HTTPS/HSTS（备案完成后配置）、容器非 root 运行、RAG 数据面的并发与优雅降级加固。
+> 已知待办：容器非 root 运行、RAG 数据面的并发与优雅降级加固。
+> HTTPS 已上线（ACME 证书，HTTP 301 → HTTPS），HSTS 头可后续开启。
 
 ## 设计原则
 

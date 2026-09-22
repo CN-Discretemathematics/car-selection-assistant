@@ -18,7 +18,7 @@
 | RDS 备份/恢复（含按时间点） | ✅ RDS 控制台 | 恢复后需 SSH 改 `.env` 验证 |
 | OSS 生命周期、存储类型、监控 | ✅ OSS 控制台 | — |
 | RAM 用户 / AccessKey / 授权 | ✅ RAM 控制台 | 换 OSS 凭据后需 SSH 同步 `.env` + 重建容器 |
-| 域名解析、实名、**ICP 备案**、证书 | ✅ 域名/备案控制台 | 备案通过后需 SSH 改 nginx `server_name` + 443 |
+| 域名解析、实名、**ICP 备案**、证书 | ✅ 域名/备案控制台 | 已完成（2026-09）：nginx `server_name` + 443 已上线 |
 | 费用账单、预算告警、云监控告警 | ✅ 费用中心 / 云监控 | — |
 | **代码部署、容器、镜像、日志** | ❌ | ✅ |
 | **nginx 配置、.env 凭据、索引重建、夜间任务** | ❌ | ✅ |
@@ -34,7 +34,7 @@
 | OSS | bucket `car-selection` | 杭州，**ColdArchive**，无生命周期规则，对象仅数月度榜单 HTML（各 ~330KB） | 抓取快照归档（应用只写不读） | 对象存储 OSS |
 | RAM 用户 | `cloud_ali` | 只读策略（ReadOnlyAccess 等） | 运维巡检 CLI（**不能改资源**） | 访问控制 RAM |
 | RAM 用户 | `car-oss-worker` | 自定义单桶策略 `carselection-oss-bucket`，1 把 AK | 生产 OSS 上传凭据（最小权限） | 访问控制 RAM |
-| 域名 | `hp-car-selection-assistant.cn` | 万网注册，NS `dns23/24.hichina.com`，无 A 记录，备案进行中 | 对外域名 | 域名 / 备案控制台 |
+| 域名 | `hp-car-selection-assistant.cn` | 万网注册，NS `dns23/24.hichina.com`；**ICP 已备案（2026-09）**，域名解析与 443 已上线 | 对外域名 | 域名 / 备案控制台 |
 | Zilliz Cloud | collection `car_docs` | Serverless，12418 切片 | 稠密向量检索（**非阿里云**） | Zilliz Cloud 控制台 |
 | DeepSeek / 模型服务 | — | API Key | LLM 与 embedding/rerank（**非阿里云**） | 各自平台控制台 |
 | 邮箱 SMTP | smtp.163.com | 授权码 | 验证码邮件（**非阿里云**） | 163 邮箱 |
