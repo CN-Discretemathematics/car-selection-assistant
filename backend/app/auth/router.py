@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy import select
@@ -23,7 +24,7 @@ from app.auth.schemas import AuthOut, FavoriteOut, RegisterIn, UserOut, VerifyIn
 from app.auth.security import get_code_store, get_rate_limiter, get_token_store
 from app.catalog import services as catalog
 from app.common.config import get_settings
-from app.common.database import get_session
+from app.common.database import get_session, normalize_database_url
 from app.common.errors import bad_request, not_found
 from app.common.models import Brand, Favorite, User, VehicleSeries, VehicleVariant
 
@@ -43,6 +44,27 @@ def _send_code(email: str, code: str) -> None:
     from app.common.email_sender import EmailSender
 
     EmailSender().send_code(email, code)
+
+
+def _echo_dev_code(code: str) -> str | None:
+    """开发模式回显验证码；生产环境即便误留开关也不回显（二次门）。
+
+    背景：config.py 的注释已记录同类事故——生产 .env 曾误留 auto_create_tables=true。
+    验证码一旦在生产响应里回显，等于任意邮箱账号可被接管，因此不依赖单一开关，
+    另加两道判定：
+      1. 显式 APP_ENV=prod/production；
+      2. database_url 指向 PostgreSQL（项目约定开发/测试用 SQLite、生产用云 PG，
+         见 common/database.py 模块 docstring）。
+    两道都是"宁可不回显"的方向，误判只影响开发调试便利，不影响安全。
+    """
+    settings = get_settings()
+    if not settings.dev_echo_codes:
+        return None
+    if os.environ.get("APP_ENV", "").strip().lower() in {"prod", "production"}:
+        return None
+    if normalize_database_url(settings.database_url).startswith("postgresql"):
+        return None
+    return code
 
 
 @router.post("/auth/register", response_model=AuthOut)
@@ -86,7 +108,6 @@ def _issue_code(db: Session, email: str, is_registration: bool) -> AuthOut:
             status_code=502,
             detail="验证码邮件发送失败，请稍后重试或重新获取。",
         )
-    settings = get_settings()
     return AuthOut(
         token="",
         user=UserOut(
@@ -96,7 +117,7 @@ def _issue_code(db: Session, email: str, is_registration: bool) -> AuthOut:
             status=user.status,
             created_at=user.created_at,
         ),
-        dev_code=code if settings.dev_echo_codes else None,
+        dev_code=_echo_dev_code(code),
     )
 
 
