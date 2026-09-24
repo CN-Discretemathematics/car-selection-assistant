@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { trackFilterClear } from "@/lib/agentTriggers";
+import { wanToYuan, yuanToWan } from "@/lib/api";
 import {
   BODY_OPTIONS_WITH_PICKUP,
   BRAND_OPTIONS,
@@ -16,14 +17,13 @@ import SearchBar from "./SearchBar";
 export default function BrowseFilters() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const wanFromYuan = (v: string | null) =>
-    v && !Number.isNaN(Number(v)) ? String(Number(v) / 10000).replace(/\.?0+$/, "") : "";
+  // 换算口径统一收敛在 lib/api.ts（两处筛选表单曾各复制一份，修一处漏一处）
   const [form, setForm] = useState({
     energy_type: searchParams.get("energy_type") ?? "",
     body_type: searchParams.get("body_type") ?? "",
     brand_type: searchParams.get("brand_type") ?? "",
-    price_min: wanFromYuan(searchParams.get("price_min")),
-    price_max: wanFromYuan(searchParams.get("price_max")),
+    price_min: yuanToWan(searchParams.get("price_min")),
+    price_max: yuanToWan(searchParams.get("price_max")),
     sort: searchParams.get("sort") ?? "sales_desc",
   });
 
@@ -35,9 +35,10 @@ export default function BrowseFilters() {
     if (keyword) qs.set("q", keyword);
     for (const [k, v] of Object.entries(next)) {
       if (!v) continue;
-      if ((k === "price_min" || k === "price_max") && Number(v) >= 0 && !Number.isNaN(Number(v))) {
-        qs.set(k, String(Math.round(Number(v) * 10000)));
-      } else if (k !== "price_min" && k !== "price_max") {
+      if (k === "price_min" || k === "price_max") {
+        const yuan = wanToYuan(v);
+        if (yuan !== null) qs.set(k, String(yuan));
+      } else {
         qs.set(k, v);
       }
     }

@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { formatCount, formatPrice, formatPriceRange } from "./api.ts";
+import { formatCount, formatPrice, formatPriceRange, wanToYuan, yuanToWan } from "./api.ts";
 import type { PriceRange } from "./api.ts";
 
 const range = (min: number | null, max: number | null): PriceRange => ({
@@ -49,4 +49,44 @@ test("formatPriceRange：区间、单点、开区间与全空各自成文", () =
 
 test("formatCount：zh-CN 千分位", () => {
   assert.equal(formatCount(12345), "12,345");
+});
+
+test("yuanToWan：整万元不得丢数字（曾把 10 万显示成 1 万）", () => {
+  // 本 bug 的核心：旧实现 String(v / 10000).replace(/\.?0+$/, "") 把 "10" 的
+  // 末位 0 当作小数尾零裁掉，得到 "1"，回写后价格窗口缩水十倍。
+  assert.equal(yuanToWan("100000"), "10");
+  assert.equal(yuanToWan("200000"), "20");
+  assert.equal(yuanToWan("300000"), "30");
+  assert.equal(yuanToWan("1000000"), "100");
+});
+
+test("yuanToWan：保留有意义的小数位", () => {
+  assert.equal(yuanToWan("105000"), "10.5");
+  assert.equal(yuanToWan("200500"), "20.05");
+});
+
+test("yuanToWan：空值与非数字返回空串（不下发该筛选参数）", () => {
+  assert.equal(yuanToWan(null), "");
+  assert.equal(yuanToWan(undefined), "");
+  assert.equal(yuanToWan(""), "");
+  assert.equal(yuanToWan("abc"), "");
+});
+
+test("wanToYuan：万元写回元", () => {
+  assert.equal(wanToYuan("10"), 100000);
+  assert.equal(wanToYuan("10.5"), 105000);
+});
+
+test("wanToYuan 与 yuanToWan 往返一致（显示后再回写不得丢量级）", () => {
+  // 这是本缺陷最直接的回归防线：URL 里的 100000 显示成 "10"，用户改任意其它
+  // 筛选项后被回写，必须仍是 100000 而不是 10000。
+  for (const yuan of ["100000", "200000", "1000000", "105000", "200500"]) {
+    assert.equal(wanToYuan(yuanToWan(yuan)), Number(yuan), `往返失败：${yuan}`);
+  }
+});
+
+test("wanToYuan：空值、非数字与负值返回 null", () => {
+  assert.equal(wanToYuan(""), null);
+  assert.equal(wanToYuan("abc"), null);
+  assert.equal(wanToYuan("-5"), null);
 });

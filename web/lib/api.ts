@@ -290,6 +290,28 @@ export function formatPriceRange(range: PriceRange): string {
   return `${formatPrice(range.min)} 起`;
 }
 
+/**
+ * 元 → 万元（筛选表单的展示口径）。
+ *
+ * 必须先 toFixed(2) 再裁尾零：正则 `\.?0+$` 本是为 toFixed 的小数尾零设计的，
+ * 直接对 String(v / 10000) 使用会把 100000 的 "10" 再裁掉末位 0 变成 "1"，
+ * 价格窗口随之被静默收窄十倍（2026-09-24 修复，回归用例见 api.test.mts）。
+ */
+export function yuanToWan(yuan: string | null | undefined): string {
+  if (!yuan) return "";
+  const value = Number(yuan);
+  if (!Number.isFinite(value)) return "";
+  return (value / 10000).toFixed(2).replace(/\.?0+$/, "");
+}
+
+/** 万元 → 元（筛选表单写回 URL 的口径）；空值、非数字与负值返回 null，表示不下发该参数。 */
+export function wanToYuan(wan: string): number | null {
+  if (!wan) return null;
+  const value = Number(wan);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.round(value * 10000);
+}
+
 export const ENERGY_LABELS: Record<string, string> = {
   BEV: "纯电",
   PHEV: "插混",
