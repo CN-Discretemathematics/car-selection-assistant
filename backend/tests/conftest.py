@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.common import models  # noqa: F401  确保模型注册
-from app.common.database import Base, get_session
+from app.common.database import Base, apply_sqlite_pragmas, get_session
 from app.main import app
 
 # 路由 env 清场（必须在 app 导入之后）：本机 backend/.env 可能写了 AGENT_ROUTER_*
@@ -55,6 +55,10 @@ def db_session() -> Session:
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
+    # 测试也必须与生产一致地开启外键：生产是 PostgreSQL（强制外键），而 SQLite
+    # 默认关闭。此前夹具自建引擎、不经过 get_engine()，导致外键语义在测试中
+    # 完全不生效——「只在生产暴露的数据完整性缺陷」正是这么漏掉的。
+    apply_sqlite_pragmas(engine)
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     session = factory()

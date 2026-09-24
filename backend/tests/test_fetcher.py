@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.common.models import SourceDocument
 from app.sources.fetcher import RobotsPolicy, normalize_url, record_snapshot
+from tests.seed import make_brand, make_series, make_source
 
 ROBOTS_SAMPLE = """
 User-agent: *
@@ -61,6 +62,15 @@ def test_normalize_url():
 
 
 def test_record_snapshot(db_session: Session):
+    # series_id 必须为真实存在的车系：生产库强制外键（PG），测试夹具也须复现
+    # 这一约束，否则断言的是「悬空 series_id 也能入库」这条生产不存在的路径。
+    # 用另一个名字建来源：下方 record_snapshot 传入的 source_name 故意不匹配，
+    # 以保留「来源名不存在 → source_id 记 null、不报错」这条原有用例意图。
+    source = make_source(db_session, name="种子来源")
+    brand = make_brand(db_session, name="测试品牌", source=source)
+    series = make_series(db_session, brand, name="测试车系", source=source)
+    db_session.commit()
+
     doc = record_snapshot(
         db_session,
         url="https://example.com/spec.pdf",
@@ -68,7 +78,7 @@ def test_record_snapshot(db_session: Session):
         content_text="配置表正文",
         raw_object_path="snapshots/2026/spec-1.pdf",
         source_name="官方测试来源",
-        series_id=1,
+        series_id=series.id,
         page_or_section="P3",
     )
     db_session.commit()
