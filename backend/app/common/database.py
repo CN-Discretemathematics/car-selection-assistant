@@ -34,8 +34,25 @@ def get_engine() -> Engine:
     global _engine, _session_factory
     if _engine is None:
         url = normalize_database_url(get_settings().database_url)
-        connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-        _engine = create_engine(url, connect_args=connect_args, future=True)
+        if url.startswith("sqlite"):
+            connect_args = {"check_same_thread": False}
+            # SQLite 侧不套用 PG 的连接池参数（语义不同，且测试用内存库走
+            # 独立 StaticPool），连接池与 PRAGMA 由下方 _sqlite_pragmas 处理。
+            pool_kwargs: dict[str, object] = {}
+        else:
+            connect_args = {}
+            # 云托管 PostgreSQL（RDS / SLB）会回收空闲 TCP 连接。SQLAlchemy 默认
+            # pool_pre_ping=False，池里的陈旧连接会在下次请求抛 OperationalError，
+            # 表现为「上线后偶发 500、重启即恢复」——这是本参数的直接来源。
+            # pool_recycle 取 1800s，小于常见 RDS 的 idle timeout。
+            pool_kwargs = {
+                "pool_pre_ping": True,
+                "pool_recycle": 1800,
+                "pool_size": 10,
+                "max_overflow": 20,
+                "pool_timeout": 30,
+            }
+        _engine = create_engine(url, connect_args=connect_args, future=True, **pool_kwargs)
         _session_factory = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)
     return _engine
 
