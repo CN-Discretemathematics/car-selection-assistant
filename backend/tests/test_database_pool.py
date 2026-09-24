@@ -40,7 +40,8 @@ def _capture_kwargs(monkeypatch) -> dict:
 def test_postgres_gets_pool_settings(monkeypatch, _isolated_engine):
     pytest.importorskip("psycopg", reason="需要 psycopg 才能构造 PG 引擎")
     captured = _capture_kwargs(monkeypatch)
-    monkeypatch.setattr(get_settings(), "database_url", "postgresql://u:p@db.local:5432/app")
+    # 无凭据形式：只需 PG 方言即可验证参数传递，避免类凭据字面量触发密钥门禁
+    monkeypatch.setattr(get_settings(), "database_url", "postgresql://db.internal:5432/app")
 
     engine = dbmod.get_engine()
 

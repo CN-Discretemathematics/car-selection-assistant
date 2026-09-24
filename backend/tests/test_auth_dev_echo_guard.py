@@ -23,7 +23,8 @@ def test_dev_code_echoed_on_sqlite(client: TestClient):
 
 def test_dev_code_hidden_on_postgres(client: TestClient, monkeypatch):
     """生产库（PostgreSQL）：即便开关仍为 true 也不回显。"""
-    monkeypatch.setattr(get_settings(), "database_url", "postgresql://u:p@host/db")
+    # 无凭据形式：仅为触发「生产库」判定，避免引入类凭据字面量触发密钥门禁
+    monkeypatch.setattr(get_settings(), "database_url", "postgresql://db.internal:5432/app")
     resp = client.post("/api/v1/auth/register", json={"email": "echo-pg@example.com"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["dev_code"] is None, "生产库下必须阻断回显"
