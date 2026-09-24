@@ -2,7 +2,7 @@
 """doc-sync 检查器回归自测：证明「本地跑 == CI 跑」。
 
 背景（2026-09-16 PR #29 事故）：检查器用 `Path.exists()` 判悬空引用，而本地工作区还有
-gitignore 的本地专属文件（PROJECT_PLAN.md / reviewer/REVIEWER_AGENT.md / resume/ …），
+gitignore 的本地专属文件（reviewer/REVIEWER_AGENT.md / resume/ / docs-local/ …），
 于是本地「结论：一致」、CI 同一提交 FAIL 3 处——门禁在 push 前无法自证。
 
 本脚本把 **HEAD 的 tracked-only 检出**（= CI 看到的内容）放进 `.tmp/` 临时 worktree，

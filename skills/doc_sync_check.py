@@ -233,9 +233,12 @@ PATH_TOKEN = re.compile(r"`([^`\n]+)`")
 # 让 `tools/x` 先解析到根级 tools/，再回退 backend/tools/（两个目录都真实存在）
 ROOT_PREFIXES = ("backend/", "web/", "deploy/", "docs/", "skills/", "reviewer/", "resume/", "tools/")
 BACKEND_REL_PREFIXES = ("app/", "tools/", "tests/", "alembic/")
+# 2026-09-23 清理：CHANGES.md / DELIVERY.md / DEPLOYMENT.md / OPS_GUIDE.md /
+# RAG_TECH_SELECTION.md / PROJECT_PLAN.md 已按「内部工作文档只留本地、重复内容归并到
+# 单一文档」的口径删除或归档到 .tmp/doc-backup/。不再登记：登记了只会对**已不存在**的
+# 文件发 WARN「本地专属引用」，属误报噪声。
 ROOT_MD_FILES = {
-    "README.md", "RAG.md", "CHANGES.md", "DELIVERY.md", "DEPLOYMENT.md",
-    "OPS_GUIDE.md", "PROJECT_PLAN.md", "RAG_TECH_SELECTION.md", "LICENSE",
+    "README.md", "RAG.md", "LICENSE",
 }
 
 
@@ -257,8 +260,8 @@ def token_exists(token: str) -> bool:
 
 
 # git 真值（缓存）。CI 检出的是 git 索引内容，工作区还可能有 gitignore 的本地专属文件
-# （PROJECT_PLAN.md / DEPLOYMENT.md / CHANGES.md / deploy/ALIYUN_RUNBOOK.md /
-#  reviewer/REVIEWER_AGENT.md / resume/ …）。2026-09-16 PR #29 实测：用 Path.exists()
+# （reviewer/REVIEWER_AGENT.md / resume/ / docs-local/ …）。
+# 2026-09-16 PR #29 实测：用 Path.exists()
 # 判悬空 → 本地「结论：一致」（exit 0）、CI 同一提交 FAIL 3 处，门禁在 push 前无法自证。
 # 故判定统一为：tracked → 存在；gitignored → 本地专属（WARN 提示后跳过）；
 # 未跟踪且未忽略 → FAIL（本地新增未提交，CI 检出后不存在）；其余 → FAIL（真悬空）。
@@ -385,9 +388,9 @@ def env_sources_text() -> str:
 
 
 # 环境变量检查只针对「会写配置表」的文档，避免把内部评审文档的枚举值误判为环境变量
-ENV_DOC_NAMES = {"README.md", "RAG.md", "RAG_TECH_SELECTION.md", "DELIVERY.md",
-                 "DEPLOYMENT.md", "OPS_GUIDE.md", "deployment.md", "aliyun-ops.md",
-                 "credential-rotation.md"}
+# （2026-09-23：同步删除已按本地归档口径移除的 DELIVERY/DEPLOYMENT/OPS_GUIDE/RAG_TECH_SELECTION）
+ENV_DOC_NAMES = {"README.md", "RAG.md",
+                 "deployment.md", "aliyun-ops.md", "credential-rotation.md"}
 
 
 def check_env_vars(docs: list[tuple[Path, list[str]]], source: str, source_lower: str) -> None:

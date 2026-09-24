@@ -42,7 +42,7 @@ def test_detail_page_labels_both_kinds():
 
 
 def test_detail_page_external_link_attributes():
-    """外链属性：新窗口 + noopener（PROJECT_PLAN §10 的官方跳转要求）。"""
+    """外链属性：新窗口 + noopener（对外跳转一律新窗口打开，避免把用户带离本站）。"""
     source = _source()
     assert 'target="_blank"' in source
     assert 'rel="noopener noreferrer"' in source

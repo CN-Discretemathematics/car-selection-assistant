@@ -228,7 +228,7 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
 
 ## 8. 已知事项与后续改进
 
-- **官方车型页链接（PROJECT_PLAN §10-14）目前拿不到数据，前端按钮不渲染**：线上实测
+- **官方车型页链接目前拿不到数据，前端按钮不渲染**：线上实测
   `vehicle_series.official_page_url` 为 **0/1078**、`brands.official_site` 为 **0/132**；
   代码里只有 `backend/tools/seed_dev.py` 写过占位示例（example.com，测试夹具 `backend/tests/seed.py`
   同类）。根因是**唯一来源

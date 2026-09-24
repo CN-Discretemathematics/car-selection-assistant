@@ -15,8 +15,8 @@
 
 gitignore 语义（评审 m13）：REVIEWER_AGENT.md §1 认可的正确做法是「密钥只存在于
 本地未跟踪的 .env（已被 .gitignore 忽略）」，因此位于 gitignored 路径的命中以
-INFO 呈现、不计入退出码——否则任何开发机上都恒为退出码 1，上线检查清单
-（deploy/ALIYUN_RUNBOOK.md §7）永远无法达成。已被 git 跟踪的文件不受此豁免。
+INFO 呈现、不计入退出码——否则任何开发机上都恒为退出码 1，上线前的密钥检查
+永远无法达成。已被 git 跟踪的文件不受此豁免。
 需要严格审计时用 --strict-ignored。
 """
 from __future__ import annotations

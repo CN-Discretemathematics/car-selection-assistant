@@ -1,4 +1,4 @@
-# carSelection 后端镜像（PROJECT_PLAN.md 阶段 2「FastAPI 容器」）
+# carSelection 后端镜像（FastAPI + uvicorn）
 # 构建：docker build -f deploy/backend.Dockerfile -t carsel-api .
 # 运行依赖环境变量：见 backend/.env.example（生产经 .env 注入，不入仓库）
 FROM python:3.12-slim

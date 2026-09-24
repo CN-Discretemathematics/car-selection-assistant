@@ -7,7 +7,7 @@
   `feature/search-and-agent-entry` 从旧基点 `04631b1` 同步到 `main` `68971d3`），
   以及同期的 PowerShell 引号事故与 OSS AK 泄露事故复盘。
 - 适用阶段：全阶段——开工拉分支、推送前、提 PR 前各一次；涉及密钥的任何操作。
-- 最后验证：2026-09（两条分支 rebase 后 behind=0；运维分支 235 用例、功能分支 245 用例，
+- 最后验证：2026-09-23（两条分支 rebase 后 behind=0；全量 548 用例，
   `tsc --noEmit` 与 `next build` 全绿，compose 经 YAML 解析验证）。
 
 ## 流程

@@ -21,7 +21,7 @@ import {
 
 const MISSING_LABEL = "官方资料未披露";
 
-/** 车型详情页（PROJECT_PLAN.md §10）。 */
+/** 车型详情页：车系档案 + 参数配置 + 款型列表 + 唯一对外跳转入口。 */
 export default async function VehiclePage({
   params,
   searchParams,

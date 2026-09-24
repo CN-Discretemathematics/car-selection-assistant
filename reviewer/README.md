@@ -70,7 +70,7 @@ python reviewer/scan_ui_copy.py --verbose  # 逐条打印命中位置
 
 ## 与项目规范的衔接
 
-- 规范基线：`PROJECT_PLAN.md`（权威文档，第 23 节执行纪律）与 `README.md`。
+- 规范基线：`README.md`（设计原则与安全实践）与 `AGENTS.md`（执行纪律、并行会话规范、验证基线）。
 - 配置规范：敏感配置通过 `backend/app/common/config.py` 的 `Settings`/`get_settings()`
   从环境变量读取，生产由云密钥管理服务注入；`backend/.env.example` 只保留占位符。
 - 密钥文件 `.env*` 已在根 `.gitignore` 中忽略，审查时也会核对此项。

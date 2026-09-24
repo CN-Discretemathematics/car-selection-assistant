@@ -120,9 +120,9 @@ SCOPE_PATHS: dict[str, list[str]] = {
     "deploy": ["deploy/", ".github/", "docs/"],
     "reviewer": ["reviewer/", "backend/tests/test_reviewer", "skills/"],
     "skills": ["skills/"],
-    "sync": ["docs/", "skills/", "README"],
-    "docs": ["docs/", "skills/", "AGENTS.md", "README", "tools/", ".githooks/", "LICENSE"],
-    "hygiene": ["tools/", ".githooks/", "skills/", "docs/", "AGENTS.md", "reviewer/"],
+    "sync": ["docs/", "skills/", "README", "RAG.md"],
+    "docs": ["docs/", "skills/", "AGENTS.md", "README", "RAG.md", "tools/", ".githooks/", "LICENSE"],
+    "hygiene": ["tools/", ".githooks/", "skills/", "docs/", "AGENTS.md", "README", "RAG.md", "reviewer/"],
     "chore": [".github/", ".gitignore", "tools/", ".githooks/", "README", "LICENSE"],
     "test": ["backend/tests/", "web/"],
 }
