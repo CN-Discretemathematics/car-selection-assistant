@@ -109,6 +109,13 @@ SCOPE_PATHS: dict[str, list[str]] = {
         "backend/tests/test_augment",
         "backend/tests/test_sales",
     ],
+    # 数据层引擎与会话配置（连接池参数 / SQLite PRAGMA / 双栈行为差异）：
+    # common/ 目录此前无任何 scope 覆盖，连接池与外键修复无法被本门禁真实约束
+    # （2026-09-24 登记）
+    "database": [
+        "backend/app/common/database.py",
+        "backend/tests/test_database",
+    ],
     "security": [
         "backend/app/auth/",
         "backend/app/admin/",
