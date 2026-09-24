@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -28,6 +28,28 @@ def normalize_database_url(url: str) -> str:
 
 _engine: Engine | None = None
 _session_factory: sessionmaker[Session] | None = None
+
+
+def apply_sqlite_pragmas(engine: Engine) -> None:
+    """SQLite 侧必开的 PRAGMA（仅对 sqlite 引擎注册）。
+
+    - foreign_keys=ON：SQLite 默认**关闭**外键，而生产 PostgreSQL 强制执行。
+      本项目测试与本地开发跑 SQLite、生产跑 PG，不开此开关意味着所有外键
+      /级联/孤儿数据问题只在生产暴露——这是本开关的直接来源。
+    - journal_mode=WAL：默认的 rollback journal 在 FastAPI 线程池并发写下
+      频繁触发 "database is locked"（内存库下该 pragma 无效但不报错）。
+    - busy_timeout=10000：默认锁等待 5s 偏短，并发写易失败。
+
+    公开导出：测试夹具自建引擎时同样调用它，保证测试与生产的 SQLite 语义一致
+    （否则「测试跑的路径」与「生产跑的路径」在外键上仍是两套）。
+    """
+    @event.listens_for(engine, "connect")
+    def _set_pragmas(dbapi_conn, _connection_record):  # noqa: ANN001
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=10000")
+        cursor.close()
 
 
 def get_engine() -> Engine:
@@ -53,6 +75,8 @@ def get_engine() -> Engine:
                 "pool_timeout": 30,
             }
         _engine = create_engine(url, connect_args=connect_args, future=True, **pool_kwargs)
+        if url.startswith("sqlite"):
+            apply_sqlite_pragmas(_engine)
         _session_factory = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)
     return _engine
 
