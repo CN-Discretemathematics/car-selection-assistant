@@ -406,6 +406,11 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
     scored: list[tuple[float, dict]] = []
     for variant in variants:
         series = series_map.get(variant.series_id)
+        if series is None:
+            # 悬空 series_id（导入期脏数据 / 车系已下线但款型残留）：跳过该款型。
+            # 若不跳过，下方「维护便利性」维度会裸取 series.brand_id，
+            # AttributeError 会让整个推荐接口 500——一处脏数据拖垮全链路。
+            continue
         brand = brand_map.get(series.brand_id) if series else None
         fact_list = facts_by_variant.get(variant.id, [])
         facts = {(f["category"], f["fact_key"]): f for f in fact_list}
