@@ -701,6 +701,13 @@ def _source_citations(
     ]
 
 
+# 取舍/说明类文案里的「内部措辞」黑名单——这些是写给维护者看的，不该呈现给用户。
+# 2026-10-02 提升为模块级：原先它是 `_recommend_reply` 的局部变量，而
+# `collect_tradeoffs` 与构造 `RecommendedVariant` 两处都要用；挪进函数后另一处
+# 直接 NameError。提到模块级，两处共用一份定义。
+INTERNAL_NOTE_MARKERS = ("未参与", "暂无", "数据源", "未披露")
+
+
 def collect_tradeoffs(top: list[dict], limit: int = 4) -> list[str]:
     """汇总各候选款型的「取舍说明」，去重且**严格不超过 limit 条**。
 
@@ -710,18 +717,17 @@ def collect_tradeoffs(top: list[dict], limit: int = 4) -> list[str]:
 
     过滤掉内部说明类措辞（未参与评分 / 暂无数据源 / 未披露）——这些不该呈现给用户。
 
-    ⚠️ 目前 `recommendation_tool` 从不往 `tradeoffs` 里 append（见 roadmap P4.6），
-    故本函数在生产链路上恒返回 `[]`，是**已修正但尚未被触发的逻辑**。
-    抽成函数是为了让上限行为**可测**——否则它会一直藏在 1968 行文件里。
+    ⚠️ 抽取本函数时**顺带暴露了一个潜伏 bug**：原先 INTERNAL_NOTE_MARKERS 是
+    `_recommend_reply` 的局部变量，而下方构造 `RecommendedVariant` 时也在用它——
+    把它挪进本函数后，那一行变成 NameError。已提升为模块级常量，两处共用。
     """
-    internal_notes = ("未参与", "暂无", "数据源", "未披露")
     out: list[str] = []
     seen: set[str] = set()
     for v in top:
-        if len(out) >= limit:
+        if len(tradeoffs := (v.get("tradeoffs") or [])) and len(out) >= limit:
             break
-        for t in v.get("tradeoffs") or []:
-            if any(note in t for note in internal_notes):
+        for t in tradeoffs:
+            if any(note in t for note in INTERNAL_NOTE_MARKERS):
                 continue
             if t not in seen:
                 seen.add(t)
@@ -1219,7 +1225,8 @@ class AgentEngine:
                 price_cny=v["price_cny"],
                 score=v["score"],
                 matched=v["matched"],
-                tradeoffs=[t for t in (v["tradeoffs"] or []) if not any(n in t for n in internal_notes)],
+                tradeoffs=[t for t in (v["tradeoffs"] or [])
+                           if not any(n in t for n in INTERNAL_NOTE_MARKERS)],
             )
             for v in top
         ]

@@ -231,7 +231,8 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 `_hard_filter_stmt` → `_load_candidate_bundle` → `_passes_python_constraints` → `_score_variant` → `pack_result`。
 
 **P3 的真实收益是可测性而非行为**：拆完后 `_score_variant` 可对手工构造的 `CandidateBundle` 做纯单测——
-而 `brand_series_count` 语义错误与 `tradeoffs` 死代码正是当前**无法被单测捕获**的缺陷类型。
+而 `brand_series_count` 语义错误与 `tradeoffs` 死代码正是当时**无法被单测捕获**的缺陷类型。
+（`tradeoffs` 已于 2026-10-02 修活并补上单测；`brand_series_count` 仍待产品定口径。）
 
 **P3.3 `analysis.py::analyze_comparison`（295 行）** — 按维度处理类型拆为：冲突键收集 / flag 维度 / numeric 维度（含单位换算与不可换算分支）/ 缺口与 leader 计算。
 **必须不变**：各 `note` 文本串、比较口径、单位换算后「原值 ≈ 规范值」的展示格式。
@@ -273,7 +274,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `backend/app/agent/engine.py`（`_shadow_route`） | `llm_elapsed_ms` 只计最后一次重试，**低估**重试样本开销 —— ✅ **已修**：改为总墙钟，并新增 `llm_last_attempt_ms`。⚠️ 切流判据 4 用的是**回答级**耗时日志，不受此字段影响；只影响 shadow 诊断的 p50/p95 |
 | `backend/app/agent/engine.py:789` 等 | 单轮最多 4 次串行 `set_profile` Redis 往返 |
 | `backend/app/agent/engine.py:1786-1788` | 全量 history 无 token 预算注入 prompt |
-| `backend/app/agent/tools.py:458,541` | `tradeoffs` **整条链是死代码**；`backend/app/agent/engine.py:1071` 的 `break` 只跳出内层，上限失效 |
+| `backend/app/agent/tools.py` `tradeoffs` | **整条链曾是死代码**——`recommendation_tool` 从不 append，消费链恒空 —— ✅ **2026-10-02 已修活**（纯计算版取舍叙事，见 `docs/sales-agent-proposal.md` L3）。同时修 `engine.py` `break` 只跳出内层的上限失效 bug |
 | `backend/app/agent/tools.py:397-399` | `brand_series_count` 统计**过滤后候选集**而非品牌规模，跨查询不可比 |
 | `backend/app/agent/engine.py:354` | ⚠️ **本条为审计误判，已更正**：`"MPV"` 键**不是死条目**。偏好路径用小写化的 `msg_low` 匹配（`"mpv" in msg_low`），而「不要…」的 avoid 路径用的是**原始 message**、大小写敏感（`"MPV" in message`）——两个键各覆盖一种输入，删掉大写键会让「不要MPV」漏掉排除项。真正的问题是**两条路径大小写处理不一致**（一个 lower 一个原样），统一它属行为变更，需产品拍板 |
 | `backend/app/agent/series_qa.py:390-400` | 多车系路径硬编码只处理 2 个车系（解析层最多返回 4 个） |

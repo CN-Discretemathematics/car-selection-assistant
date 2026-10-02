@@ -244,6 +244,20 @@ _POWER_FACT_KEYS = ("power_kw", "电动机总功率(kW)", "发动机最大功率
 _COMFORT_CATEGORIES = ("舒适性", "内部配置", "外部配置")
 _INTELLIGENCE_CATEGORIES = ("智能驾驶", "智能座舱", "智能/辅助驾驶")
 
+# 取舍叙事的维度名（与 matched 的中文风格一致，面向用户）
+_DIM_LABELS = {
+    "budget": "预算吻合度",
+    "usage": "用途匹配",
+    "space": "空间",
+    "energy": "能耗",
+    "power": "动力",
+    "comfort": "舒适性配置",
+    "intelligence": "智能化配置",
+    "maintenance": "维护便利性",
+}
+# 落后幅度小于此值不算取舍——0.01 的差距是噪声，写出来只会稀释真正的信息
+_TRADEOFF_GAP = 0.2
+
 
 def _extract_seats(facts: dict[tuple[str, str], dict]) -> float | None:
     for key in _SEAT_FACT_KEYS:
@@ -267,6 +281,26 @@ def _extract_power(facts: dict[tuple[str, str], dict]) -> float | None:
         if value is not None:
             return _parse_number(value)
     return None
+
+
+def _tradeoff_gaps(
+    dims: dict[str, float],
+    measured: set[str],
+    best_by_dim: dict[str, float],
+) -> list[str]:
+    """该候选相对**本批最优**让出了什么（纯计算，不调 LLM、不引入任何外部事实）。
+
+    只在「本候选有库内实值」且「落后达阈值」时报出：
+    - 未列入 measured 的维度是**库内无此数据**，说成「不及最优」等于编造负面事实；
+    - 落后不足 _TRADEOFF_GAP 的是噪声，报出来只会稀释真正的取舍。
+    """
+    gaps: list[str] = []
+    for dim, label in _DIM_LABELS.items():
+        if dim not in measured or dim not in best_by_dim:
+            continue
+        if best_by_dim[dim] - dims[dim] >= _TRADEOFF_GAP:
+            gaps.append(f"{label}不及本批最优候选")
+    return gaps
 
 
 def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> dict:
@@ -441,9 +475,12 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
 
         # 第二层：软评分
         dims: dict[str, float] = {}
-        tradeoffs: list[str] = []
+        # measured：这些维度的分数来自**库内真实数据**，可以拿来跟别的候选比。
+        # 未列入的维度（0.5 中性 / 0.0）代表**库内没有这项数据**，不是「这台更差」——
+        # 把缺数据当成劣势去和别的车比较，正是本项目明令禁止的编造（设计原则第 1 条）。
+        measured: set[str] = set()
 
-        # 预算匹配
+        # 预算匹配（价格是库内实值；0.5 仅在用户没给预算时出现，仍可比较）
         budget = profile.budget
         if budget.max and budget.min:
             span = max(budget.max - budget.min, 1)
@@ -452,6 +489,7 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
             dims["budget"] = max(0.0, 1.0 - max(price - budget.max, 0) / max(budget.max, 1))
         else:
             dims["budget"] = 0.5  # 无预算信息，中性
+        measured.add("budget")
 
         # 用途匹配（通勤→轿车/纯电优先；家庭/长途→SUV/MPV）
         usage_hits = 0
@@ -463,40 +501,50 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
         if "长途" in profile.usage and variant.energy_type == "PHEV":
             usage_hits += 1
         dims["usage"] = min(usage_hits / max(len(profile.usage), 1), 1.0) if profile.usage else 0.5
+        if profile.usage:
+            measured.add("usage")
 
         # 空间匹配（车长与座位数）
         length = _extract_length(facts)
         if length is None:
-            dims["space"] = 0.5
+            dims["space"] = 0.5          # 库内无车长 → 不是「空间小」
         else:
             dims["space"] = min(max((length - 4300) / (5200 - 4300), 0.0), 1.0)
+            measured.add("space")
 
-        # 能耗匹配
+        # 能耗匹配（能源类型是库内实值）
         if profile.energy_preference:
             dims["energy"] = 1.0
         elif variant.energy_type in NEW_ENERGY_TYPES:
             dims["energy"] = 0.7
         else:
             dims["energy"] = 0.4
+        measured.add("energy")
 
         # 动力匹配
         power = _extract_power(facts)
         if power is None:
-            dims["power"] = 0.5
+            dims["power"] = 0.5          # 库内无功率 → 不是「动力弱」
         else:
             dims["power"] = min(max((power - 80) / (300 - 80), 0.0), 1.0)
+            measured.add("power")
 
         # 舒适性 / 智能化（存在对应类别事实即得分）
         dims["comfort"] = 1.0 if any(k[0] in _COMFORT_CATEGORIES for k in facts) else 0.0
+        if dims["comfort"] == 1.0:
+            measured.add("comfort")
         dims["intelligence"] = (
             1.0 if any(k[0] in _INTELLIGENCE_CATEGORIES for k in facts) else 0.0
         )
+        if dims["intelligence"] == 1.0:
+            measured.add("intelligence")
 
         # 维护便利性（统一数据源代理：品牌规模 + 销量活跃度）。
         # 注：不再输出「暂无数据源/未参与评分」等内部说明（评审：不应呈现给用户）
         brand_scale = min(brand_series_count.get(series.brand_id, 0) / 5.0, 1.0)
         channel_active = 1.0 if series.brand_id in brands_with_sales else 0.0
         dims["maintenance"] = min(1.0, 0.4 + 0.3 * brand_scale + 0.3 * channel_active)
+        measured.add("maintenance")
 
         total_weight = sum(weights[d] for d in dims)
         score = sum(weights[d] * dims[d] for d in dims) / total_weight if total_weight else 0.0
@@ -524,13 +572,41 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
                     "price_cny": price,
                     "score": round(score, 4),
                     "matched": matched,
-                    "tradeoffs": tradeoffs,
+                    # 占位：取舍必须等全部候选打完分才能算（要跟本批最优比），
+                    # 由下方第二遍统一填。循环内无法计算。
+                    "tradeoffs": [],
                     "source_id": variant.source_id,
+                    # 私有：第二遍算取舍用，算完剥离
+                    "_dims": dims,
+                    "_measured": measured,
                 },
             )
         )
 
     scored.sort(key=lambda item: item[0], reverse=True)
+
+    # ── 取舍叙事（2026-10-02 修活 L3，纯计算）────────────────────────────────
+    # 「好处」是 matched（这台自身达标项），「代价」必须**相对同批候选**才有意义：
+    # 在某个维度上低于本批最优，才算真的让出了什么。
+    #
+    # 两条硬约束（都是防编造，不是风格问题）：
+    # 1. 只比较本候选**有真实数据**的维度（_measured）。space/power 的 0.5、
+    #    comfort/intelligence 的 0.0 都表示「库内没这项数据」，拿它去说
+    #    「这台不如别的车」就是**用缺失数据编造负面事实**，违反设计原则第 1 条。
+    # 2. 差距小于 _TRADEOFF_GAP 一律不说——0.01 的落后不是取舍，是噪声。
+    #
+    # 文案不含数字：回答契约会校验正文数字必须可溯源，引入分数会把契约搞复杂。
+    best_by_dim: dict[str, float] = {}
+    for _score, item in scored:
+        for d in item["_measured"]:
+            if d in weights:
+                best_by_dim[d] = max(best_by_dim.get(d, 0.0), item["_dims"][d])
+
+    for _score, item in scored:
+        item["tradeoffs"] = _tradeoff_gaps(item["_dims"], item["_measured"], best_by_dim)
+        item.pop("_dims", None)
+        item.pop("_measured", None)
+
     top = scored[:limit]
     return {
         "count": len(scored),
