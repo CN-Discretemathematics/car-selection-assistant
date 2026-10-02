@@ -145,6 +145,75 @@ interface TabProps {
   onError: (msg: string | null) => void;
 }
 
+/**
+ * 四个 tab 共用的异步加载：data / error / loading / reload（H9）。
+ *
+ * 动机：此前 GraphTab、StatusTab、RunsTab 都是
+ * `fetchX(token).then(setX).catch(e => onError(...))` + `if (!x) return 加载中…`。
+ * 加载失败时 `onError` 只在父组件顶部渲染一条红字，**tab 自身的 state 仍是 null**，
+ * 于是正文永远停在「加载中…」，页面上**没有任何重试入口**——运维只能整页刷新。
+ * 本文件里唯一做对的是 EvalTab（自有 loadError + 失败提示），本 hook 以它为范本，
+ * 把 4 个 tab 统一。
+ *
+ * 两个实现细节是有意为之，不是随手写的：
+ *  - **fetcher 走 ref、不进依赖数组**：调用点传的是内联箭头函数，若直接进依赖，
+ *    每次渲染都是新函数 → effect 反复触发 → 无限请求。
+ *  - **cancelled 守卫**：切 tab 时在途请求仍会 resolve 并 setState（React 18 不再
+ *    报警告，但状态写进已卸载组件仍是泄漏，且竞态下可能覆盖新 tab 的状态）。
+ */
+function useAsyncData<T>(
+  fetcher: (token: string) => Promise<T>,
+  token: string,
+  onError?: (msg: string | null) => void,
+) {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [nonce, setNonce] = useState(0);
+  const fetcherRef = useRef(fetcher);
+  fetcherRef.current = fetcher;
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    fetcherRef.current(token)
+      .then((d) => {
+        if (cancelled) return;
+        setData(d);
+        onErrorRef.current?.(null);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        const msg = e instanceof Error ? e.message : "加载失败";
+        setError(msg);
+        onErrorRef.current?.(msg);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // nonce 是「重试」按钮的触发器，故意进依赖
+  }, [token, nonce]);
+
+  const reload = useCallback(() => setNonce((n) => n + 1), []);
+  return { data, error, reload };
+}
+
+/** 加载失败的统一呈现：说明 + 重试按钮（此前 4 个 tab 里有 3 个没有重试入口）。 */
+function LoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="rounded-2xl border border-red-100 bg-red-50/60 p-8 text-center">
+      <p className="text-sm text-red-600">{message}</p>
+      <button
+        onClick={onRetry}
+        className="mt-3 rounded-lg border border-red-200 bg-white px-4 py-1.5 text-sm text-red-600 hover:bg-red-50"
+      >
+        重试
+      </button>
+    </div>
+  );
+}
+
 /* ── 流程图 ─────────────────────────────────────────────────────────────── */
 
 function longestPathRanks(spec: GraphSpec): Map<string, number> {
@@ -236,12 +305,9 @@ function FlowDiagram({ spec }: { spec: GraphSpec }) {
 }
 
 function GraphTab({ token, onError }: TabProps) {
-  const [graphs, setGraphs] = useState<RagGraphs | null>(null);
+  const { data: graphs, error, reload } = useAsyncData(fetchRagGraph, token, onError);
 
-  useEffect(() => {
-    fetchRagGraph(token).then(setGraphs).catch((e) => onError(e instanceof Error ? e.message : "加载失败"));
-  }, [token, onError]);
-
+  if (error) return <LoadError message={error} onRetry={reload} />;
   if (!graphs) return <p className="text-center text-gray-400">加载中…</p>;
   return (
     <div className="grid gap-6 lg:grid-cols-2">
@@ -269,33 +335,48 @@ function StatusCard({ title, children }: { title: string; children: ReactNode })
 }
 
 function StatusTab({ token, onError }: TabProps) {
-  const [status, setStatus] = useState<RagStatus | null>(null);
+  const { data: status, error, reload } = useAsyncData(fetchRagStatus, token, onError);
   const [busy, setBusy] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
-
-  const load = useCallback(() => {
-    fetchRagStatus(token).then(setStatus).catch((e) => onError(e instanceof Error ? e.message : "加载失败"));
-  }, [token, onError]);
-
-  useEffect(load, [load]);
-  useEffect(() => () => { if (pollRef.current) window.clearInterval(pollRef.current); }, []);
+  // H8：unmount 之后仍可能到达的 await 续段不得再创建定时器。
+  // 此前清理函数在 unmount 时清 pollRef，但那一刻 interval **还没被创建**
+  // （它要等 runReindex 这次网络往返 resolve 之后才 setInterval），
+  // 于是「点 dense 重建 → 立刻离开页面」会留下一个每 2.5s 打一次后端、
+  // 永远没人清掉的定时器。
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    };
+  }, []);
 
   async function reindex(target: "sparse" | "dense") {
     setBusy(target);
     setNotice(null);
     try {
       const out = await runReindex(token, target);
+      if (!mountedRef.current) return; // 已离开页面：不要 setState，也不要起轮询
       if (out.mode === "sync") {
         const s = out.summary;
         setNotice(`稀疏索引重建完成：切片 ${s?.chunks ?? 0}，写入 ${s?.indexed ?? 0}。`);
-        load();
+        reload();
       } else {
         setNotice("dense 重建任务已启动（embedding + 上传，可能耗时数分钟）…");
+        if (pollRef.current) window.clearInterval(pollRef.current);
         pollRef.current = window.setInterval(async () => {
+          if (!mountedRef.current) {
+            if (pollRef.current) window.clearInterval(pollRef.current);
+            pollRef.current = null;
+            return;
+          }
           try {
             const p = await fetchReindexProgress(token);
+            if (!mountedRef.current) return;
             setProgress(p.progress);
             if (!p.running) {
               if (pollRef.current) window.clearInterval(pollRef.current);
@@ -303,7 +384,7 @@ function StatusTab({ token, onError }: TabProps) {
               setBusy(null);
               setProgress(null);
               setNotice(p.error ? `dense 重建失败：${p.error}` : `dense 重建完成：写入 ${p.summary?.indexed ?? 0} 条。`);
-              load();
+              reload();
             }
           } catch {
             /* 轮询瞬态失败忽略 */
@@ -312,11 +393,12 @@ function StatusTab({ token, onError }: TabProps) {
         return;
       }
     } catch (e) {
-      onError(e instanceof Error ? e.message : "重建失败");
+      if (mountedRef.current) onError(e instanceof Error ? e.message : "重建失败");
     }
-    setBusy(null);
+    if (mountedRef.current) setBusy(null);
   }
 
+  if (error) return <LoadError message={error} onRetry={reload} />;
   if (!status) return <p className="text-center text-gray-400">加载中…</p>;
   return (
     <div className="space-y-4">
@@ -562,14 +644,14 @@ function TryTab({ token, onError }: TabProps) {
 /* ── 运行轨迹 ───────────────────────────────────────────────────────────── */
 
 function RunsTab({ token, onError }: TabProps) {
-  const [runs, setRuns] = useState<RunRecord[] | null>(null);
+  const { data, error, reload } = useAsyncData(
+    (t: string) => fetchRagRuns(t).then((d) => d.runs),
+    token,
+    onError,
+  );
+  const runs = data;
 
-  const load = useCallback(() => {
-    fetchRagRuns(token).then((d) => setRuns(d.runs)).catch((e) => onError(e instanceof Error ? e.message : "加载失败"));
-  }, [token, onError]);
-
-  useEffect(load, [load]);
-
+  if (error) return <LoadError message={error} onRetry={reload} />;
   if (runs === null) return <p className="text-center text-gray-400">加载中…</p>;
   if (runs.length === 0)
     return <p className="rounded-2xl border border-gray-200/80 bg-white p-8 text-center text-sm text-gray-400 shadow-sm">暂无运行记录（进程内最近 {50} 条；在「试运行」或 Agent 对话中发起查询后出现）。</p>;
@@ -595,7 +677,7 @@ function RunsTab({ token, onError }: TabProps) {
           </div>
         </details>
       ))}
-      <button onClick={load} className="rounded-full border border-gray-200 px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-50">
+      <button onClick={reload} className="rounded-full border border-gray-200 px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-50">
         刷新
       </button>
     </div>
@@ -605,20 +687,20 @@ function RunsTab({ token, onError }: TabProps) {
 /* ── 评测报告 ───────────────────────────────────────────────────────────── */
 
 function EvalTab({ token, onError }: TabProps) {
-  const [evalReport, setEvalReport] = useState<RagEval | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const { data: evalReport, error, reload } = useAsyncData(fetchRagEval, token, onError);
 
-  useEffect(() => {
-    fetchRagEval(token)
-      .then((d) => { setEvalReport(d); setLoadError(null); onError(null); })
-      .catch((e) => setLoadError(e instanceof Error ? e.message : "加载失败"));
-  }, [token, onError]);
-
-  if (loadError)
+  if (error)
     return (
       <div className="rounded-2xl border border-gray-200/80 bg-white p-8 text-center shadow-sm">
-        <p className="text-sm text-gray-500">{loadError}</p>
+        <p className="text-sm text-gray-500">{error}</p>
         <p className="mt-2 font-mono text-xs text-gray-400">python tools/eval_rag.py --limit 50</p>
+        {/* 本 tab 原本是 4 个里唯一有失败提示的，但仍无重试入口；统一到 reload */}
+        <button
+          onClick={reload}
+          className="mt-3 rounded-lg border border-gray-200 bg-white px-4 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+        >
+          重试
+        </button>
       </div>
     );
   if (!evalReport) return <p className="text-center text-gray-400">加载中…</p>;
