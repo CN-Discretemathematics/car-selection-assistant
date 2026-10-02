@@ -20,15 +20,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from app.retrieval.backends import SearchChunk
-from app.retrieval.config import (
+from app.retrieval.backends import SearchChunk  # noqa: E402  load_dotenv() 必须先跑
+from app.retrieval.config import (  # noqa: E402  同上：config 在 import 期读环境
     EMBEDDING_MODEL,
     EMBEDDING_PROVIDER,
     MILVUS_DIM,
     MILVUS_URI,
     RETRIEVAL_BACKEND,
 )
-from app.retrieval.zilliz import ZillizRestRetriever
+from app.retrieval.zilliz import ZillizRestRetriever  # noqa: E402  同上
 
 
 class FakeEmbedder:

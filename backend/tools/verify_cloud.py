@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from app.common.redis_client import get_redis, reset_redis
+from app.common.redis_client import get_redis, reset_redis  # noqa: E402  load_dotenv() 必须先跑
 
 
 def main() -> int:
