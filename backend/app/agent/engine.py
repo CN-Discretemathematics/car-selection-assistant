@@ -652,6 +652,50 @@ async def _load_profile(store: SessionStore, session_id: str) -> UserProfile:
         return fresh
 
 
+# 回答里的来源引用条数上限（多数回答类型只展示前 3 个来源，避免引用刷屏）
+CITATION_LIMIT = 3
+
+
+def _source_citations(
+    db: Session,
+    source_ids: list[int],
+    *,
+    label_suffix: str,
+    limit: int | None = CITATION_LIMIT,
+) -> list[Citation]:
+    """把来源 id 列表变成带来源名的引用列表（label 形如「<来源名> <后缀>」）。
+
+    2026-10-02 抽取。此前「查 Source → 循环 → Citation」这段在
+    `_comparison_analysis_reply` / `_catalog_overview_reply` /
+    `_brand_overview_reply` / `_tool_loop_reply` 各写一份，逐字相同却**上界不一致**：
+
+      | 调用点                        | 循环上界            | label 后缀   |
+      |-------------------------------|---------------------|--------------|
+      | _comparison_analysis_reply    | source_ids[:3]      | 配置数据     |
+      | _catalog_overview_reply       | **source_ids（无上限）** | 车型数据 |
+      | _brand_overview_reply         | source_ids[:3]      | 车型数据     |
+      | _tool_loop_reply              | sorted(...)[:3]     | 数据         |
+
+    统一后差异以参数暴露（`limit` / `label_suffix`），**行为逐字保持不变**——
+    盘点回答至今不下限、其余三条限 3，是既有行为，不是本轮引入的。
+    是否该统一属产品口径决策，留给评审拍板（见 docs/refactoring-roadmap.md）。
+    """
+    if not source_ids:
+        return []
+    names = {
+        s.id: s.name for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
+    }
+    ordered = source_ids if limit is None else source_ids[:limit]
+    return [
+        Citation(
+            source_id=sid,
+            source_name=names.get(sid),
+            label=f"{names.get(sid) or '来源'} {label_suffix}",
+        )
+        for sid in ordered
+    ]
+
+
 class AgentEngine:
     def __init__(self, llm: LLMClient | None = None, store: SessionStore | None = None) -> None:
         self._llm = llm or get_llm_client()
@@ -1219,14 +1263,7 @@ class AgentEngine:
                 if f.get("source_id")
             }
         )
-        if source_ids:
-            names = {
-                s.id: s.name for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
-            }
-            for sid in source_ids[:3]:
-                citations.append(
-                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 配置数据")
-                )
+        citations.extend(_source_citations(db, source_ids, label_suffix="配置数据"))
         out = AgentMessageOut(
             session_id=session_id,
             explanation=text,
@@ -1301,15 +1338,11 @@ class AgentEngine:
             )
         citations: list[Citation] = []
         source_ids = overview.get("source_ids") or []
-        if source_ids:
-            names = {
-                s.id: s.name
-                for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
-            }
-            for sid in source_ids:
-                citations.append(
-                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 车型数据")
-                )
+        # 盘点回答盼不下限（与其余三条的 [:3] 不同）——
+        # 属既有行为，本轮保持不变，差异已记入 roadmap。
+        citations.extend(
+            _source_citations(db, source_ids, label_suffix="车型数据", limit=None)
+        )
         out = AgentMessageOut(
             session_id=session_id,
             explanation=text,
@@ -1333,15 +1366,7 @@ class AgentEngine:
         text = self._brand_overview_text(profile, overview, energy_filter)
         citations: list[Citation] = []
         source_ids = sorted({s for s in (i.get("source_id") for i in overview["series"]) if s})
-        if source_ids:
-            names = {
-                s.id: s.name
-                for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
-            }
-            for sid in source_ids[:3]:
-                citations.append(
-                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 车型数据")
-                )
+        citations.extend(_source_citations(db, source_ids, label_suffix="车型数据"))
         out = AgentMessageOut(
             session_id=session_id,
             explanation=text,
@@ -1623,15 +1648,11 @@ class AgentEngine:
 
         # 引用只在「答案里确实出现数字」时附加：纯解释/拒答类回答不制造误导性溯源
         citations: list[Citation] = []
+        # 正文数字全部能溯源到这批来源时才引用（无数字则无需引用）
         if source_ids and any(ch.isdigit() for ch in final_text):
-            names = {
-                s.id: s.name
-                for s in db.scalars(select(Source).where(Source.id.in_(sorted(source_ids)))).all()
-            }
-            for sid in sorted(source_ids)[:3]:
-                citations.append(
-                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 数据")
-                )
+            citations.extend(
+                _source_citations(db, sorted(source_ids), label_suffix="数据")
+            )
         out = AgentMessageOut(
             session_id=session_id,
             explanation=final_text,
