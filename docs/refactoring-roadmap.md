@@ -152,6 +152,24 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 与原实现逐字一致。
 
 **能源类型泛化此前有 3 份实现，其中 2 份行为并不一致**（详见 P4 台账上方）。
+
+**来源引用块抽取时找出的既有口径差异（待产品拍板）**：「查 Source → 循环 → Citation」
+此前 4 处逐字复制，但**循环上界不一致**：
+
+| 调用点 | 循环上界 | label 后缀 |
+| --- | --- | --- |
+| `_comparison_analysis_reply` | `source_ids[:3]` | 配置数据 |
+| **`_catalog_overview_reply`** | **`source_ids`（无上限）** | 车型数据 |
+| `_brand_overview_reply` | `source_ids[:3]` | 车型数据 |
+| `_tool_loop_reply` | `sorted(source_ids)[:3]` | 数据 |
+
+即一次全库盘点可能返回**远多于 3 条**来源引用，而其他回答类型最多 3 条。
+
+已统一为 `_source_citations(db, ids, label_suffix=..., limit=...)`，**行为逐字保持不变**，
+差异以参数显式暴露。**不擅自统一口径的理由**：能源泛化那次能判定一侧是错的
+（用户点名 ICE 却拿不到 ICE）；这里没有任何证据说明盘点无上限是笔误还是刻意
+（如实列全来源）。已补 9 例测试钉住现状——将来若有人「顺手统一」，会先失败并
+看到这是既有行为。
 `agent/tools.py` 的两份**行为并不一致**：
 
 | 用户偏好 | SQL 下推（集合展开） | Python 侧过滤（旧逐 variant 判定） | 净效果 |
@@ -176,7 +194,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | 目标 | 现状 | 动作 |
 | --- | --- | --- |
 | 能源类型泛化规则 | 写 3 遍：`backend/app/agent/engine.py:240-259`、`backend/app/agent/tools.py:313-333`、`backend/app/agent/engine.py:292-299` | 提取单一实现，三处调用。**前置测试：三处当前输出一致**（今天一致，但无任何东西强制它） |
-| 来源引用块 | copy-paste 6 遍（`backend/app/agent/engine.py:1029-1042` 等），`[:3]` 上限与 `or '来源'` 兜底**微妙不一致** | 提取单一 `_source_citation_block()`；**6 处逐个对照差异并记录**——不一致本身就是缺陷线索 |
+| 来源引用块 | copy-paste 6 遍 | ✅ **本轮已完成** → `engine.py` 的 `_source_citations()`（实为两个家族共 4 处同构实现；抽取时**找出一处既有口径差异**，见下） |
 | `tools/` CLI 样板 | 8 份逐字重复 | ✅ **本轮已完成** → `tools/_bootstrap.py` |
 | 能源类型泛化规则 | 3 份（其中 2 份行为不一致） | ✅ **本轮已完成** → `app/common/enums.py`（并修掉真实缺陷） |
 | 前端 `官方资料未披露` 字面量 | 散落 4 处 | ✅ **本轮已完成** → `web/lib/labels.ts`，与后端 `MISSING_VALUE_LABEL` 对齐 |
