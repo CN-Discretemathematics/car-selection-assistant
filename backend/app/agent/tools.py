@@ -6,9 +6,11 @@
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.agent.schemas import UserProfile
@@ -303,6 +305,11 @@ def _tradeoff_gaps(
     return gaps
 
 
+# 候选集超过此数即告警：说明本次推荐退化成「全库扫描 + 全量评分」。
+# 单纯加 SQL LIMIT 会改变推荐结果，故先量化再决策（见 recommendation_tool 内注释）。
+_CANDIDATE_SCAN_WARN = 500
+
+
 def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> dict:
     """确定性推荐：PostgreSQL 硬条件筛选 + 软评分。
 
@@ -368,6 +375,29 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
     if profile.budget.max is not None:
         price_cond.append(OfficialPrice.price_cny <= profile.budget.max)
     stmt = stmt.where(VehicleVariant.id.in_(select(OfficialPrice.variant_id).where(*price_cond)))
+
+    # ── 候选集规模（2026-10-02 P5.1）────────────────────────────────────
+    # 这条 stmt **故意不加 LIMIT**：排名由下方 8 维软评分决定，而评分需要全量事实，
+    # SQL 侧无法复现同一排序；随手加 limit 会让「取前 N 条」变成「随便取 N 条」——
+    # 推荐结果会静默改变，且没有任何东西能证明被丢掉的那些更差。
+    #
+    # 但代价是真实的：用户没给预算/品牌/锁定时，本 stmt 匹配**全库**在售款型，
+    # 全部物化进 Python 再逐个评分（README 记录的 181s 端到端预算主要成分）。
+    #
+    # 先把量测出来再决定怎么改：一次 COUNT(*) 比物化全表便宜得多，
+    # 记进日志与返回体的 candidates_scanned，让「多大」成为可观测事实而非猜测。
+    candidates_scanned = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    if candidates_scanned > _CANDIDATE_SCAN_WARN:
+        logging.getLogger("app.agent.recommendation").info(
+            json.dumps(
+                {
+                    "candidates_scanned": candidates_scanned,
+                    "limit": limit,
+                    "note": "无预算/品牌/锁定约束时退化为全库扫描；加 LIMIT 会改变推荐结果",
+                },
+                ensure_ascii=False,
+            )
+        )
 
     variants = db.scalars(stmt).all()
     variant_ids = [v.id for v in variants]
@@ -609,7 +639,11 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
 
     top = scored[:limit]
     return {
+        # candidates_scanned = SQL 命中的候选数（= 实际参与评分的款型数）；
+        # count = 通过全部硬约束与 Python 侧过滤后真正打分的条数。
+        # 两者差距大说明约束把候选挡掉了不少；候选数本身就大则说明是全库扫描。
         "count": len(scored),
+        "candidates_scanned": candidates_scanned,
         "variants": [item[1] for item in top],
         "weights_used": weights,
     }

@@ -258,9 +258,9 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | # | 位置 | 问题 |
 | --- | --- | --- |
 | H1 | `backend/app/agent/session.py:107` 等四个 getter | Redis 首次不可达即**永久锁存**进程内实现，多 worker 脑裂 |
-| H2 | `backend/app/agent/tools.py:345`、`400-404` | 无 SQL LIMIT，全量物化；销量子查询无月份谓词 |
+| H2 | `backend/app/agent/tools.py` 硬约束 stmt | 无 SQL LIMIT，全量物化；销量子查询无月份谓词 —— ⚠️ **已加可观测化未改行为**：见 P5.1 节。LIMIT 会静默改变推荐结果，需先跑检索评测对齐基线 |
 | H3 | `backend/app/agent/engine.py` 14 处 | `async def` 内裸调同步 `Session`，阻塞事件循环 |
-| H4 | `backend/app/agent/series_qa.py:495-506` | 两条最热问答路径的 N+1 |
+| H4 | `backend/app/agent/series_qa.py` | 两条最热问答路径的 N+1 —— ✅ **已修**（P5.2）→ `catalog.services.variants_current_prices` / `variants_facts`，5 例逐条等价性回归（性能优化的前提是结果逐字相同） |
 | H5 | `backend/app/agent/engine.py:677-679` | shadow 任务异常从未取回，静默死亡 |
 | H6 | `backend/app/sources/autohome_sku.py:25-28` | `MOBILE_UA` 伪装 iPhone，与 README 合规声明矛盾 |
 | H7 | `web/app/compare/page.tsx:49,63,126,160` | 4 请求串行瀑布；后端每次查看执行**两次** `analyze_comparison` |
@@ -338,8 +338,8 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 
 | 项 | 收益 / 风险 |
 | --- | --- |
-| H2 `recommendation_tool` 加 SQL LIMIT | 最大延迟项，**每请求无缓存**。**风险**：LIMIT 必须在硬过滤之后、评分之前，且必须复现相同行集而非截断行集——**超出纯搬迁范围，需独立产品评审** |
-| H4 `series_qa` N+1 | 批量装载价格与 facts |
+| H2 `recommendation_tool` 加 SQL LIMIT | 最大延迟项，**每请求无缓存**。⚠️ **本轮只做了可观测化，未改行为**：加 LIMIT 会让「取前 N 条」退化成「随便取 N 条」（排名由 8 维软评分决定，SQL 侧复现不了同一排序），推荐结果静默改变且无法证明被丢掉的更差。已加 `candidates_scanned`（一次 COUNT）+ 超阈告警 + 7 例回归（`limit` 只截断输出、不改变入选者）。**真要收敛需先跑检索评测对齐基线**，本机无向量库/无 LLM key 跑不了 |
+| H4 `series_qa` N+1 | ✅ **已完成** → 批量装载价格与 facts（`catalog.services`），5 例等价性回归 |
 | `vehicles/router.py:41` 下推 SQL 过滤 | 须保持与 `/home`、详情页一致的口径 |
 | `engine.py` 4 次串行 `set_profile` | 收敛为末尾单次持久化 |
 | H6 `MOBILE_UA` → 诚实爬虫 UA | **合规修复**，不是风格调整 |
