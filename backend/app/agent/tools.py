@@ -310,6 +310,25 @@ def _tradeoff_gaps(
 _CANDIDATE_SCAN_WARN = 500
 
 
+# 8 维软评分默认权重（§17.2）。**模块级**而非函数内：engine.extract_hints 需要
+# 「默认 + 强调增量」算出绝对权重，若两处各写一份就会漂移（2026-10-03）。
+# 语义：profile.weights 里的值是**绝对权重**（覆盖），不是增量——API 直传权重
+# （POST /recommendations {"weights": {...}}）依赖这一点，故不在 tools 侧做叠加。
+DEFAULT_WEIGHTS: dict[str, float] = {
+    "budget": 0.30,
+    "usage": 0.15,
+    "space": 0.10,
+    "energy": 0.15,
+    "power": 0.10,
+    "comfort": 0.05,
+    "intelligence": 0.05,
+    "maintenance": 0.10,
+}
+# 单维权重上限：超过它意味着「只看这一个维度」，与「综合推荐」的产品意图相悖。
+# 重复说同一句强调会跨轮累加，没有上限时 profile 可以被一句话带到 3.0。
+WEIGHT_CEILING = 1.0
+
+
 def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> dict:
     """确定性推荐：PostgreSQL 硬条件筛选 + 软评分。
 
@@ -318,16 +337,6 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
     此前每次消息全量拉全部在售款型再 Python 过滤，大库下内存/延迟线性增长），
     剩余约束（座位数等基于事实的）在 Python 内完成。
     """
-    DEFAULT_WEIGHTS = {
-        "budget": 0.30,
-        "usage": 0.15,
-        "space": 0.10,
-        "energy": 0.15,
-        "power": 0.10,
-        "comfort": 0.05,
-        "intelligence": 0.05,
-        "maintenance": 0.10,
-    }
     weights = {**DEFAULT_WEIGHTS, **{k: float(v) for k, v in (profile.weights or {}).items() if v is not None}}
 
     # ── 第一层：硬约束下推 SQL ────────────────────────────────────────────

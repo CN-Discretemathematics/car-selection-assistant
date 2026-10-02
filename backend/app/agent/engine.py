@@ -71,7 +71,9 @@ from app.agent.series_qa import (
 )
 from app.agent.session import SessionStore, get_session_store
 from app.agent.tools import (
+    DEFAULT_WEIGHTS,
     TOOL_SCHEMAS,
+    WEIGHT_CEILING,
     comparison_tool,
     citation_verifier,
     recommendation_tool,
@@ -404,20 +406,50 @@ _USAGE_HINTS = {
 }
 
 # 评分维度关键词 → recommendation_tool 的 8 维权重键（§17.2 软评分）
+#
+# 2026-10-03（sales-agent-proposal L2 补齐）：新增词条的判定标准只有一条——
+# **这个维度在 recommendation_tool 里真的被计算，且这一轮真的被测到。**
+# sales-agent-proposal §2 举的典型销售话术「我最看重后排和家用」此前两个都落空：
+# 「后排」不在表里，「家用」在 _USAGE_HINTS 里但没有权重入口，用户的强调被静默丢弃。
 _WEIGHT_DIM_KEYWORDS: tuple[tuple[str, str], ...] = (
-    ("大空间", "space"), ("空间", "space"),
+    # 用途：8 维里**唯独没有关键词入口**的维度（DEFAULT_WEIGHTS 给它 0.15，最高）。
+    # 词表取 _USAGE_HINTS 键的**子集**，这是刻意的结构约束：只有同时也会写进
+    # profile.usage 的词，才能让 tools 侧把 usage 计入 measured 集合。
+    # 给 usage 加权却测不到 = 白白稀释其它维度而换不来任何排序变化。
+    # 该不变量由 tests/test_agent.py::test_usage_weight_keywords_are_measurable 钉住。
+    ("通勤", "usage"), ("上下班", "usage"), ("代步", "usage"),
+    ("家用", "usage"), ("家庭", "usage"), ("带娃", "usage"),
+    ("接送", "usage"), ("买菜", "usage"),
+    ("长途", "usage"), ("自驾", "usage"), ("旅游", "usage"),
+    ("出差", "usage"), ("商务", "usage"),
+    # 空间（space 由 length_mm 车长归一）：补销售高频的「后排/坐人」说法
+    ("大空间", "space"), ("空间", "space"), ("后排", "space"),
+    ("坐人", "space"), ("载人", "space"),
     ("动力", "power"), ("性能", "power"), ("马力", "power"), ("加速", "power"),
     ("续航", "energy"), ("油耗", "energy"), ("能耗", "energy"), ("电耗", "energy"),
     ("智驾", "intelligence"), ("智能", "intelligence"), ("辅助驾驶", "intelligence"),
     ("车机", "intelligence"), ("科技", "intelligence"),
     ("舒适", "comfort"), ("舒服", "comfort"), ("隔音", "comfort"),
-    ("保养", "maintenance"), ("维修", "maintenance"), ("省心", "maintenance"), ("售后", "maintenance"),
+    ("保养", "maintenance"), ("维修", "maintenance"), ("省心", "maintenance"),
+    ("售后", "maintenance"), ("网点", "maintenance"), ("配件", "maintenance"),
     ("性价比", "budget"), ("价格", "budget"),
 )
+# ⚠️ 「安全 / 碰撞 / 气囊」**刻意不映射到任何维度**（契约由测试钉住，见
+# tests/test_agent.py::test_safety_emphasis_is_deliberately_unmapped）：
+# 8 个维度的公式里**没有任何一个读安全类 fact_key**——budget←价格、usage←用途×车身、
+# space←length_mm、energy←能源类型、power←功率、comfort/intelligence←配置类事实键、
+# maintenance←品牌规模+销量活跃度。把「我最看重安全」映射到其中任何一个，都不会让排序
+# 更安全，只会让用户以为系统听懂了他最在意的东西——**用行为冒充理解**，比不回答更糟。
+# 真要支持，需要先加一个真读安全事实的维度（数据 + 公式 + 归一化），属新增能力，
+# 不是往这张表里加词能解决的。
 _EMPHASIS_RE = re.compile(
     r"(优先|最看重|比较看重|更看重|特别看重|最在意|比较在意|更在意|主要看|重点|看重|在乎|重视|希望)"
 )
-_WEIGHT_RAISE = 0.2  # 单次强调的权重增量（recommendation_tool 层归一化前叠加）
+# 单次强调的权重**增量**。⚠️ tools 侧 `profile.weights` 是**绝对权重（覆盖）**而非累加器，
+# 所以这里必须发出「默认值 + 增量」的绝对值，不能只发裸增量——
+# 否则默认本就高于增量的维度会被**反向压低**：「主要看价格」→ budget 由 0.30 掉到 0.20，
+# 用户越强调价格，系统越不看重价格（2026-10-03 实测发现，此前注释写「增量/叠加」而代码是覆盖）。
+_WEIGHT_RAISE = 0.2
 
 
 def extract_hints(message: str) -> dict:
@@ -510,11 +542,14 @@ def extract_hints(message: str) -> dict:
 
     # 评分权重线索（评审 M-R10/§17.2「权重来自用户对话」落地）：
     # 含强调词（优先/最看重/主要看…）且句中点到评分维度时，给出该维度的权重加成。
-    # 例：「空间优先，动力也要强」→ weights={space:+0.2, power:+0.2}
+    # 例：「空间优先，动力也要强」→ weights={space:0.30, power:0.30}
+    # （默认值 0.10 + 增量 0.2；发绝对值的原因见 _WEIGHT_RAISE 处的注释）
     if _EMPHASIS_RE.search(message):
         dims = sorted({dim for kw, dim in _WEIGHT_DIM_KEYWORDS if kw in message})
         if dims:
-            hints["weights"] = {dim: _WEIGHT_RAISE for dim in dims}
+            hints["weights"] = {
+                dim: round(DEFAULT_WEIGHTS.get(dim, 0.0) + _WEIGHT_RAISE, 3) for dim in dims
+            }
 
     return hints
 
@@ -596,10 +631,13 @@ def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
         profile.charging_tolerance = hints["charging_tolerance"]
     if hints.get("avoid"):
         profile.avoid = sorted(set(profile.avoid) | set(hints["avoid"]))
-    # 权重线索跨轮累加（如第一轮「空间优先」+0.2，后来说「再看重动力」动力也 +0.2）
+    # 权重线索跨轮累加（如第一轮「空间优先」0.30，后来说「再看重动力」动力也 0.30）。
+    # 上限 WEIGHT_CEILING：重复强调同一维度会线性累加，没有上限时一句车可以叠到 3.0，
+    # 那等于「只看这一个维度」，与综合推荐的产品意图相悖（2026-10-03）。
     if hints.get("weights"):
         for dim, w in hints["weights"].items():
-            profile.weights[dim] = round(profile.weights.get(dim, 0.0) + float(w), 3)
+            merged = profile.weights.get(dim, 0.0) + float(w)
+            profile.weights[dim] = round(min(merged, WEIGHT_CEILING), 3)
     return profile
 
 
