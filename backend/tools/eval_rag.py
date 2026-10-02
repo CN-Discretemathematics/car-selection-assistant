@@ -54,6 +54,74 @@ from app.retrieval.config import CHUNK_OVERLAP, CHUNK_SIZE, RETRIEVAL_BACKEND
 EVAL_DEPTH = 10  # 取回深度：指标 @top_k 与 @10 都从这一份排序列表计算
 
 
+def _portable_anchors(db, questions: list[dict]) -> tuple[list[dict], dict]:
+    """把语料的 anchors 从「行号」重解析为「本库真实 id」。
+
+    ## 为什么需要这一步（2026-10-03 实测发现）
+
+    `eval/questions.json` 是 `gen_eval_questions.py` **从当时的数据库分层抽样**生成的，
+    `anchors.series_id` / `anchors.variant_id` 写的是那个库的**行号**。行号不是数据，
+    换个库（本地快照、另一个环境、重新导入的库）就全错位了，而行号错的**表现极有欺骗性**：
+    语料期望 series_id=901「英菲尼迪QX80」，本地导入后 901 恰好存在、却指向「智司LS6」——
+    于是检索再完美也判不出相关，Hit@5 变成 0.03。**看着像「检索崩了」，其实是标签指错了人。**
+
+    ## 判据（保守，宁可不动也不要错配）
+
+    1. 语料给的 id 在本库存在，**且该 id 的车系名出现在问句里** → 信任 id（原始库上零变化）；
+    2. 否则取「问句里出现的、本库中长度最长的车系名」→ 用它的 id（重解析）；
+    3. 都不成立 → 保持原样，并计入 stale，交由调用方告警。
+
+    返回 (questions, stats)。原地改写并返回同一列表是为了不改动下游所有函数签名。
+    """
+    series = [(int(s.id), str(s.name)) for s in db.scalars(select(VehicleSeries)) if s.name]
+    variants = [
+        (int(v.id), str(v.display_name))
+        for v in db.scalars(select(VehicleVariant))
+        if v.display_name
+    ]
+    name_by_id = dict(series)
+    variant_by_id = dict(variants)
+
+    stats = {"remapped": 0, "stale": 0, "total": 0, "sample_old": None, "sample_new": None}
+
+    def _resolve(raw: int, name_map: dict[int, str], candidates: list[tuple[int, str]], text: str) -> int:
+        raw = int(raw)
+        stats["total"] += 1
+        # 判据 1：id 在本库存在且其名称出现在问句里 → 信任 id（在原始库上零变化）
+        if raw in name_map and name_map[raw] and name_map[raw] in text:
+            return raw
+        # 判据 2：取问句里出现的、长度最长的本库名称
+        best = None
+        for cand_id, cand_name in candidates:
+            if len(cand_name) >= 2 and cand_name in text:
+                if best is None or len(cand_name) > len(best[1]):
+                    best = (cand_id, cand_name)
+        if best:
+            stats["remapped"] += 1
+            if stats["sample_old"] is None:
+                stats["sample_old"], stats["sample_new"] = raw, best[0]
+            return best[0]
+        # 判据 3：保持原样并计入 stale，交由调用方告警
+        stats["stale"] += 1
+        return raw
+
+    for q in questions:
+        text = q.get("text") or ""
+        anchors = q.setdefault("anchors", {})
+        if anchors.get("series_id"):
+            anchors["series_id"] = _resolve(anchors["series_id"], name_by_id, series, text)
+        for key in ("variant_id", "variant_ids"):
+            value = anchors.get(key)
+            if not value:
+                continue
+            if isinstance(value, list):
+                anchors[key] = [_resolve(v, variant_by_id, variants, text) for v in value]
+            else:
+                anchors[key] = _resolve(value, variant_by_id, variants, text)
+    stats["stale_ratio"] = (stats["stale"] / stats["total"]) if stats["total"] else 0.0
+    return questions, stats
+
+
 def _relevant_ids(q: dict, variant_series: dict[int, int]) -> set[int]:
     """问题的相关车系集合（anchors 即黄金判定）。"""
     anchors = q.get("anchors") or {}
@@ -397,6 +465,22 @@ def main(argv: list[str] | None = None) -> int:
         variant_series = {
             v.id: v.series_id for v in db.scalars(select(VehicleVariant)).all()
         }
+        questions, anchor_stats = _portable_anchors(db, questions)
+        if anchor_stats["remapped"]:
+            print(
+                f"锚点已按车系名重解析：{anchor_stats['remapped']} 处（语料 id 与本库行号不一致，"
+                f"原 id {anchor_stats['sample_old']}→{anchor_stats['sample_new']}）"
+            )
+        if anchor_stats["stale_ratio"] > 0.5:
+            print(
+                "\n" + "!" * 72 + "\n"
+                f"警告：{anchor_stats['stale_ratio']:.0%} 的锚点在本库找不到对应车系，"
+                "**下列指标不可与历史基线比较**。\n"
+                "原因：eval/questions.json 的 anchors 写的是**生成时那个数据库的行号**；"
+                "换一个库（本地快照 / 另一个环境）行号就对不上了。\n"
+                "对策：重跑 tools/gen_eval_questions.py 针对本库重新生成语料，"
+                "或使用与语料同源的库。\n" + "!" * 72 + "\n"
+            )
         print("构建判定上下文（约束/事实预载）…")
         eval_ctx = _build_eval_context(db)
         print("构建切片（load → chunk）…")

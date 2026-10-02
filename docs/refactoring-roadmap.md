@@ -339,7 +339,8 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 
 | 项 | 收益 / 风险 |
 | --- | --- |
-| H2 `recommendation_tool` 加 SQL LIMIT | 最大延迟项，**每请求无缓存**。⚠️ **本轮只做了可观测化，未改行为**：加 LIMIT 会让「取前 N 条」退化成「随便取 N 条」（排名由 8 维软评分决定，SQL 侧复现不了同一排序），推荐结果静默改变且无法证明被丢掉的更差。已加 `candidates_scanned`（一次 COUNT）+ 超阈告警 + 7 例回归（`limit` 只截断输出、不改变入选者）。**真要收敛需先跑检索评测对齐基线**，本机无向量库/无 LLM key 跑不了 |
+| H2 `recommendation_tool` 加 SQL LIMIT | 最大延迟项，**每请求无缓存**。⚠️ **本轮只做了可观测化，未改行为**：加 LIMIT 会让「取前 N 条」退化成「随便取 N 条」（排名由 8 维软评分决定，SQL 侧复现不了同一排序），推荐结果静默改变且无法证明被丢掉的更差。已加 `candidates_scanned`（一次 COUNT）+ 超阈告警 + 7 例回归（`limit` 只截断输出、不改变入选者）。**评测兜底已于 2026-10-03 建成**（见下），H2 现在具备 A/B 前提 |
+
 | H4 `series_qa` N+1 | ✅ **已完成** → 批量装载价格与 facts（`catalog.services`），5 例等价性回归 |
 | `vehicles/router.py:41` 下推 SQL 过滤 | 须保持与 `/home`、详情页一致的口径 |
 | `engine.py` 8 次串行 `set_profile` | ✅ **已部分收敛**（P5.4 / M4）：3 次连续写合并为 1 次无条件写，8 → 6。剩余 6 处职责互不替代，再合并会改变「退路分支也持久化」的语义 |
@@ -351,6 +352,54 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `Reveal.tsx` 客户端组件下沉 | 约 40 个实例 / 40 个 observer → 单个共享 observer 或 CSS `animation-timeline: view()`。**诚实定位：中等 hydration 收益，不是整页 SSR 救赎** |
 
 ---
+
+
+## 7.1 检索评测兜底（2026-10-03 建成，H2 的前置条件）
+
+**先更正一条我此前写错的话**：原文说「真要收敛需先跑检索评测对齐基线，本机无向量库/
+无 LLM key 跑不了」。**这是错的**——`tools/eval_rag.py` 的 `--with-dense` 是**可选**开关，
+sparse 策略纯靠 BM25；语料的 `expect` 是结构化标注，也不需要 LLM。真正的门槛是
+**「有一个装了真实数据的库」+「语料的 anchors 与该库对得上」**。
+
+**怎么建起这个兜底的**（本机实测可复现）：
+
+```powershell
+cd backend
+$env:DATABASE_URL='sqlite:///.tmp/eval-local.db'   # 仓库自带 snapshots/prod-seed.json（175MB 真实快照）
+$env:RETRIEVAL_BACKEND='inmemory'
+.\.venv\Scripts\python.exe tools\import_data.py snapshots\prod-seed.json   # 908 车系 / 6629 款型 / 743276 条事实
+.\.venv\Scripts\python.exe tools\eval_rag.py --report .tmp\eval-portable.json
+```
+
+**过程中挖出的真问题：语料不可移植，且失败方式极具欺骗性。**
+`eval/questions.json`（520 题）的 `anchors.series_id` 写的是**生成时那个库的行号**。
+换库后行号全错位，而错位后的表现是：语料期望 `series_id=901`（英菲尼迪QX80），本地导入后
+901 **恰好存在**却指向「智己LS6」——检索做得再好也判不出相关，**Hit@5 只有 0.031**。
+看着像「检索能力崩了」，实际是**标签指错了人**，而且它不报错，只安静地给出一个
+看起来很专业的低分。
+
+修法：给 eval_rag 加一层锚点重解析（`_portable_anchors`）——id 与名称一致就**信任 id**
+（在原始库上零行为变化），错位则按问句里出现的**最长车系名**重解析，两者都不成立就
+**计入 stale 并在控制台大声告警**。宁可拒绝报数，也不能让人把 0.03 当成回退。
+3 例契约测试钉住这三条判据。
+
+**本地快照库实测基线**（与 README 的生产库数字**不可直接比较**，仅供同库 A/B）：
+
+| 策略 | Hit@5 | MRR | NDCG@10 |
+| --- | --- | --- | --- |
+| sparse-nooverlap | 0.6475 | 0.6277 | 0.5237 |
+| sparse | 0.6475 | 0.6277 | 0.5237 |
+| pipeline | 0.6341 | 0.6126 | 0.5755 |
+| pipeline-norerank | 0.6341 | 0.6129 | 0.5757 |
+
+重解析把 Hit@5 从 0.031 拉到 0.6475，**回到 README 基线 0.6763 的量级**（差异来自
+快照库不是生产库）。顺带看到 `pipeline` 的 NDCG@10 比 `sparse` 高 0.05——正是这套
+评测该给出的那种信息。
+
+⚠️ **仍未解决**：`faithful_db` 0.7765 与拒答 60-60 来自 `tools/eval_judge.py`，
+**那一条确实需要 LLM key**，本机跑不了。README 里那组数字的**生产库版**也仍需在
+生产库上重跑一次才能确认——本轮证明了它**能**被复现的路径，不等于已复现。
+
 
 ## 8. P6｜坏味道治理（全表最低优先级）
 
