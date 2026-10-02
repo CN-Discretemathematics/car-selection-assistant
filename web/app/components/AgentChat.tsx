@@ -535,7 +535,13 @@ function AddFromAgent({ variantId }: { variantId: number }) {
           window.alert("最多同时对比 5 个款型，请先移除部分车型。");
           return;
         }
-        writeCompareIds([...ids, variantId]);
+        // 写失败（无痕模式 / 禁用 Cookie / 配额满）时不能置 added：
+        // 否则按钮显示「已加入」，对比栏里却没有这一台——文案说加入了、实际没有，
+        // 比不响应更难排查。writeCompareIds 此前返回 void，调用方无从判断。
+        if (!writeCompareIds([...ids, variantId])) {
+          window.alert("浏览器禁用了本地存储，无法加入对比（可能处于无痕模式）。");
+          return;
+        }
         setAdded(true);
       }}
       className={`press rounded-full px-3 py-1 text-xs font-medium ${

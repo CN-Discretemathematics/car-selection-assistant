@@ -35,15 +35,19 @@ export default function AddToCompareButton({ variantId }: { variantId: number })
 
   const toggle = useCallback(() => {
     const ids = readCompareIds();
-    if (ids.includes(variantId)) {
-      writeCompareIds(ids.filter((id) => id !== variantId));
-      setSelected(false);
-    } else if (ids.length >= MAX_COMPARE) {
+    const removing = ids.includes(variantId);
+    if (!removing && ids.length >= MAX_COMPARE) {
       window.alert(`最多同时对比 ${MAX_COMPARE} 个款型，请先移除部分车型。`);
-    } else {
-      writeCompareIds([...ids, variantId]);
-      setSelected(true);
+      return;
     }
+    const next = removing ? ids.filter((id) => id !== variantId) : [...ids, variantId];
+    if (!writeCompareIds(next)) {
+      // 存储不可用（无痕模式 / 禁用 Cookie / 配额满）。必须如实说，不能让用户
+      // 看着「已加入对比」却发现对比栏里根本没有它——那是另一种「用行为冒充理解」。
+      window.alert("浏览器禁用了本地存储，无法保存对比选择（可能处于无痕模式）。");
+      return;
+    }
+    setSelected(!removing);
   }, [variantId]);
 
   return (
