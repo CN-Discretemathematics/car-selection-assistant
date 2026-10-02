@@ -23,20 +23,55 @@ class _Session:
 
 
 class SessionStore:
+    # 2026-10-02：给进程内实现加两道**上界**，此前两者都没有：
+    #
+    # 1) MAX_SESSIONS —— TTL 只能淘汰「超过 1 小时未活跃」的会话，
+    #    因此稳态内存 = 最近一小时的**全部**会话数，随流量线性增长、
+    #    无上界。进程内实现用于未配置 Redis 的开发/降级场景，
+    #    撞上高流量就是无界增长。超出上限按**最久未活跃**淘汰——
+    #    与 TTL 同一把尺子，不引入第二套语义。
+    # 2) PRUNE_INTERVAL_SECONDS —— 原先 _prune() 在**每一次**读操作上遍历
+    #    全部会话，是 O(n)/请求；会话多时 CPU 开销与内存一起线性涨。
+    #    改为最多每 30s 扫一次：TTL 本来就是秒级容忍的语义，
+    #    30s 的清理延迟不改变可观察行为，却把摊销成本降到 O(1)/请求。
+    MAX_SESSIONS = 2000
+    PRUNE_INTERVAL_SECONDS = 30.0
+
     def __init__(self, ttl_seconds: int | None = None) -> None:
-        self._ttl = ttl_seconds or get_settings().agent_session_ttl_seconds
+        # `or default` 会把 **0 当成未传**（0 是 falsy），使 ttl_seconds=0 静默变成
+        # 3600s——「立即过期」在测试里根本设不出来，只能改用 -1 绕开。
+        # 显式判 None 才符合参数语义。
+        self._ttl = get_settings().agent_session_ttl_seconds if ttl_seconds is None else ttl_seconds
         self._data: dict[str, _Session] = {}
+        self._last_pruned: float = 0.0
 
     def create(self) -> str:
+        self._prune()
         session_id = uuid.uuid4().hex
         self._data[session_id] = _Session(last_seen=time.time())
         return session_id
 
-    def _prune(self) -> None:
+    def _prune(self, *, force: bool = False) -> None:
+        """按 TTL 淘汰过期会话；仍然超上限时再按最久未活跃淘汰。
+
+        节流：默认最多每 PRUNE_INTERVAL_SECONDS 秒扫一次。
+        `force=True` 供需要立即生效的路径（如 clear/delete）使用。
+        """
         now = time.time()
+        if not force and now - self._last_pruned < self.PRUNE_INTERVAL_SECONDS:
+            return
+        self._last_pruned = now
+
         expired = [sid for sid, s in self._data.items() if now - s.last_seen > self._ttl]
         for sid in expired:
             self._data.pop(sid, None)
+
+        # TTL 之后仍可能超上限（最近一小时的会话数本身无上界）
+        overflow = len(self._data) - self.MAX_SESSIONS
+        if overflow > 0:
+            oldest = sorted(self._data.items(), key=lambda kv: kv[1].last_seen)[:overflow]
+            for sid, _s in oldest:
+                self._data.pop(sid, None)
 
     def exists(self, session_id: str) -> bool:
         self._prune()
@@ -96,8 +131,11 @@ class SessionStore:
         return True
 
     def delete(self, session_id: str) -> bool:
-        """彻底删除会话（其后任何请求都应视为会话不存在）。"""
-        self._prune()
+        """彻底删除会话（其后任何请求都应视为会话不存在）。
+
+        强制立即清理：调用方要的是「现在就没了」，不能等节流窗口。
+        """
+        self._prune(force=True)
         return self._data.pop(session_id, None) is not None
 
 
