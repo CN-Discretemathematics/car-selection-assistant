@@ -34,6 +34,10 @@
 - backend：`backend\.venv\Scripts\python.exe -m pytest -q`（在 `backend/` 下）
 - web：`pnpm --dir web exec tsc --noEmit`；改 UI 后按需 `next build`（先停 `next dev`，
   两者共用 `.next` 会互相破坏）
+- **eslint（2026-10-03 起已装且阻塞）**：`cd web` 后 `pnpm exec eslint . --max-warnings 0`。
+  基线 0。注意本机 pnpm 与 CI 的 pnpm major 不同（见 docs/refactoring-roadmap.md 的
+  「pnpm 版本三处不一致」），`web/pnpm-workspace.yaml` 已被 gitignore——**不要提交它**，
+  提交会让 CI 的 `pnpm install --frozen-lockfile` 直接失败。
 - 文案/密钥/文档门禁：`reviewer/scan_ui_copy.py`、`reviewer/scan_secrets.py`、
   `skills/doc_sync_check.py`（计数/悬空引用/配置表/编码；退出码必须 0，CI gates job 已接线。
   2026-09-16 实例：README 用例数 313 未随实际 347 更新，就是它抓出来的。

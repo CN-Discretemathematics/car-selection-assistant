@@ -302,7 +302,7 @@ fan-out 指标与本文件的人工评审共同覆盖。待补的检查应扫描
 | `doc_sync_selftest.py` | ✅ 已接进 `gates` job（P0 修复，2026-10-02；此前不在任何 job） |
 | 覆盖率 | ✅ **实测 87%**，`fail_under=85` 棘轮已生效，`coverage.xml` 归档（P0 修复，2026-10-03；此前 pyproject 声明了口径而 CI 从未传 `--cov`） |
 | ruff | ⚠️ **配置已建 + 已接进 `lint` job（report-only）**，基线 130 条。**不阻塞合入**：85 条集中在 F401/I001，而自动修复有真实风险（I001 会把 `app.*` 排到 `load_dotenv()` 之前；F401 会删掉 `__init__` 的 re-export） |
-| eslint | ❌ 配置在 `web/eslint.config.mjs`，但依赖刻意未加进 `package.json`（加了不更新 lockfile 会让 CI `--frozen-lockfile` 失败），故**仍未执行** |
+| eslint | ✅ **已安装并接入 CI（阻塞，基线 0 error / 0 warning）**。依赖用 `pnpm add` 正常写入（package.json + lockfile 同步，`--frozen-lockfile` 不受影响）。另用 `--report-unused-disable-directives` 验证：既有 6 处抑制注释**全部仍生效** |
 | 依赖升级扫描 | ❌ 无 |
 | pre-push 门禁 | ✅ 已接进 `gates` job（**当前只报不拦**，因范围内含历史违规提交 `f590eb2`，按 R13 不追溯） |
 | 门禁自写回 | ✅ `autofix` 改为只发 PR 评论，权限降到 `pull-requests: write`（P1 修复） |

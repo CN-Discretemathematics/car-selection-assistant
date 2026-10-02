@@ -101,7 +101,8 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 | 删 `vendor` 死配置 | ✅ 两处 PYTHONPATH 已清理 |
 | `tools/quality_metrics.py` | ✅ 已建并**实跑通过**。纯标准库 AST，8 维看板，CI 归档为 artifact。这是 P6 泳道的「可见性」技术实现 |
 | **ruff 实测存量（P0.1）** | ✅ **2026-10-03 完成**。装上 ruff 0.16.10 首跑，立刻暴露三个此前「声明了但从未执行」的事实：① 配置里的 `pylint.ignore-variadic-names` 已被移除，`ruff check` 在读配置阶段就 exit 2；② `shadow_report.py` 用了 **3.12-only 的 f-string 转义**，而本仓对外声明 3.11+（CI 与生产镜像都是 3.12，所以谁也没撞到）；③ 复杂度阈值因 `C90`/`PLR` 未 select 而从不产出报告。修完 ①②，**基线 130 条**（F401 45 / I001 40 / F841 7 / B905 7 / 其余零散），已接进 CI `lint` job（report-only） |
-| eslint 实跑 | ❌ 未完成（本机 pnpm 会试图重装 node_modules，已按 R10 规避）。配置在 `web/eslint.config.mjs`，依赖仍未加进 `package.json` |
+| eslint 实跑 | ✅ **2026-10-03 完成**：`pnpm add -D eslint@^9 eslint-config-next@^15.5.27 @eslint/eslintrc`（lockfile 同步更新），`pnpm run lint` 基线 **0 error / 0 warning**，已接进 `web` job 并**阻塞**。顺带用 `--report-unused-disable-directives` 验证既有 6 处抑制注释全部仍生效 |
+| pnpm 版本三处不一致 | ⚠️ **2026-10-03 实测发现，未修**（会改生产安装路径，需产品/运维拍板）：CI 固定 pnpm 9；生产 `deploy/frontend.Dockerfile` 用 `corepack enable` 且**未钉版本**（package.json 无 `packageManager` 字段）；本机 pnpm 11.9.0。连带后果：pnpm 11 的 `pnpm-workspace.yaml` 构建审批机制在另两处不生效，而该文件在 pnpm 9 与 11 上**互斥**（pnpm 9 缺 `packages` 字段直接报错；补上后 pnpm 11 会静默跳过安装并清空 node_modules）——故已 .gitignore 掉，理由写在 .gitignore 注释里。收敛方向是**三处统一钉一个 major**（需在 package.json 加 `packageManager` 并同步 CI 与 Dockerfile） |
 | 覆盖率 `fail_under` | ✅ **2026-10-03 实测并设下限**：`pytest-cov 7.1.0` 实测 **87%**（7395 语句 / 778 未覆盖 / 分支 389 条部分覆盖），下限设 **85**（留 2 点平台余量，避免单平台采样值正好压在地板上给 CI 埋雷）。⚠️ 同时发现 pyproject 声明了覆盖率口径而 **CI 从未传 `--cov`**，现已补上传参 + `coverage.xml` artifact |
 
 > 降级路径按 R11 执行：配置按证据写、不谎报已绿；能跑的部分（`quality_metrics.py`）**已实跑验证**并成为 P6 的真实看板。

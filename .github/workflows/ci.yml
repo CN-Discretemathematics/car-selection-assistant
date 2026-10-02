@@ -197,7 +197,7 @@ jobs:
           retention-days: 90
 
   web:
-    name: web (tsc + build)
+    name: web (lint + tsc + build)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -215,6 +215,18 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      # 2026-10-03 接入 eslint：eslint.config.mjs 从 4cdd7cc 起就存在、package.json
+      # 里 `lint` 脚本也一直有，但**依赖从未安装、CI 也从不执行**——第四份「声明了
+      # 但从不执行」的承诺。依赖已用 pnpm add 正常写入（package.json + lockfile 同步，
+      # 故 --frozen-lockfile 不受影响）。
+      #
+      # **这一条是阻塞的**（与 ruff 的 report-only 不同）：本地实跑基线是
+      # 0 error / 0 warning，且 lockfile 钉死了 eslint 与全部插件版本。
+      # 另用 --report-unused-disable-directives 验证过：仓库既有 6 处抑制注释
+      # （4 处 @next/next/no-img-element + 2 处 react-hooks/exhaustive-deps）
+      # **全部仍在生效**，没有一条是失效的僵尸注释。
+      - name: eslint（阻塞，基线 0）
+        run: pnpm exec eslint . --report-unused-disable-directives --max-warnings 0
       - run: pnpm exec tsc --noEmit
       # 2026-10-02 补：package.json 里 test 脚本从 4cdd7cc 起就存在，
       # 但此前 CI 只跑 install/tsc/build——**前端测试从未在 CI 执行过**。
