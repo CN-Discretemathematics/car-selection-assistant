@@ -138,7 +138,20 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 | `backend/tools/_bootstrap.py` + `tools/__init__.py` | ✅ 19 个脚本的 `sys.path.insert` 样板收敛为一次 import；**96 处 `noqa: E402` 全部消失**——因为 E402 只在「import 之前出现非 import 代码」时触发，样板本身就是那条非 import 语句。**这是根因修复，不是把警告藏起来** |
 | 能源泛化规则 3 份 → 1 份（`app/common/enums.py`） | ✅ 并**顺带修掉一个真实缺陷**，见下 |
 
-**收敛时发现的真实缺陷（重要）**：能源泛化此前有 **3 份**实现，其中
+**前端 fetch 去重时挖出的缺陷（已修）**：`body?.detail` 这段此前在 4 处逐字重复，
+而 `body` 来自 `res.json().catch(() => null)`（类型 `any`）。后端 `detail` 并非总是
+字符串——FastAPI 的 422（`RequestValidationError`）返回的是**对象数组**：
+
+- `new Error(detailArray)` → message 变成 `"[object Object]"`；
+- `setError(body?.detail)` → 数组被当 React child 渲染，抛
+  `Objects are not valid as a React child` → **整页白屏**。
+
+compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag.ts` 的管理端请求与
+`auth.ts` 的表单提交**没有任何前置过滤**——后端加一条字段校验就是一次白屏。
+已收敛到 `web/lib/http.ts` 并在收窄处打类型，补 6 例回归；detail 为字符串时
+与原实现逐字一致。
+
+**能源类型泛化此前有 3 份实现，其中 2 份行为并不一致**（详见 P4 台账上方）。
 `agent/tools.py` 的两份**行为并不一致**：
 
 | 用户偏好 | SQL 下推（集合展开） | Python 侧过滤（旧逐 variant 判定） | 净效果 |
@@ -169,8 +182,8 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 | 前端 `官方资料未披露` 字面量 | 散落 4 处 | ✅ **本轮已完成** → `web/lib/labels.ts`，与后端 `MISSING_VALUE_LABEL` 对齐 |
 | 前端 `priceDisplay` 空值规则 | 3 份逐字三元式 | ✅ **本轮已完成** → `api.ts` 的 `resolvePriceRangeNote`，补 5 例测试 |
 | `formatPrice(null)` 与 `MISSING_VALUE_LABEL` 不一致 | 价格缺失说「暂无」，参数/在售款型缺失说「官方资料未披露」 | **刻意不改**：属产品口径决策（改 `formatPrice` 会影响所有调用点的用户可见文案）。已记入 `labels.ts` 注释，等产品拍板 |
-| 前端 fetch/`ok`/`json().catch` | 4 份 | 提取共用层，带上 `typeof body?.detail === "string"` 守卫 |
-| `HomeFilters` / `BrowseFilters` | ~85% 重复 | 提取共用组件 |
+| 前端 fetch/`ok`/`json().catch` | 4 份 | ✅ **本轮已完成** → `lib/http.ts`（**顺带修掉一处白屏**，见下） |
+| `HomeFilters` / `BrowseFilters` | ~85% 重复 | **本轮刻意不做**：两个组件都带「表单状态仅 mount 时播种、从不 resync」的既有缺陷（P5.12）。在缺陷未修前合并组件等于把 bug 一起固化；应先修 resync，再合并 |
 
 **不做**：`dedupe_duplicate_keys` 双份（有意为之 + 一致性夹具）、`_headers()`/`model()` 3 行访问器、
 `SessionStore`/`RedisSessionStore` 重复方法（语义已分歧，须先由 P4.3 统一）。
