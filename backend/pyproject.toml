@@ -21,6 +21,22 @@ requires-python = ">=3.11"
 # 依赖真值仍在 requirements.txt（生产镜像与 CI 都按它装）；此处不重复声明，
 # 避免两处漂移。需要完整元数据时改为 dynamic = ["dependencies"] + tool.setuptools。
 
+# ⚠️ 打包（P1.10）状态：**已声明、尚未启用**。
+#
+# 本项目是 flat layout（app/ tools/ tests/ alembic/ 并列），setuptools 的自动发现
+# 会因「发现多个顶层包」直接报错。不显式列出包，`pip install -e .` 必然失败。
+# 因此这里把包列表写死——app 与 tools 是运行时/运维真需要的两个包，tests 与
+# alembic 是非包目录（前者是测试、后者是迁移脚本），必须排除。
+#
+# 为什么不直接把 CI 的 `pip install -r requirements.txt` + `PYTHONPATH='.'`
+# 换成 `pip install -e .`：本机装不上 setuptools/wheel（网络受限），
+# **无法实测**这条路径。让 CI 去验证一条自己没跑过的安装方式，
+# 与本仓「不谎报已验证」的纪律冲突。故 CI 维持现状，切换留待首次实测后。
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "tools*"]
+exclude = ["tests*", "alembic*", "*.tests", "*.alembic"]
+
 # 开发/门禁专用依赖。**不进生产镜像**（deploy/backend.Dockerfile 只装 requirements.txt）。
 [project.optional-dependencies]
 dev = [
