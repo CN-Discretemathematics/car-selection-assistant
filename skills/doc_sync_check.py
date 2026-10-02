@@ -60,6 +60,9 @@ ALLOW_WORDS = ("删除", "移除", "取代", "一次性", "已完成使命", "�
                "旧", "改用", "已废弃", "清零", "计划", "待建", "规划")
 # 反引号 token 命中这些子串 = 占位/模板/通配，跳过
 TOKEN_SKIP_SUBSTR = ("...", "<", "{", "}", "*", "label:", "your-", "xxx", "XXX", " ")
+# 行号后缀：`path.py:12` / `path.py:12-20` / `path.py:1,5,9` / `path.tsx:245,617`。
+# 只在行首是数字时剥离，避免误伤路径本身含冒号的合法写法。
+LINE_SUFFIX_RE = re.compile(r":\d[\d,\-–—]*$")
 # 运行期/本地产物前缀：文档提及但仓库不保证存在，跳过悬空检查
 RUNTIME_PREFIXES = (
     "backend/logs/", "backend/snapshots/", "backend/.tmp/", "backend/.env",
@@ -324,6 +327,11 @@ def check_dangling_refs(docs: list[tuple[Path, list[str]]]) -> None:
             for m in PATH_TOKEN.finditer(line):
                 token = m.group(1).strip().rstrip("。：,，;；)）").rstrip("/")
                 token = token.split("::", 1)[0]  # 「path.py::func」只核对文件部分
+                # 「path.py:123」/「path.py:12-20」/「path.py:1,5,9」同样只核对文件部分。
+                # 2026-10-02：本门禁原先只认 `::` 不认 `:`，导致文档无法写精确行号——只能写裸路径，
+                # 评审结论失去可点击/可核对性（docs/engineering-standards.md 首次批量引用行号时暴露）。
+                # 行号本身不在本门禁职责内（它核对「路径是否存在」），行号准确性由作者负责。
+                token = LINE_SUFFIX_RE.sub("", token)
                 if not token or any(s in token for s in TOKEN_SKIP_SUBSTR):
                     continue
                 # 白名单写成带尾斜杠的前缀，但 token 已 rstrip("/")，故需同时比对去斜杠形式
