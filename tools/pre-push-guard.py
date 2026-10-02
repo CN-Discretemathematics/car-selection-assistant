@@ -132,6 +132,16 @@ SCOPE_PATHS: dict[str, list[str]] = {
     # 2026-10-02：docs/engineering-standards.md 等规范性文档成批落地，需要一个只覆盖
     # docs/ 的窄 scope——复用 "docs" 会顺带授权 tools/ 与 .githooks/（即门禁自身）。
     "standards": ["docs/"],
+    # 2026-10-02：工程化基线（ruff / eslint / 覆盖率 / 质量看板 / CI 接线）天然跨切面——
+    # backend 配置、web 配置、根级 tools 看板脚本、CI workflow 同时动。此前没有任何
+    # scope 覆盖 backend/pyproject.toml，这类提交只能被 PUSH_GUARD_ALLOW 放行。
+    "lint": [
+        "backend/pyproject.toml",
+        "web/",
+        "tools/",
+        ".github/",
+        "docs/",
+    ],
     "hygiene": ["tools/", ".githooks/", "skills/", "docs/", "AGENTS.md", "README", "RAG.md", "reviewer/"],
     "chore": [".github/", ".gitignore", "tools/", ".githooks/", "README", "LICENSE"],
     "test": ["backend/tests/", "web/"],
