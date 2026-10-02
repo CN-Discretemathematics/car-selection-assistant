@@ -227,6 +227,23 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 
 **修复顺序**（先易后难、先安全后性能）：C1 → C2 → H5 → H3 → H1 → H6 → M 项 → H2/H4（性能，需评测兜底）。
 
+**H3 的一个陷阱（本轮实测得出，务必先读）**：
+「`async def` 内裸调同步 Session」不能按调用点机械替换。AST 扫出 11 处，其中多数是
+`db.scalars(...)`——**它是惰性的，真正阻塞的 I/O 发生在终结操作 `.all()` / `.first()` 上**。
+只把 `db.scalars(...)` 包进 `run_in_threadpool` 等于什么都没包（构造查询不碰数据库），
+却多了一次线程池往返。**必须连终结操作一起搬。**
+
+本轮已修（立即执行型，语义明确、零歧义）：
+`db.get()` 3 处（`respond` 的锁定车系+品牌、`_tool_loop_reply` 的锁定车系名）、
+`build_series_qa_answer()` 1 处（对齐同文件 `_variant_diff_reply` 的既有正确写法）。
+`db.get` 那两处顺带消除了一个 per-id 的 N+1。
+
+剩余待修（须逐处分析终结操作后搬，**建议与 P3 拆分同批做**——拆分后这些调用不再是
+1968 行文件里的一段，而是有独立签名的纯函数，包裹边界自然清晰）：
+`respond` / `_comparison_analysis_reply` / `_catalog_overview_reply` /
+`_brand_overview_reply` / `_tool_loop_reply` / `_variant_diff_reply` /
+`_series_qa_reply` 中的 `db.scalars(...)`。
+
 ---
 
 ## 7. P5｜性能与前端

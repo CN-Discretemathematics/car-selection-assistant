@@ -15,6 +15,7 @@ import random
 import re
 import time
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -625,6 +626,37 @@ def next_clarification(profile: UserProfile) -> Clarification | None:
     return None
 
 
+async def _load_profile(store: SessionStore, session_id: str) -> UserProfile:
+    """从 store 取回画像并反序列化；**脏数据自愈**，不把异常抛给调用方。
+
+    2026-10-02（Critical）：原实现是裸的
+    `UserProfile(**await run_in_threadpool(store.get_profile, session_id))`。
+    任何一次校验失败——部署时改了 UserProfile 的字段类型、Redis 里被半写、
+    历史脏值——都会让 `ValidationError` 逃出 `respond`，于是该 session
+    **之后每一次请求恒 500 且不自愈**，用户只能靠「新对话」重置。
+    也就是说：一次 schema 变更 = 一次线上批量 500。
+
+    自愈策略：**丢弃脏画像、按空画像重新播种**，并记 error 级日志。
+    丢的是缓存态（约束可从后续对话重新收集），不是用户资产；相比整条会话
+    卡死，这是明显更好的降级——也符合「失败要显式」的诚实性原则。
+    """
+    raw = await run_in_threadpool(store.get_profile, session_id)
+    try:
+        return UserProfile(**raw)
+    except (ValidationError, TypeError) as err:
+        # TypeError 同样要接：raw 根本不是映射（被写成 list / 字符串 / 数字）时，
+        # `**raw` 抛的是 TypeError 而非 ValidationError。两者都是「脏数据」，
+        # 自愈策略一致。
+        logging.getLogger("app.agent.router").error(
+            "会话画像反序列化失败，已重建为空画像: session=%s %s: %s",
+            session_id, type(err).__name__, err,
+        )
+        fresh = UserProfile()
+        # 重写回 store：否则下一轮还会读到同一份脏数据、每轮都走重建分支
+        await run_in_threadpool(store.set_profile, session_id, fresh.model_dump())
+        return fresh
+
+
 class AgentEngine:
     def __init__(self, llm: LLMClient | None = None, store: SessionStore | None = None) -> None:
         self._llm = llm or get_llm_client()
@@ -676,7 +708,28 @@ class AgentEngine:
             return
         task = asyncio.create_task(self._shadow_route(message, profile, regex_decision))
         self._pending_shadow_tasks.add(task)
-        task.add_done_callback(self._pending_shadow_tasks.discard)
+        task.add_done_callback(self._on_shadow_done)
+
+    def _on_shadow_done(self, task: asyncio.Task) -> None:
+        """回收旁路任务：既从 in-flight 集合摘除，也**取回异常**。
+
+        2026-10-02：原实现只 `discard`，从不调 `task.exception()`。`_shadow_route`
+        内部只兜底了 `route_with_llm` 一段（:701），其后的 `arbitrate_route` 与
+        `log_shadow_record` 一旦抛异常，任务静默死亡——唯一痕迹是 asyncio 在 GC 时
+        打的 "Task exception was never retrieved"，那行不在 `app.agent.router.shadow`
+        日志流里，`shadow_report.py` 解析不到。
+
+        这与已修复的 `_shadow_route` 签名事故属同一失败族：**旁路出错，零痕迹**。
+        """
+        self._pending_shadow_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logging.getLogger("app.agent.router.shadow").warning(
+                "shadow 旁路任务异常（不影响响应路径）: %s: %s",
+                type(exc).__name__, str(exc)[:200], exc_info=True,
+            )
 
     async def _shadow_route(self, message: str, profile: UserProfile, regex_decision) -> None:
         """shadow 旁路体：结果只写对拍日志（logger "app.agent.router.shadow"）。
@@ -774,7 +827,7 @@ class AgentEngine:
         """
         await run_in_threadpool(self._store.append_message, session_id, "user", message)
 
-        profile = UserProfile(**await run_in_threadpool(self._store.get_profile, session_id))
+        profile = await _load_profile(self._store, session_id)
         hints = extract_hints(message)
         profile = merge_profile(profile, hints)
         # 已补齐的字段从 unknowns 中移除（评审 M1）：unknowns 语义 = 「最近一次追问未答」，
@@ -853,9 +906,15 @@ class AgentEngine:
             if len(resolved) == 1:
                 target = resolved[0]
             elif not resolved and len(profile.locked_series_ids) == 1:
-                locked_series = db.get(VehicleSeries, profile.locked_series_ids[0])
+                # 2026-10-02：db.get() 是**立即**执行的（不像 db.scalars 那样惰性），
+                # 在 async def 里裸调会阻塞事件循环。按同文件 _variant_diff_reply 的
+                # 既有正确写法包进线程池。
+                locked_series = await run_in_threadpool(
+                    db.get, VehicleSeries, profile.locked_series_ids[0]
+                )
                 if locked_series is not None:
-                    target = (locked_series, db.get(Brand, locked_series.brand_id))
+                    brand = await run_in_threadpool(db.get, Brand, locked_series.brand_id)
+                    target = (locked_series, brand)
             if target is not None:
                 return await self._variant_diff_reply(db, session_id, target[0], target[1], message)
 
@@ -1394,13 +1453,17 @@ class AgentEngine:
 
         # 会话上下文注入（第二轮审查：指代/追问类消息不能失去上下文）
         context_notes: list[str] = []
-        locked_names = [
-            series.name
-            for series in (
-                db.get(VehicleSeries, sid) for sid in profile.locked_series_ids
-            )
-            if series is not None
-        ]
+        # 2026-10-02：生成器里的 db.get() 同样是立即执行；且这是 per-id 的 N+1。
+        # 整段搬进线程池，一次往返拿完所有锁定车系名。
+        locked_names = await run_in_threadpool(
+            lambda: [
+                series.name
+                for series in (
+                    db.get(VehicleSeries, sid) for sid in profile.locked_series_ids
+                )
+                if series is not None
+            ]
+        )
         if locked_names:
             context_notes.append(f"用户此前锁定的车系：{'、'.join(locked_names)}（「它/这台」多指这些）")
         if profile.brand_labels:
@@ -1699,7 +1762,10 @@ class AgentEngine:
         resolved: list,
     ) -> AgentMessageOut:
         """具体车系问答：确定性回答（全部来自库内真实参数），不依赖 LLM。"""
-        answer = build_series_qa_answer(db, resolved, message)
+        # 2026-10-02：build_series_qa_answer 内部会做多次库查询（且有 N+1），
+        # 在 async def 里裸调会阻塞事件循环。同文件 _variant_diff_reply 对
+        # 结构完全相同的调用已正确包裹，此处对齐——规则要一致应用。
+        answer = await run_in_threadpool(build_series_qa_answer, db, resolved, message)
         source_ids = sorted({s.source_id for s, _ in resolved if s.source_id})
         name_by_id: dict[int, str] = {}
         if source_ids:
