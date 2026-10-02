@@ -12,10 +12,10 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from app.sources.autohome import build_series_payload, fetch_series_pages  # noqa: E402
-from app.sources.fetcher import record_snapshot  # noqa: E402
+from app.sources.autohome import build_series_payload, fetch_series_pages
+from app.sources.fetcher import record_snapshot
 
 
 def _load_ids_from_snapshot(month: str) -> list[str]:

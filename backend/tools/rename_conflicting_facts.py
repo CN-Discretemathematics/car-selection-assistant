@@ -25,13 +25,13 @@ import os
 import sys
 from collections import Counter, defaultdict
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from sqlalchemy import func, select, update  # noqa: E402
+from sqlalchemy import func, select, update
 
-from app.common.database import get_session_factory  # noqa: E402
-from app.common.models import ExternalSeriesRef, SpecFact, VehicleVariant  # noqa: E402
-from app.sources.autohome_sku import fetch_sku_config  # noqa: E402
+from app.common.database import get_session_factory
+from app.common.models import ExternalSeriesRef, SpecFact, VehicleVariant
+from app.sources.autohome_sku import fetch_sku_config
 
 
 def _conflicts(session) -> dict[int, dict[str, list[SpecFact]]]:

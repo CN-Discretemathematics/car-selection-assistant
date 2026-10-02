@@ -23,14 +23,14 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from app.sources.autohome import (  # noqa: E402
+from app.sources.autohome import (
     build_series_payload,
     fetch_robots,
     parse_series_page,
 )
-from app.sources.autohome_sku import (  # noqa: E402
+from app.sources.autohome_sku import (
     SKU_API,
     build_sku_payload,
     decode_autohome_html,
@@ -38,7 +38,7 @@ from app.sources.autohome_sku import (  # noqa: E402
     fetch_sku_config,
     parse_series_index,
 )
-from app.sources.fetcher import DEFAULT_USER_AGENT  # noqa: E402
+from app.sources.fetcher import DEFAULT_USER_AGENT
 
 SNAPSHOT_DIR = os.path.join("snapshots")
 RAW_SKU_DIR = os.path.join("snapshots", "raw", "sku")

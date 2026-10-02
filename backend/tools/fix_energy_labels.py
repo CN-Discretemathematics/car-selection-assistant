@@ -30,14 +30,14 @@ import re
 import sys
 from collections import Counter
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from sqlalchemy import select  # noqa: E402
-from sqlalchemy.orm import Session  # noqa: E402
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from app.common.database import get_session_factory  # noqa: E402
-from app.common.models import SpecFact, VehicleSeries, VehicleVariant  # noqa: E402
-from app.sources.autohome_sku import (  # noqa: E402
+from app.common.database import get_session_factory
+from app.common.models import SpecFact, VehicleSeries, VehicleVariant
+from app.sources.autohome_sku import (
     _powertrain_label,
     classify_variant_energy,
     ev_evidence,

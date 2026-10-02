@@ -31,25 +31,25 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # tools/（复用问题生成器的措辞映射）
 
-from gen_eval_questions import (  # noqa: E402  # 措辞映射与生成器单一事实源
+from gen_eval_questions import (  # 措辞映射与生成器单一事实源
     HINT_TO_ENERGY,
     HEAD_LABEL_TO_BODY,
     _PARAM_KEYS,
 )
-from app.catalog.series_constraints import load_series_attrs, series_satisfies as _series_satisfies  # noqa: E402
+from app.catalog.series_constraints import load_series_attrs, series_satisfies as _series_satisfies
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select
 
-from app.common.database import get_session_factory  # noqa: E402
-from app.common.models import Brand, OfficialPrice, SourceDocument, SpecFact, VehicleSeries, VehicleVariant  # noqa: E402
-from app.rag.chunking import chunk_stats, split_text  # noqa: E402
-from app.rag.ingest import build_chunks  # noqa: E402
-from app.rag.rerank import PassThroughReranker, rrf_fuse  # noqa: E402
-from app.retrieval.backends import InMemoryRetriever, SearchResult  # noqa: E402
-from app.retrieval.config import CHUNK_OVERLAP, CHUNK_SIZE, RETRIEVAL_BACKEND  # noqa: E402
+from app.common.database import get_session_factory
+from app.common.models import Brand, OfficialPrice, SourceDocument, SpecFact, VehicleSeries, VehicleVariant
+from app.rag.chunking import chunk_stats, split_text
+from app.rag.ingest import build_chunks
+from app.rag.rerank import PassThroughReranker, rrf_fuse
+from app.retrieval.backends import InMemoryRetriever, SearchResult
+from app.retrieval.config import CHUNK_OVERLAP, CHUNK_SIZE, RETRIEVAL_BACKEND
 
 EVAL_DEPTH = 10  # 取回深度：指标 @top_k 与 @10 都从这一份排序列表计算
 

@@ -20,17 +20,17 @@ import re
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select
 
-from app.catalog.series_constraints import (  # noqa: E402
+from app.catalog.series_constraints import (
     PARAM_KEYS as _PARAM_KEYS,
     load_series_attrs,
     series_satisfies,
 )
-from app.common.database import get_session_factory  # noqa: E402
-from app.common.models import Brand, VehicleSeries, VehicleVariant  # noqa: E402
+from app.common.database import get_session_factory
+from app.common.models import Brand, VehicleSeries, VehicleVariant
 
 # 意图模板 → 评测分桶（eval_rag 按桶出报告；查询路由按桶验收）
 INTENT_BUCKET = {
@@ -358,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
 
     factory = get_session_factory()
     with factory() as db:
-        from app.common.models import OfficialPrice, SpecFact  # noqa: E402  # 局部依赖（价格/参数键）
+        from app.common.models import OfficialPrice, SpecFact  # 局部依赖（价格/参数键）
 
         brands = db.scalars(select(Brand).where(Brand.active_status == "active")).all()
         series_rows = db.scalars(select(VehicleSeries).where(VehicleSeries.active_status == "active")).all()

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.schemas import UserProfile
 from app.catalog import services as catalog
-from app.common.enums import NEW_ENERGY_TYPES
+from app.common.enums import NEW_ENERGY_TYPES, expand_avoid, expand_energy_prefs
 from app.common.models import (
     Brand,
     MonthlySales,
@@ -309,26 +309,15 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
     # 车身类型偏好
     if profile.body_type:
         stmt = stmt.where(VehicleVariant.body_type.in_(profile.body_type))
-    # 能源偏好（new_energy/fuel 泛化 + 具体类型）
-    prefs = list(profile.energy_preference or [])
-    if prefs:
-        allowed = {e for e in prefs if e not in ("new_energy", "fuel")}
-        if "new_energy" in prefs:
-            allowed |= set(NEW_ENERGY_TYPES)
-        if "fuel" in prefs:
-            allowed |= {t for t in ("BEV", "PHEV", "EREV", "HEV", "ICE") if t not in NEW_ENERGY_TYPES}
-        if allowed:
-            stmt = stmt.where(VehicleVariant.energy_type.in_(sorted(allowed)))
-    # 排除偏好（评审 L2）：能源与车身
-    avoided = set(profile.avoid or [])
-    energy_avoid = {e for e in avoided if e in ("BEV", "PHEV", "EREV", "HEV", "ICE")}
-    if "new_energy" in avoided:
-        energy_avoid |= set(NEW_ENERGY_TYPES)
-    if "fuel" in avoided:
-        energy_avoid |= {t for t in ("BEV", "PHEV", "EREV", "HEV", "ICE") if t not in NEW_ENERGY_TYPES}
+    # 能源偏好（new_energy/fuel 泛化）与排除偏好：泛化规则唯一实现在
+    # app/common/enums.py（2026-10-02 从本文件与 engine.py 收敛而来）。
+    # 此前此处逐字复制了一份——而这是**推荐口径**，两份实现长期可能漂移。
+    allowed = expand_energy_prefs(profile.energy_preference)
+    if allowed:
+        stmt = stmt.where(VehicleVariant.energy_type.in_(sorted(allowed)))
+    energy_avoid, body_avoid = expand_avoid(profile.avoid)
     if energy_avoid:
         stmt = stmt.where(~VehicleVariant.energy_type.in_(sorted(energy_avoid)))
-    body_avoid = {b for b in avoided if b in ("sedan", "suv", "mpv", "pickup")}
     if body_avoid:
         stmt = stmt.where(~VehicleVariant.body_type.in_(sorted(body_avoid)))
     # 当前生效指导价存在 + 预算区间
@@ -429,25 +418,18 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
         if profile.body_type and variant.body_type not in profile.body_type:
             continue
         if profile.energy_preference:
-            prefs = profile.energy_preference
-            if "new_energy" in prefs and variant.energy_type not in NEW_ENERGY_TYPES:
-                continue
-            if "fuel" in prefs and variant.energy_type in NEW_ENERGY_TYPES:
-                continue
-            if (
-                variant.energy_type not in prefs
-                and "new_energy" not in prefs
-                and "fuel" not in prefs
-            ):
+            # 与上面的 SQL 下推同口径：泛化规则唯一实现在 enums（2026-10-02 收敛）。
+            # 此前这里是**第三份**实现，且写法相反（逐 variant 判定而非集合展开），
+            # 三处一旦漂移就会出现「SQL 已过滤、Python 侧又放行/拦掉」的不一致。
+            allowed = expand_energy_prefs(profile.energy_preference)
+            if allowed and variant.energy_type not in allowed:
                 continue
         # 排除偏好（评审 L2）：用户明确「不要」的能源/车身直接硬过滤
-        avoided = set(profile.avoid or [])
-        if avoided:
-            if variant.energy_type in avoided or (variant.body_type and variant.body_type in avoided):
+        if profile.avoid:
+            energy_avoid, body_avoid = expand_avoid(profile.avoid)
+            if variant.energy_type in energy_avoid:
                 continue
-            if "new_energy" in avoided and variant.energy_type in NEW_ENERGY_TYPES:
-                continue
-            if "fuel" in avoided and variant.energy_type not in NEW_ENERGY_TYPES:
+            if variant.body_type and variant.body_type in body_avoid:
                 continue
         seats = _extract_seats(facts)
         if profile.passengers is not None and seats is not None and seats < profile.passengers:

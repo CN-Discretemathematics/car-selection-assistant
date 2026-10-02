@@ -26,14 +26,14 @@ import re
 import sys
 from datetime import date, datetime, timedelta
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import func, select
 
-from app.catalog.services import latest_full_month  # noqa: E402
-from app.common.database import get_session_factory  # noqa: E402
-from app.common.models import MonthlySales  # noqa: E402
-from tools.fetch_autohome_sales import fetch_and_import_month  # noqa: E402
+from app.catalog.services import latest_full_month
+from app.common.database import get_session_factory
+from app.common.models import MonthlySales
+from tools.fetch_autohome_sales import fetch_and_import_month
 
 DEFAULT_LOG_PATH = os.path.join("logs", "sales_fetch.log")
 DEFAULT_WARN_DAYS = 15

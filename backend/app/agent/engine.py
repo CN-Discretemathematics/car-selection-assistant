@@ -83,7 +83,7 @@ from app.agent.tools import (
 )
 from app.catalog.brands import brand_series_overview, resolve_brand_mentions
 from app.catalog.series_index import display_name, resolve_series
-from app.common.enums import NEW_ENERGY_TYPES
+from app.common.enums import NEW_ENERGY_TYPES, expand_avoid, expand_energy_prefs
 from app.common.llm import LLMClient, LLMError, get_llm_client
 from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, VehicleVariant
 from app.comparison.analysis import analyze_comparison, render_analysis_text
@@ -235,29 +235,24 @@ def _dispatch_tool(db: Session, name: str, arguments: dict) -> dict:
 # 与新的能源/预算硬约束叠加后必然为空——用户观感就是「Agent 把参数限定在星愿上」。
 # 这里按硬约束探测「锁定车系内是否还有可行 SKU」：为空即视为需求已转移，
 # 自动解除锁定并明确告知用户（不静默改变口径）。
-_ALL_ENERGY_TYPES = ("BEV", "PHEV", "EREV", "HEV", "ICE")
+#
+# 注：能源类型全集已下沉到 app.common.enums.ENERGY_TYPES——本模块不再自带副本
+# （2026-10-02 收敛能源泛化规则时删去 _ALL_ENERGY_TYPES，它当时已无引用）。
 
 
 def _expand_energy_prefs(prefs: list[str]) -> set[str]:
-    """能源偏好展开（与 recommendation_tool 同一口径：new_energy/fuel 泛化）。"""
-    allowed = {e for e in prefs if e not in ("new_energy", "fuel")}
-    if "new_energy" in prefs:
-        allowed |= set(NEW_ENERGY_TYPES)
-    if "fuel" in prefs:
-        allowed |= {t for t in _ALL_ENERGY_TYPES if t not in NEW_ENERGY_TYPES}
-    return allowed
+    """能源偏好展开（与 recommendation_tool 同一口径：new_energy/fuel 泛化）。
+
+    2026-10-02：实现已收敛到 `app/common/enums.py`——本文件、agent/tools.py
+    此前各有一份**逐字相同**的副本，而这是推荐口径，两份漂移即等于口径不一致。
+    此处保留薄包装仅为兼容本模块内的既有调用点。
+    """
+    return expand_energy_prefs(prefs)
 
 
 def _expand_avoid(avoid: list[str]) -> tuple[set[str], set[str]]:
-    """排除偏好展开为 (能源集合, 车身集合)。"""
-    avoided = set(avoid or [])
-    energy_avoid = {e for e in avoided if e in _ALL_ENERGY_TYPES}
-    if "new_energy" in avoided:
-        energy_avoid |= set(NEW_ENERGY_TYPES)
-    if "fuel" in avoided:
-        energy_avoid |= {t for t in _ALL_ENERGY_TYPES if t not in NEW_ENERGY_TYPES}
-    body_avoid = {b for b in avoided if b in ("sedan", "suv", "mpv", "pickup")}
-    return energy_avoid, body_avoid
+    """排除偏好展开为 (能源集合, 车身集合)。同上，唯一实现在 enums。"""
+    return expand_avoid(avoid)
 
 
 def locked_series_conflict(db: Session, profile: UserProfile) -> bool:

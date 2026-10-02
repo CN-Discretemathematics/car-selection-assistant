@@ -24,12 +24,12 @@ import sys
 from collections import Counter, defaultdict
 
 # 与 backend/tools 下其他脚本一致：把 backend 根加入 sys.path，容器内可直接 `python tools/xxx.py`
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from sqlalchemy import delete, func, select  # noqa: E402
+from sqlalchemy import delete, func, select
 
-from app.common.database import get_session_factory  # noqa: E402
-from app.common.models import SpecFact, VehicleSeries, VehicleVariant  # noqa: E402
+from app.common.database import get_session_factory
+from app.common.models import SpecFact, VehicleSeries, VehicleVariant
 
 # 去重规则故意内联：本工具要能对**修复前**的部署执行（那时 app.sources.autohome_sku
 # 还没有 dedupe_duplicate_keys）。与 app.sources.autohome_sku.dedupe_duplicate_keys 同规则，

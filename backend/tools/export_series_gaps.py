@@ -25,11 +25,11 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path)
 
-from sqlalchemy import text  # noqa: E402
+from sqlalchemy import text
 
-from app.common.database import get_session_factory  # noqa: E402
+from app.common.database import get_session_factory
 
 GAP_WHERE = """
     s.active_status = 'active'
