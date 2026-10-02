@@ -5,7 +5,14 @@ const TOKEN_KEY = "auth_token";
 
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(TOKEN_KEY);
+  // 读取也要 try/catch：Safari 无痕模式 / 禁用 Cookie / 存储配额异常时
+  // `getItem` 会**抛异常**。此前只有 SSR 守卫没有容错，页面在 render 期读它，
+  // 一抛就整页渲染失败。写法对齐 CompareBar 的 readCompareIds。
+  try {
+    return window.localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
 }
 
 export function setToken(token: string | null) {

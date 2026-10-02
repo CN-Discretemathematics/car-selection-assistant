@@ -284,10 +284,10 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `backend/app/sources/autohome_sku.py:112,123` | 库层零重试；tools 层固定 3s、无退避无抖动 |
 | `backend/app/retrieval/zilliz.py:302-305` | 缓存 key 在 embedder 无 `model` 属性时回落为字面量 `"embed"` |
 | `backend/app/vehicles/router.py:41-115` | 全表载入后 Python 过滤分页（无 SQL 下推） |
-| `web/app/components/AddToCompareButton.tsx:10` | 未订阅 `compare-changed`，与 `CompareBar.tsx:33-42` 双数据源 → 文案与点击行为相反 |
-| `web/app/components/HomeFilters.tsx:15-22` | 表单状态仅 mount 时播种，从不 resync（`SearchBar.tsx:62-64` 已正确实现） |
-| `web/lib/auth.ts:5-13` | `localStorage` 无保护；`favorites/page.tsx:13` 在 render 期调用，无 error boundary |
-| `web/app/components/Pagination.tsx:65,79,90,99` | 裸 `<a href>`/`<form method="get">` 而非 `next/link`，每次翻页整页重载 |
+| `web/app/components/AddToCompareButton.tsx:10` | ✅ **已修**（2026-10-03）：未订阅 `compare-changed`，自建第二份状态 → **文案说移除、行为是加回**。从对比栏移除后按钮仍显示「已加入对比」，再点走的是「重新加入」分支，用户点几次都删不掉 |
+| `web/app/components/HomeFilters.tsx:15-22` | ✅ **已修**（2026-10-03）：表单仅 mount 时播种 → 浏览器后退后地址栏已无筛选、表单仍显示旧值，点「确定」把退掉的筛选又加回来。改为跟随 URL（`SearchBar.tsx:60-64` 已是正确实现） |
+| `web/lib/auth.ts:5-13` + `favorites/page.tsx:13` | ✅ **已修**（2026-10-03）：`getToken` 只有 SSR 守卫无 try/catch（无痕模式 `getItem` 抛异常，而调用方在 **render 期**调它，一抛整页渲染失败）；且 lazy `useState(() => getToken())` 在首渲执行 → 服务端 null / 客户端真 token 的 **hydration 不一致**，且值被冻结、token 变了本页不知道。改到 effect 读 + `tokenReady` 区分「还没读」与「确实没登录」 |
+| `web/app/components/Pagination.tsx:65,79,90,99` | ✅ **已修一半（2026-10-03）**：3 处裸 `<a href>` 已换 `next/link`（翻页不再整页重载），禁用态改 `<span>`（`Link` 的 `href` 必填，且无 href 的 `<a>` 观感上仍像可点）。⚠️ `<form method="get">` **刻意保留**：原生 GET 不依赖 JS 即可工作（渐进增强），隐藏域已把筛选参数带过去；改成 `router.push` 需加客户端边界并手工重建 query 串，那才是会真丢筛选的地方。理由写在源码里并由测试守住 |
 
 **修复顺序**（先易后难、先安全后性能）：C1 → C2 → H5 → H3 → H1 → H6 → M 项 → H2/H4（性能，需评测兜底）。
 
@@ -348,7 +348,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | 库层补重试（退避+抖动） | 消除 tools/app 两处重复实现 |
 | H7 compare 请求瀑布 | 合并端点或并行；后端消除重复 `analyze_comparison` |
 | H8/H9 ops/rag 轮询泄漏 + tab 永久加载 | ✅ **已完成**（2026-10-03）：`useAsyncData` + `LoadError` 统一 4 个 tab，H8 的真实竞态按 `mountedRef` 守卫修（审计记的机制不成立，见缺陷台账） |
-| 前端 `next/link` / `compare-changed` 订阅 / 筛选 resync / `localStorage` 保护 / 路由级 `error.tsx` | 均有同文件内的**正确实现可对齐**，属低成本高确定性 |
+| 前端 `next/link` / `compare-changed` 订阅 / 筛选 resync / `localStorage` 保护 / 路由级 `error.tsx` | ✅ **已完成**（2026-10-03，5 笔提交）：分页改 `next/link`（跳页表单保留原生 GET，理由见缺陷表）、对比按钮改为 localStorage 的投影、筛选表单跟随 URL、`writeCompareIds` 补 try/catch 并返回 boolean（此前**只防读不防写**）、新增根级 `web/app/error.tsx`（此前渲染出错会掉进框架通用错误页，站点外壳全丢且无恢复入口）。每项都配了**反向验证过会红**的契约测试 |
 | `Reveal.tsx` 客户端组件下沉 | 约 40 个实例 / 40 个 observer → 单个共享 observer 或 CSS `animation-timeline: view()`。**诚实定位：中等 hydration 收益，不是整页 SSR 救赎** |
 
 ---
