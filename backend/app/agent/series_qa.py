@@ -492,8 +492,12 @@ def build_variant_diff_answer(
     """
     name = display_name(series, brand)
     rows: list[tuple[VehicleVariant, float | None]] = []
-    for variant in catalog.series_variants(db, series.id, on_sale_only=True):
-        price = catalog.variant_current_price(db, variant.id)
+    # 2026-10-02（P5.2 / H4）：价格批量取。此前逐款型 SELECT，一个 8 款型的车系
+    # 就是 8 次往返；口径与 variant_current_price 完全一致。
+    on_sale = catalog.series_variants(db, series.id, on_sale_only=True)
+    prices = catalog.variants_current_prices(db, [v.id for v in on_sale])
+    for variant in on_sale:
+        price = prices.get(variant.id)
         rows.append((variant, float(price.price_cny) if price else None))
     rows.sort(key=lambda r: (r[1] is None, r[1] if r[1] is not None else 0.0))
 
@@ -501,8 +505,10 @@ def build_variant_diff_answer(
     if not rows:
         # 2026-09 部署实测：部分车系（护卫舰07/宝骏云朵/凯美瑞旧代次等 31 个）款型
         # 全为停售——数据本身完整，直接展示并标注停售，比「未收录」死胡同更有用
-        for variant in catalog.series_variants(db, series.id, on_sale_only=False):
-            price = catalog.variant_current_price(db, variant.id)
+        all_variants = catalog.series_variants(db, series.id, on_sale_only=False)
+        all_prices = catalog.variants_current_prices(db, [v.id for v in all_variants])
+        for variant in all_variants:
+            price = all_prices.get(variant.id)
             rows.append((variant, float(price.price_cny) if price else None))
         rows.sort(key=lambda r: (r[1] is None, r[1] if r[1] is not None else 0.0))
         archived = True
@@ -539,10 +545,12 @@ def build_variant_diff_answer(
         lines.append(f"{_MARKS[idx]} {label}：官方指导价 {price_text}")
 
     # 逐款事实 → (分类, 键) 归并；用归一化身份判断「相同 / 不同」（与对比模块一致）
+    # 2026-10-02（P5.2 / H4）：事实批量取，shown 有几款型就只查一次
+    facts_by_variant = catalog.variants_facts(db, [v.id for v, _ in shown])
     keys: dict[tuple[str, str], dict[int, tuple[tuple, str]]] = {}
     labels: dict[tuple[str, str], str] = {}
     for variant, _ in shown:
-        for fact in catalog.variant_facts(db, variant.id):
+        for fact in facts_by_variant.get(variant.id, []):
             if fact.fact_key in _VARIANT_DIFF_SKIP_KEYS:
                 continue
             if any(word in fact.fact_key for word in _VARIANT_DIFF_SKIP_KEY_WORDS):
