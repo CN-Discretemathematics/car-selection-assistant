@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { trackFilterClear } from "@/lib/agentTriggers";
 import { wanToYuan, yuanToWan } from "@/lib/api";
 import { BODY_OPTIONS, BRAND_OPTIONS, ENERGY_OPTIONS, HOME_SORT_OPTIONS } from "@/lib/filterOptions";
@@ -20,6 +20,29 @@ export default function HomeFilters() {
     price_max: yuanToWan(searchParams.get("price_max")),
     sort: searchParams.get("sort") ?? "desc",
   });
+
+  // 表单必须**跟随 URL**，不能只在 mount 时读一次。
+  // 此前 `useState(searchParams…)` 的初始化器只执行一次，于是：浏览器后退后
+  // 地址栏已回到「无筛选」，表单却还显示「纯电」；用户看着表单点「确定」，
+  // 就会把刚刚退掉的筛选重新加上。分享链接在同一标签页打开时同理。
+  // 做法对齐同仓 SearchBar.tsx:60-64——把 URL 值提成 primitive 再 useEffect 跟随
+  // （直接依赖 searchParams 对象会因每次渲染换引用而反复触发）。
+  const energyType = searchParams.get("energy_type") ?? "";
+  const bodyType = searchParams.get("body_type") ?? "";
+  const brandType = searchParams.get("brand_type") ?? "";
+  const priceMinYuan = searchParams.get("price_min");
+  const priceMaxYuan = searchParams.get("price_max");
+  const sort = searchParams.get("sort") ?? "desc";
+  useEffect(() => {
+    setForm({
+      energy_type: energyType,
+      body_type: bodyType,
+      brand_type: brandType,
+      price_min: yuanToWan(priceMinYuan),
+      price_max: yuanToWan(priceMaxYuan),
+      sort,
+    });
+  }, [energyType, bodyType, brandType, priceMinYuan, priceMaxYuan, sort]);
 
   function apply(next: typeof form) {
     setForm(next);
