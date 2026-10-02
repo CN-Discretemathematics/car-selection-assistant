@@ -270,7 +270,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 
 | 位置 | 问题 |
 | --- | --- |
-| `backend/app/agent/engine.py:694,712` | `llm_elapsed_ms` 只计最后一次重试，污染 p50/p95 延迟判据 |
+| `backend/app/agent/engine.py`（`_shadow_route`） | `llm_elapsed_ms` 只计最后一次重试，**低估**重试样本开销 —— ✅ **已修**：改为总墙钟，并新增 `llm_last_attempt_ms`。⚠️ 切流判据 4 用的是**回答级**耗时日志，不受此字段影响；只影响 shadow 诊断的 p50/p95 |
 | `backend/app/agent/engine.py:789` 等 | 单轮最多 4 次串行 `set_profile` Redis 往返 |
 | `backend/app/agent/engine.py:1786-1788` | 全量 history 无 token 预算注入 prompt |
 | `backend/app/agent/tools.py:458,541` | `tradeoffs` **整条链是死代码**；`backend/app/agent/engine.py:1071` 的 `break` 只跳出内层，上限失效 |
@@ -278,7 +278,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `backend/app/agent/engine.py:354` | ⚠️ **本条为审计误判，已更正**：`"MPV"` 键**不是死条目**。偏好路径用小写化的 `msg_low` 匹配（`"mpv" in msg_low`），而「不要…」的 avoid 路径用的是**原始 message**、大小写敏感（`"MPV" in message`）——两个键各覆盖一种输入，删掉大写键会让「不要MPV」漏掉排除项。真正的问题是**两条路径大小写处理不一致**（一个 lower 一个原样），统一它属行为变更，需产品拍板 |
 | `backend/app/agent/series_qa.py:390-400` | 多车系路径硬编码只处理 2 个车系（解析层最多返回 4 个） |
 | `backend/app/agent/session.py:35-39` | `_prune()` O(n) 且每次操作都跑，活跃 session 无上限 |
-| `backend/app/agent/llm_router.py:127` | 模块级 LRU 无 TTL、无 prompt 版本键，prompt 改了旧判定活到重启 |
+| `backend/app/agent/llm_router.py:135` | 模块级 LRU 无 prompt 版本键，prompt 改了旧判定活到重启 —— ✅ **已修**：key 并入 `ROUTER_VERSION`，改提示词时 +1 即自然失效（未加 TTL：容量已有 LRU 淘汰，且路由裁决的时效性问题用版本键解决更直接） |
 | `backend/app/sources/autohome_sku.py:112,123` | 库层零重试；tools 层固定 3s、无退避无抖动 |
 | `backend/app/retrieval/zilliz.py:302-305` | 缓存 key 在 embedder 无 `model` 属性时回落为字面量 `"embed"` |
 | `backend/app/vehicles/router.py:41-115` | 全表载入后 Python 过滤分页（无 SQL 下推） |

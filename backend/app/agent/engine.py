@@ -817,8 +817,17 @@ class AgentEngine:
         llm_decision = None
         last_error: str | None = None
         routing_llm = self._routing_llm()
+        # 2026-10-02（M11）：原先 `started` 写在**循环体内**，每轮重试都被重置，
+        # 于是 llm_elapsed_ms 只反映**最后一次**尝试——重试的退避睡眠
+        # （_SHADOW_RETRY_DELAYS，当前 0.8s + 2.5s）被整段排除，
+        # shadow_report 的 p50/p95 因此系统性**低估**重试样本的路由开销。
+        # 现按真实墙钟计时，并额外记录「最后一次尝试」耗时，两种口径都留。
+        # 注意：llm_router.py 的切流判据 4 用的是回答级耗时日志
+        # （logger "app.agent.respond"），不受本字段影响；这里只影响 shadow 诊断。
+        started_total = time.perf_counter()
+        started_attempt = started_total
         for attempt in range(len(_SHADOW_RETRY_DELAYS) + 1):
-            started = time.perf_counter()
+            started_attempt = time.perf_counter()
             try:
                 llm_decision = await route_with_llm(
                     message, profile, llm=routing_llm, regex_intent=regex_decision.intent,
@@ -836,7 +845,8 @@ class AgentEngine:
             message,
             regex_intent=regex_decision.intent,
             llm_decision=llm_decision,
-            llm_elapsed_ms=(time.perf_counter() - started) * 1000,
+            llm_elapsed_ms=(time.perf_counter() - started_total) * 1000,
+            llm_last_attempt_ms=(time.perf_counter() - started_attempt) * 1000,
             llm_error=last_error,
             arbitrated_intent=arbitrated.intent,
             meta={
