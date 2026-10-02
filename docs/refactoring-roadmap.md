@@ -275,6 +275,31 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 `_brand_overview_reply` / `_tool_loop_reply` / `_variant_diff_reply` /
 `_series_qa_reply` 中的 `db.scalars(...)`。
 
+**H1（Redis 降级锁死）本轮尝试后回滚——附实测到的架构约束，勿重复踩坑**
+
+现象：`redis_client.get_redis()` 每 60s 自愈重试，但 `agent/session.py` 与
+`auth/security.py` 的四个 getter 把**首次探测结果永久缓存**。部署瞬间 Redis
+恰好不可达即锁死进程内实现直到进程结束，多 worker 永久脑裂。
+
+**本轮已写出修复并验证其可行性，但最终回滚**，原因是一个此前没意识到的架构约束：
+
+1. 朴素的「降级期间持续重探、恢复即升级」会让 `get_session_store()` 在运行中途
+   返回**另一个实例**；
+2. 而 `AgentEngine.__init__`（`backend/app/agent/engine.py:658`）是
+   `self._store = store or get_session_store()`——**引擎在构造时就把 store 钉住了**；
+3. 两者一分裂，路由建的会话引擎就找不到，实测 7 个 `test_tool_loop*` 用例
+   报 `KeyError: <32 位 session_id>`，且**只在全量跑时出现、单跑该文件时通过**；
+4. 加 autouse 的 `reset_*` 夹具会让分裂更严重（55 个失败）——因为
+   `get_agent_engine()` 是**没有 reset 钩子的模块级单例**（本仓 R6.3 违规实例）。
+
+**正确解法必须是「同一对象、换内部后端」**，而不是「换一个 store 实例」：
+给 `SessionStore` 加一层可热替换的 delegate（`get_session_store()` 恒返回同一个
+包装对象，Redis 恢复时只换其内部后端），这样引擎与路由永远拿到同一引用。
+**这属于 P3 规模的重构，不该在 P4 里做**——先给 `get_agent_engine()` 补 reset 钩子
+（R6.3），再动存储选择逻辑。
+
+> 回滚后工作区与 HEAD 一致，全量 575 用例通过；本段是纯文档记录，无代码变更。
+
 ---
 
 ## 7. P5｜性能与前端
