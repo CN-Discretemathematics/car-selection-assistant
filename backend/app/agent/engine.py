@@ -351,6 +351,11 @@ def _parse_count(text: str) -> int | None:
     if text in _CN_DIGITS:
         return _CN_DIGITS[text]
     return None
+# 「MPV」与「mpv」两个键**都要保留**，不是冗余：偏好路径用小写化的 msg_low 匹配
+# （`"mpv" in msg_low`），而「不要…」的 avoid 路径用的是**原始 message**、
+# 大小写敏感（`"MPV" in message`）。删掉大写键会让「不要MPV」漏掉排除项。
+# ⚠️ 这条路径的大小写处理与偏好路径不一致（一个 lower 一个原样），属可记录的
+# 不对称，但**统一它就是行为变更**，需产品拍板；见 docs/refactoring-roadmap.md。
 _BODY_HINTS = {"轿车": "sedan", "suv": "suv", "MPV": "mpv", "mpv": "mpv"}
 _ENERGY_HINTS = {
     "纯电": "BEV",
@@ -694,6 +699,36 @@ def _source_citations(
         )
         for sid in ordered
     ]
+
+
+def collect_tradeoffs(top: list[dict], limit: int = 4) -> list[str]:
+    """汇总各候选款型的「取舍说明」，去重且**严格不超过 limit 条**。
+
+    2026-10-02 修正 + 抽取。原实现把上限判断与 break 都放在内层循环里，
+    `break` 只跳出 `for t in ...`，外层 `for v in top` 会继续——于是每多一个
+    候选就可能多塞一条，「最多 4 条」实际上限是 `4 + (车系数 - 1)`。
+
+    过滤掉内部说明类措辞（未参与评分 / 暂无数据源 / 未披露）——这些不该呈现给用户。
+
+    ⚠️ 目前 `recommendation_tool` 从不往 `tradeoffs` 里 append（见 roadmap P4.6），
+    故本函数在生产链路上恒返回 `[]`，是**已修正但尚未被触发的逻辑**。
+    抽成函数是为了让上限行为**可测**——否则它会一直藏在 1968 行文件里。
+    """
+    internal_notes = ("未参与", "暂无", "数据源", "未披露")
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in top:
+        if len(out) >= limit:
+            break
+        for t in v.get("tradeoffs") or []:
+            if any(note in t for note in internal_notes):
+                continue
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+                if len(out) >= limit:
+                    break
+    return out
 
 
 class AgentEngine:
@@ -1156,18 +1191,7 @@ class AgentEngine:
             # 口径变化必须对用户可见：先说明「已不再限定在某车系」，再给推荐理由
             reasons.insert(0, unlock_note)
         # 内部说明类「妥协项」（未参与评分/暂无数据源等）不呈现给用户（评审：不应出现）
-        internal_notes = ("未参与", "暂无", "数据源", "未披露")
-        tradeoffs: list[str] = []
-        seen: set[str] = set()
-        for v in top:
-            for t in v["tradeoffs"] or []:
-                if any(note in t for note in internal_notes):
-                    continue
-                if t not in seen:
-                    seen.add(t)
-                    tradeoffs.append(t)
-                if len(tradeoffs) >= 4:
-                    break
+        tradeoffs = collect_tradeoffs(top, limit=4)
 
         # 混合检索证据（§13：官方资料片段作为解释佐证；检索不可用不影响推荐）
         evidence = await run_in_threadpool(self._collect_evidence, db, profile, top)

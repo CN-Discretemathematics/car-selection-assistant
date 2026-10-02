@@ -275,7 +275,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `backend/app/agent/engine.py:1786-1788` | 全量 history 无 token 预算注入 prompt |
 | `backend/app/agent/tools.py:458,541` | `tradeoffs` **整条链是死代码**；`backend/app/agent/engine.py:1071` 的 `break` 只跳出内层，上限失效 |
 | `backend/app/agent/tools.py:397-399` | `brand_series_count` 统计**过滤后候选集**而非品牌规模，跨查询不可比 |
-| `backend/app/agent/engine.py:358` | `_BODY_HINTS["MPV"]` 与小写 `msg_low` 比较，键永不匹配（死条目） |
+| `backend/app/agent/engine.py:354` | ⚠️ **本条为审计误判，已更正**：`"MPV"` 键**不是死条目**。偏好路径用小写化的 `msg_low` 匹配（`"mpv" in msg_low`），而「不要…」的 avoid 路径用的是**原始 message**、大小写敏感（`"MPV" in message`）——两个键各覆盖一种输入，删掉大写键会让「不要MPV」漏掉排除项。真正的问题是**两条路径大小写处理不一致**（一个 lower 一个原样），统一它属行为变更，需产品拍板 |
 | `backend/app/agent/series_qa.py:390-400` | 多车系路径硬编码只处理 2 个车系（解析层最多返回 4 个） |
 | `backend/app/agent/session.py:35-39` | `_prune()` O(n) 且每次操作都跑，活跃 session 无上限 |
 | `backend/app/agent/llm_router.py:127` | 模块级 LRU 无 TTL、无 prompt 版本键，prompt 改了旧判定活到重启 |

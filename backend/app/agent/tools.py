@@ -62,7 +62,11 @@ def vehicle_search(
 
     result = []
     for series in series_list:
-        brand = db.get(Brand, series.brand_id)
+        # 不复用参数名：brand 是「品牌名」字符串，已在上面的
+        # `if brand:` 里消费完；在这里重引用为 Brand 对象会把参数的类型从
+        # str | None 变成 Brand | None。当前行为正确（字符串分支在循环外），但
+        # 是一个型别陷阱：若以后有人把 `if brand:` 移进循环内就会静默失效。
+        brand_row = db.get(Brand, series.brand_id)
         price_min, price_max = catalog.series_price_range(db, series.id)
         energy_types = list(series.energy_types or [])
         if energy_type:
@@ -76,7 +80,7 @@ def vehicle_search(
             {
                 "series_id": series.id,
                 "series_name": series.name,
-                "brand_name": brand.name if brand else None,
+                "brand_name": brand_row.name if brand_row else None,
                 "body_type": series.body_type,
                 "energy_types": energy_types,
                 "price_range": {
