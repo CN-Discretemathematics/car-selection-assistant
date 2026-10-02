@@ -257,6 +257,32 @@ def _shas_from_push_lines(lines: list[str]) -> list[str] | None:
     return shas if shas else None
 
 
+GATE_ALLOW_RE = re.compile(r"^#\s*gate-allow:\s*\S.*$", re.MULTILINE)
+
+
+def gate_allow_reason(sha: str) -> str | None:
+    """该提交是否带了**内联**豁免 trailer；返回其理由文本。
+
+    2026-10-02（P1.5）：原先只有 `PUSH_GUARD_ALLOW=1` / `--allow` 两种豁免，
+    两者都**临时、易失、不可追溯**——push 完就查不到「这条提交是不是被硬推上去的」。
+    门禁自己还把用法印在输出里（见报错文案），等于在邀请使用。
+
+    改为在**提交信息正文**写一行 trailer：
+
+        # gate-allow: 该提交同时改 tools/ 与 docs/，属跨切面
+
+    它进 git 历史，事后可审计、可 `git log --grep` 检索。**理由不得为空**——
+    空理由的 trailer 等于没写（正则用 \\S 强制其后至少一个非空白字符）。
+
+    仍保留 `--allow` / `PUSH_GUARD_ALLOW` 作应急，但输出会明确标注「不可追溯」。
+    """
+    body = run_git("log", "-1", "--format=%B", sha)
+    if not body:
+        return None
+    m = GATE_ALLOW_RE.search(body)
+    return m.group(0).strip() if m else None
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -345,13 +371,28 @@ def main() -> int:
         print("\n[pre-push-guard] 拦截本次 push（逐条核对将推送的提交信息与代码是否属于同一功能）：")
         for f in failures:
             print(f"  ✗ {f}")
+        # 内联 trailer 豁免：可追溯，逐条打印理由（优先于 --allow）
+        waived = [(s, gate_allow_reason(s)) for s in shas]
+        waived = [(s, r) for s, r in waived if r]
+        if waived:
+            print("\n[pre-push-guard] 以下提交带内联豁免 trailer，人工放行（理由已入 git 历史，可审计）：")
+            for s, r in waived:
+                print(f"  · {s[:9]}  {r}")
+            return 0
         if allow:
-            print("[pre-push-guard] PUSH_GUARD_ALLOW/--allow 人工放行 —— 请确认这是有意的跨切面提交。")
+            print(
+                "\n[pre-push-guard] PUSH_GUARD_ALLOW/--allow 人工放行 —— ⚠️ 此方式**不可追溯**：\n"
+                "  git 历史里不会留下「这条提交被硬推」的痕迹。优先改用提交信息里的\n"
+                "  `# gate-allow: <理由>` trailer（见下一条）。"
+            )
             return 0
         print(
             "\n  处理办法：\n"
             "  1) 逐条核对 git show <sha> —— 信息与代码不符的提交先 amend 改正（用独立的信息文件）；\n"
-            "  2) 确属跨切面的合法提交：PUSH_GUARD_ALLOW=1 git push … 或 git push --no-verify；\n"
+            "  2) 确属跨切面的合法提交：在**提交信息正文**加一行可追溯的豁免说明后 amend，再推：\n"
+            "       # gate-allow: <为什么这是有意的跨切面提交>\n"
+            "     （trailer 进 git 历史，事后可 git log --grep 审计；理由不得为空）\n"
+            "     应急才用：PUSH_GUARD_ALLOW=1 git push …（不可追溯）；\n"
             "  3) 新 scope 请登记进 tools/pre-push-guard.py 的 SCOPE_PATHS。"
         )
         return 1
