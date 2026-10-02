@@ -265,8 +265,8 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | H5 | `backend/app/agent/engine.py:677-679` | shadow 任务异常从未取回，静默死亡 |
 | H6 | `backend/app/sources/autohome_sku.py:25-28` | `MOBILE_UA` 伪装 iPhone，与 README 合规声明矛盾 —— ✅ **已修并实测**（2026-10-03）：改用 `fetcher.DEFAULT_USER_AGENT`，直调 `fetch_sku_config` 抓 3 个车系（8433/8529/8171）款型 4/8/9 条、配置组 21/22/23 组，无 403 无空数据 → 对方不拦非浏览器 UA，改动零代价 |
 | H7 | `web/app/compare/page.tsx:49,63,126,160` | 4 请求串行瀑布；后端每次查看执行**两次** `analyze_comparison` |
-| H8 | `web/app/ops/rag/page.tsx:296-311` | 轮询 interval 在 unmount 泄漏 |
-| H9 | `web/app/ops/rag/page.tsx:245,617` | 3/4 个 tab 失败后永久「加载中…」，无重试入口 |
+| H8 | `web/app/ops/rag/page.tsx:296-311` | ⚠️ **已修，但审计描述的机制是错的**（2026-10-03）：unmount 清理函数**本来就在**，「重复点击留孤儿 interval」也**不可达**（按钮在 `busy` 期间 disabled）。真实泄漏是**竞态**——点 dense 重建后立刻离开页面，清理跑完时 interval 还没被创建（它要等 `runReindex` 的网络往返 resolve），续段随后照样 setInterval，再无人清理，每 2.5s 打一次后端。已加 `mountedRef` 守卫三处（await 之后 / 轮询回调首行 / 创建前清旧） |
+| H9 | `web/app/ops/rag/page.tsx:245,617` | ✅ **已修**（2026-10-03，与审计一致）：3/4 个 tab 失败后永久「加载中…」、无重试入口。已抽 `useAsyncData` + `LoadError`（含重试按钮）统一 4 个 tab；5 例源码级契约测试钉住，并**反向验证过会红** |
 
 ### Medium / Low
 
@@ -347,7 +347,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | H6 `MOBILE_UA` → 诚实爬虫 UA | ✅ **已修并实测**（2026-10-03，3/3 车系成功）：这是**合规修复**，不是风格调整 |
 | 库层补重试（退避+抖动） | 消除 tools/app 两处重复实现 |
 | H7 compare 请求瀑布 | 合并端点或并行；后端消除重复 `analyze_comparison` |
-| H8/H9 ops/rag 轮询泄漏 + tab 永久加载 | 统一 `useAsync` 同时修两者 |
+| H8/H9 ops/rag 轮询泄漏 + tab 永久加载 | ✅ **已完成**（2026-10-03）：`useAsyncData` + `LoadError` 统一 4 个 tab，H8 的真实竞态按 `mountedRef` 守卫修（审计记的机制不成立，见缺陷台账） |
 | 前端 `next/link` / `compare-changed` 订阅 / 筛选 resync / `localStorage` 保护 / 路由级 `error.tsx` | 均有同文件内的**正确实现可对齐**，属低成本高确定性 |
 | `Reveal.tsx` 客户端组件下沉 | 约 40 个实例 / 40 个 observer → 单个共享 observer 或 CSS `animation-timeline: view()`。**诚实定位：中等 hydration 收益，不是整页 SSR 救赎** |
 
