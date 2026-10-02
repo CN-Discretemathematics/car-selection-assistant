@@ -1,7 +1,7 @@
 # CI 门禁（2026-09-14 接入；2026-10-02 补 lint 看板与两处缺失检查）：
 #   backend  —— 全量用例（vendor 不入库，按 requirements.txt 安装；Linux 下 PYTHONPATH 分隔符是冒号）
 #   gates    —— 三道静态门禁：密钥扫描 + 用户可见文案门禁 + 文档一致性（退出码必须为 0）
-#   autofix  —— gates 失败时对「确定性计数」自动跑 --fix 并推回 PR 分支（仅同仓库 PR）
+#   autofix  —— gates 失败时算出「确定性计数」自愈补丁，**以 PR 评论贴出，不推分支**
 #   web      —— tsc 类型检查 + next build + **前端测试**（此前从不执行）
 #   metrics  —— 8 维代码质量看板（tools/quality_metrics.py），产出 artifact 供趋势对比
 #
@@ -10,7 +10,7 @@
 # ⚠️ 2026-10-02：新增的 **metrics** 需手动勾选才会成为 required check，
 #    未勾选时它只产出 artifact，不阻止合入（见 docs/engineering-standards.md R10.5）。
 # autofix 需要写权限：Settings → Actions → General → Workflow permissions 勾
-#   Read and write permissions（否则只推不动，日志里报错，不影响其它 job）。
+#   Read and write permissions（否则只发不出评论，日志里报错，不影响其它 job）。
 # 部署不受影响：仍是服务器 05:00 拉 main（CI 只把关 PR 合入）。
 name: CI
 
@@ -84,6 +84,26 @@ jobs:
       # 但此前它不在任何 CI job 里——也就是说这条规则从未被自动执行过。
       - name: 门禁自测（退出码必须 0）
         run: python skills/doc_sync_selftest.py
+      # 2026-10-02 补：commit-scope 门禁此前**只存在于本地 hook**。
+      # core.hooksPath 是本地配置，新 clone 的仓库没有它，CI 也没补位——
+      # 等于这道门禁对所有 CI 提交形同虚设。
+      #
+      # ⚠️ 当前为「只报不拦」：范围 origin/main..HEAD 内含历史提交 f590eb2
+      #   （一次 docs(sync) 同时改了 tools/pre-push-guard.py 与 skills/doc_sync_check.py，
+      #   正是本仓已确认的门禁自我改写）。该提交已在上游分支，本轮按 roadmap R13
+      #   **不追溯处理**，故先归档报告、待其清理后再改为阻塞。
+      - name: commit-scope 门禁（当前只报不拦）
+        id: guard
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python tools/pre-push-guard.py origin/main..HEAD 2>&1 | tee /tmp/guard.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pre-push-guard-report
+          path: /tmp/guard.log
+          retention-days: 30
 
   # 8 维代码质量看板（2026-10-02 接入）：只报不拦，产出 artifact。
   # 定位见 docs/engineering-standards.md §4.2 / §4.5——坏味道泳道（P6）**全表最低优先级**，
@@ -136,12 +156,15 @@ jobs:
       - run: pnpm test
       - run: pnpm run build
 
-  # 自动修复（2026-09-16 接入）：gates 失败且是**同仓库 PR** 时，用 `--fix` 自愈「确定性计数」
-  # （用例数/迁移数/工具 schema 数），有改动就作为新提交推回 PR 分支；下一轮 CI 复跑确认转绿。
-  # 判读类 FAIL（悬空引用/过期表述/环境变量/README 结构）**不自动改**——按 skills/doc-sync.md
-  # 人工对齐，避免「改文档骗过门禁」。fork 的 PR 推不动，本 job 直接跳过。
+  # 自动修复（2026-09-16 接入；2026-10-02 改为**只评论不推分支**）：
+  # gates 失败且是**同仓库 PR** 时，用 `--fix` 算出「确定性计数」的自愈补丁，
+  # 以 **PR 评论**形式贴出补丁内容，由人核对后手动采纳。
+  #
+  # 为什么不再自动推分支：门禁改写自己的输入。一条 --fix 的正则回归就能静默把 PR
+  # 洗绿，而作者在 PR 列表里看不到任何 diff——这与「门禁存在是为了让人看见问题」相悖。
+  # 判读类 FAIL（悬空引用/过期表述/环境变量/README 结构）依然**不自动改**。
   autofix:
-    name: autofix (doc-sync --fix → PR branch)
+    name: autofix (doc-sync --fix → PR comment)
     needs: gates
     if: >-
       failure() && github.event_name == 'pull_request'
@@ -149,7 +172,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
+      # 2026-10-02：contents: write → pull-requests: write。
+      # 只需要发评论，不再需要推送分支——最小权限。
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -174,25 +199,53 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         working-directory: backend
         env:
-          PYTHONPATH: 'vendor:.'
+          PYTHONPATH: '.'
           RETRIEVAL_BACKEND: inmemory
         run: |
           set -o pipefail
-          # 退出码 1 = 仍有判读类 FAIL（悬空引用等）：计数已自愈，继续推补丁，剩余问题留给人/Agent；
+          # 退出码 1 = 仍有判读类 FAIL（悬空引用等）：计数已自愈，剩余问题留给人/Agent；
           # >1 才是脚本异常，直接失败。
           python ../skills/doc_sync_check.py --fix 2>&1 | tee /tmp/doc-sync-fix.log || rc=$?
           rc=${rc:-0}
           if [ "$rc" -gt 1 ]; then exit "$rc"; fi
-      - name: 有补丁才推回 PR 分支
+      # 2026-10-02 语义变更：原实现把 --fix 结果**推回 PR 分支**，即门禁改写自己的输入——
+      # 一条 --fix 的正则回归就能静默把 PR 洗绿，而作者在 PR 列表里看不到任何 diff。
+      # 改为**只发 PR 评论**：补丁内容可见、可审，由人决定是否采纳。
+      - name: 把自愈建议发成 PR 评论（不推分支）
         if: steps.guard.outputs.skip != 'true'
-        run: |
-          if git diff --quiet; then
-            echo "无可自愈改动（--fix 未改写任何计数），不推送"
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -u -- '*.md'   # 只提交 --fix 改写的已跟踪文档（不是 add -A）
-          git commit -m 'docs(sync): doc-sync 自动修复确定性计数（CI autofix）' \
-            -m "$(grep '^FIX' /tmp/doc-sync-fix.log || echo '明细见 autofix job 日志')"
-          git push origin "HEAD:${{ github.head_ref }}"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const log = fs.existsSync('/tmp/doc-sync-fix.log')
+              ? fs.readFileSync('/tmp/doc-sync-fix.log', 'utf8') : '';
+            const fixes = log.split('\n').filter(l => l.startsWith('FIX'));
+            const body = fixes.length
+              ? [
+                  '### doc-sync 自动修复建议（**未自动提交**）',
+                  '',
+                  '门禁发现文档计数与仓库事实不一致，可自愈如下。此处**只提议、不推送**——',
+                  '请自行核对后手动采纳（`doc_sync_check.py --fix`）。',
+                  '',
+                  '```diff',
+                  fixes.join('\n'),
+                  '```',
+                ].join('\n')
+              : '### doc-sync 自动修复：无计数漂移，无需处理。';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            // 幂等：更新上一次 bot 留下的评论，避免刷屏
+            const marker = '<!-- doc-sync-autofix -->';
+            const { data: existing } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
+            });
+            const prior = existing.find(c => c.body && c.body.includes(marker));
+            if (prior) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: prior.id, body: marker + '\n' + body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body: marker + '\n' + body,
+              });
+            }

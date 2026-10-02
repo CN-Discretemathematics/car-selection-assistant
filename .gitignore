@@ -47,6 +47,7 @@ next-env.d.ts
 .tools/
 .arkcli-install/
 .dsh-test/
+.workbuddy/          # agent 工作记忆目录：本地专属，不入库
 ark-plan-api-*.tgz
 dsh-ark-plugin-install.*
 .ark-examples/

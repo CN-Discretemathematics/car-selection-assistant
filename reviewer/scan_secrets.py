@@ -245,7 +245,37 @@ def _git_ignored_paths(root: Path, rel_paths: list[str]) -> set[str]:
     return ignored
 
 
-def scan_path(root: Path, verbose: bool = False) -> list[dict]:
+def _git_tracked_files(root: Path) -> set[str] | None:
+    """返回 git 跟踪的文件集合（posix 相对路径）；不可用时返回 None。
+
+    2026-10-02：与 skills/doc_sync_check.py 同源思路——**判定真值 = git 索引**，
+    保证「本地跑 == CI 跑」。
+
+    原实现遍历**工作区**，只豁免 gitignored 路径，于是未跟踪且未被 gitignore 的
+    本地文件（agent 工作目录 .workbuddy/、编辑器临时目录等）会造成
+    **本地红、CI 绿**（CI 检出里根本没有这些文件）。doc_sync_check 已在
+    2026-09-16 修过同一个问题（PR #29），此处是未传播的那一份。
+
+    非 git 仓库 / git 不可用 / 超时 → None，调用方退回工作区遍历（保守）。
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return {p for p in proc.stdout.split("\0") if p}
+
+
+def scan_path(root: Path, verbose: bool = False, tracked: set[str] | None = None) -> list[dict]:
     findings: list[dict] = []
     # os.walk 剪枝：跳过 node_modules/.git/.tmp 等大目录，避免无谓遍历拖慢扫描
     for dirpath, dirnames, filenames in os.walk(root):
@@ -253,6 +283,9 @@ def scan_path(root: Path, verbose: bool = False) -> list[dict]:
         for name in sorted(filenames):
             path = Path(dirpath) / name
             if path.resolve() == SCANNER_SELF:
+                continue
+            # 索引判定：未跟踪的文件不进扫描范围（CI 检出里不存在它们）。
+            if tracked is not None and path.relative_to(root).as_posix() not in tracked:
                 continue
             if _is_ignored(path, DEFAULT_IGNORE_DIRS):
                 continue
@@ -343,6 +376,11 @@ def main(argv: list[str] | None = None) -> int:
         "--strict-ignored", action="store_true",
         help="gitignored 路径的命中也计入退出码（严格审计用）",
     )
+    parser.add_argument(
+        "--worktree", action="store_true",
+        help="扫描整个工作区（含未跟踪文件）——默认只扫 git 索引，"
+             "以保证「本地跑 == CI 跑」。仅在做本地取证时使用。",
+    )
     args = parser.parse_args(argv)
 
     root = Path(args.path).resolve()
@@ -350,7 +388,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"错误：路径不存在或不是目录: {root}", file=sys.stderr)
         return 1
 
-    findings = scan_path(root, verbose=args.verbose)
+    tracked = None if args.worktree else _git_tracked_files(root)
+    findings = scan_path(root, verbose=args.verbose, tracked=tracked)
     ignored = set() if args.strict_ignored else _git_ignored_paths(root, [f["file"] for f in findings])
     for f in findings:
         f["gitignored"] = f["file"].replace(os.sep, "/") in ignored
