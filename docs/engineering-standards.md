@@ -127,8 +127,14 @@ fan-out 指标与本文件的人工评审共同覆盖。待补的检查应扫描
 
 补充：**死代码目标为 0**。当前疑似 1 处；`TODO`/`FIXME`/`HACK`/`XXX` 全仓仅 2 处——**这是本仓的亮点，规范予以肯定而非批判**。
 
-**判定方式**：1/2/6 由 `ruff` 的 `C901`、`PLR0912`、`PLR0915`、`ARG001` 产出报告（**只报不 fail 起步**）；
-3/4/5/7/8 由 `tools/quality_metrics.py` 产出报告并归档为 CI artifact。**报告即看板**——看板存在即代表没忽略。
+**判定方式（2026-10-03 实测更正）**：1/2/6 的口径**当前只有 `tools/quality_metrics.py` 在产出**。
+原文写「由 ruff 的 `C901`/`PLR0912`/`PLR0915`/`ARG001` 产出报告」——实测不成立：这四条规则**不在
+`pyproject.toml` 的 `select` 集合里**（`select = ["E","F","W","I","B","BLE","C4","SIM"]`），
+对应的 `mccabe.max-complexity` / `pylint.max-*` 阈值**不产出任何报告**，只是摆设。
+一个规范把「配置里写了阈值」当成「有人在看这个数」，等于自己教人跳过核对。
+3/4/5/7/8 同样由 `tools/quality_metrics.py` 产出报告并归档为 CI artifact。
+**报告即看板**——看板存在即代表没忽略；要让 ruff 侧也出复杂度报告，须先把 `C90`/`PLR`
+加进 `select` 并按实测存量定档（存量 43 个函数 > 20、7 个 ≥ 51，最大 148），属 P6。
 
 ### 4.3 长参数列表的排除项
 
@@ -288,14 +294,16 @@ fan-out 指标与本文件的人工评审共同覆盖。待补的检查应扫描
 
 ## 附录 B：CI 现状与缺口
 
-| 项 | 状态（2026-10-02） |
+| 项 | 状态（2026-10-03） |
 | --- | --- |
 | pytest 全量 | ✅ CI 跑（`backend` job） |
 | `tsc --noEmit` + `next build` | ✅ CI 跑（`web` job） |
-| 前端测试 | ❌ **CI 从不跑**（P0 修复） |
-| `doc_sync_selftest.py` | ❌ **不在任何 CI job**（P0 修复） |
-| ruff / eslint | ❌ 无配置（P0 建立） |
-| 覆盖率下限 | ❌ 无（P0 建立棘轮） |
+| 前端测试 | ✅ 已接进 `web` job（P0 修复，2026-10-02；此前**从不执行**） |
+| `doc_sync_selftest.py` | ✅ 已接进 `gates` job（P0 修复，2026-10-02；此前不在任何 job） |
+| 覆盖率 | ✅ **实测 87%**，`fail_under=85` 棘轮已生效，`coverage.xml` 归档（P0 修复，2026-10-03；此前 pyproject 声明了口径而 CI 从未传 `--cov`） |
+| ruff | ⚠️ **配置已建 + 已接进 `lint` job（report-only）**，基线 130 条。**不阻塞合入**：85 条集中在 F401/I001，而自动修复有真实风险（I001 会把 `app.*` 排到 `load_dotenv()` 之前；F401 会删掉 `__init__` 的 re-export） |
+| eslint | ❌ 配置在 `web/eslint.config.mjs`，但依赖刻意未加进 `package.json`（加了不更新 lockfile 会让 CI `--frozen-lockfile` 失败），故**仍未执行** |
 | 依赖升级扫描 | ❌ 无 |
-| pre-push 门禁 | ⚠️ 仅本地 hook，**新 clone 没有**（P1 修复） |
-| 门禁自写回 | ❌ `autofix` job 持写权限可改门禁（P1 修复） |
+| pre-push 门禁 | ✅ 已接进 `gates` job（**当前只报不拦**，因范围内含历史违规提交 `f590eb2`，按 R13 不追溯） |
+| 门禁自写回 | ✅ `autofix` 改为只发 PR 评论，权限降到 `pull-requests: write`（P1 修复） |
+| 覆盖率棘轮抬升 | ⏳ 连续两次 CI 实测 ≥ 87 后把 `fail_under` 抬到 87 |

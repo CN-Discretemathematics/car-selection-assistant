@@ -43,6 +43,12 @@
   （输入/产出/完整 prompt 见 `skills/doc-sync.md`），它直接改文档并出报告，报告并入提交说明；
   机械计数交给 `doc_sync_check.py --fix`；两道都过再 commit
 - 端到端判据先定义再动手（真后端 + 真 DOM 断言），参考 `skills/` 同类脚本。
+- **ruff（2026-10-03 起可跑）**：`backend\.venv\Scripts\python.exe -m ruff check .`
+  在 `backend/` 下。基线 **130 条**，CI `lint` job 只报不拦。**不要无脑 `--fix`**：
+  I001 会把 `app.*` 排到 `load_dotenv()` 之前（搞坏环境加载），F401 会删掉
+  `__init__.py` 的 re-export（外部 import 崩）。改动后若计数上升需在提交信息里说明。
+  它的 `target-version = "py311"` 是本仓 3.11 兼容承诺的**唯一自动化执行点**——
+  3.12-only 语法（如 f-string 内反斜杠）只有它能抓，CI 与本地 pytest 都不会红。
 
 ## Instincts（0.9 级教训，每次会话生效；完整库见 docs-local/instincts.md）
 

@@ -76,8 +76,8 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 | 工具 | 配置 | 依据 |
 | --- | --- | --- |
 | ruff | `select = ["E","F","W","I","B","BLE","C4","SIM"]`，`line-length = 120`，`target-version = "py311"` | 现有抑制码与该集合一致 |
-| ruff | 复杂度规则 `C90`（`max-complexity = 20`）、`PLR0912`、`PLR0915`、`ARG001`（`ignore-variadic-names`）——**只报不 fail** | 服务规范的 8 维指标，是 P6 看板的数据源 |
-| ruff | `per-file-ignores`：`backend/tools/**` 忽略 `E402` | 96 处 E402 集中在 tools 的 `sys.path` 引导；P6.1 抽取 bootstrap 后可取消 |
+| ruff | 复杂度规则 `C90`（`max-complexity = 20`）、`PLR0912`、`PLR0915`、`ARG001`——**只报不 fail** | 服务规范的 8 维指标，是 P6 看板的数据源。⚠️ 2026-10-03 实测更正：`ARG001` 的配套项 `pylint.ignore-variadic-names` **已被新版 ruff 移除**，写上去会让整份配置解析失败；且 `C90`/`PLR` **不在 `select` 里**，这些阈值当前不产出任何报告。复杂度的真实来源仍是 `tools/quality_metrics.py` |
+| ruff | `per-file-ignores`：`backend/tools/**` 忽略 `E402` | 96 处 E402 集中在 tools 的 `sys.path` 引导。⚠️ 2026-10-03：该豁免**已删除**——P2 的 `tools/_bootstrap.py` 收敛后 96 处抑制注释全部消失，剩下 3 处合法顺序依赖改为逐处 inline `noqa` 写明理由。整目录豁免留着只会让新引入的 E402 静默通过 |
 | pytest | `--cov=app --cov-report=term-missing`，`fail_under` 从实测值起步并棘轮上升 | 当前零覆盖底线 |
 | eslint | `next/core-web-vitals` + `react-hooks/exhaustive-deps` | 现有 6 处抑制与之匹配 |
 | mypy | **暂不开** | 全动态 ORM、零注解基础，一次性开必爆噪音。推迟到 P3 之后 |
@@ -100,9 +100,9 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 | `doc_sync_selftest.py` | ✅ 已接进 `gates` job——此前 AGENTS.md 强制要求却无人执行 |
 | 删 `vendor` 死配置 | ✅ 两处 PYTHONPATH 已清理 |
 | `tools/quality_metrics.py` | ✅ 已建并**实跑通过**。纯标准库 AST，8 维看板，CI 归档为 artifact。这是 P6 泳道的「可见性」技术实现 |
-| **ruff 实测存量（P0.1）** | ❌ **未完成**。本机网络不可达（`pip install ruff` 连接被重置），装不上 ruff。**因此不声称「ruff 规则集已验证为绿」**——首次实跑结果待 CI 确认 |
-| eslint 实跑 | ❌ 未完成，同上（且本机 pnpm 会试图重装 node_modules，已按 R10 规避） |
-| 覆盖率 `fail_under` | ❌ 未设。实测基线需 `pytest-cov`，本机装不上；先只出报告，实测后再逐版本抬升 |
+| **ruff 实测存量（P0.1）** | ✅ **2026-10-03 完成**。装上 ruff 0.16.10 首跑，立刻暴露三个此前「声明了但从未执行」的事实：① 配置里的 `pylint.ignore-variadic-names` 已被移除，`ruff check` 在读配置阶段就 exit 2；② `shadow_report.py` 用了 **3.12-only 的 f-string 转义**，而本仓对外声明 3.11+（CI 与生产镜像都是 3.12，所以谁也没撞到）；③ 复杂度阈值因 `C90`/`PLR` 未 select 而从不产出报告。修完 ①②，**基线 130 条**（F401 45 / I001 40 / F841 7 / B905 7 / 其余零散），已接进 CI `lint` job（report-only） |
+| eslint 实跑 | ❌ 未完成（本机 pnpm 会试图重装 node_modules，已按 R10 规避）。配置在 `web/eslint.config.mjs`，依赖仍未加进 `package.json` |
+| 覆盖率 `fail_under` | ✅ **2026-10-03 实测并设下限**：`pytest-cov 7.1.0` 实测 **87%**（7395 语句 / 778 未覆盖 / 分支 389 条部分覆盖），下限设 **85**（留 2 点平台余量，避免单平台采样值正好压在地板上给 CI 埋雷）。⚠️ 同时发现 pyproject 声明了覆盖率口径而 **CI 从未传 `--cov`**，现已补上传参 + `coverage.xml` artifact |
 
 > 降级路径按 R11 执行：配置按证据写、不谎报已绿；能跑的部分（`quality_metrics.py`）**已实跑验证**并成为 P6 的真实看板。
 
@@ -417,4 +417,5 @@ FastAPI 路由的 `Query()` 参数 · 任何「拆出了无意义中间层」的
 - 未在真实 CI checkout 内观察 `scan_secrets`——其 CI 行为由代码路径推断，非实测。
 - 分支保护状态、`autofix` job 的写权限属**仓库设置**，无法从工作区推导。
 - H2（全量目录扫描）的**墙钟影响**由调用点推导，未用查询日志实测。
-- 若本地无法安装 `ruff`，P0.1 的存量实测改用 AST 脚本完成，**并在 PR 描述中如实标注「未在本机验证」**，不谎报已绿。
+- ~~若本地无法安装 `ruff`，P0.1 的存量实测改用 AST 脚本完成~~ → **已不适用**（2026-10-03 pypi 恢复可达，ruff 实测已完成，见 P0 执行结果表）。保留此行是为了记下那条预案：**它没被用上，是因为环境恢复了，不是因为它不管用**。
+- ruff 基线 130 与覆盖率 87% 均为 **Windows / Python 3.12 单次采样**。CI 首跑后应以 Linux 侧数字回写 `pyproject.toml` 与本表——`lint` job 的 artifact 已带计数，届时直接核对即可。
