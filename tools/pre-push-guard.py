@@ -150,6 +150,9 @@ SCOPE_PATHS: dict[str, list[str]] = {
     "hygiene": ["tools/", ".githooks/", "skills/", "docs/", "AGENTS.md", "README", "RAG.md", "reviewer/"],
     "chore": [".github/", ".gitignore", "tools/", ".githooks/", "README", "LICENSE"],
     "test": ["backend/tests/", "web/"],
+    # 2026-10-02：backend/tools/ 此前无任何 scope 覆盖（data 只覆盖 app/ 下的域目录），
+    # 导致抓取/导入/评测脚本的修复无法通过本门禁，只能走 PUSH_GUARD_ALLOW 放行。
+    "tools": ["backend/tools/", "backend/tests/test_autohome", "backend/tests/test_sku"],
 }
 
 # 中性路径：任何 scope 都允许触碰（跨切面的测试 / 文档 / CI / 根级工具）。
