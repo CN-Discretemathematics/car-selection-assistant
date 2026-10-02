@@ -957,7 +957,13 @@ class AgentEngine:
             # 不含购车意图词的消息会掉进通用对话分支，由模型凭记忆回答（实测又答成
             # 「奔驰只有三款纯电」）——必须回到确定性链路，用累计画像重出推荐。
             structured = True
-            await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
+        # 2026-10-02（P5.4 / M4）：原先这里有 3 次**连续**的 set_profile
+        # （品牌合并后 / 解锁后 / 重新锁定后），写的是同一个 profile 对象——
+        # 后一次必然覆盖前一次。生产存储是云 Redis（socket_timeout=3s），
+        # 每次都是一次串行往返，最坏情况一轮对话多付 3 次。
+        # 合并为**一次无条件写**：放在 987 所在位置之后，三种变更都已被吸收。
+        # 注：932 那次保留——`is_chatty` 会在此之后直接 return，那时
+        # 品牌/锁定逻辑尚未执行，那次写是唯一一次落盘机会。
         # 评审 m2：否定词**直接指向**已锁定车系（「我不买星愿了，想要15万的燃油车」）
         # 等同明确解锁——否则「锁定车系 ∩ 新硬约束」为空，推荐必然为空。
         # 只按近距离共现判定：「不想要SUV了，看看银河星愿」否定的是车身形式，
@@ -977,14 +983,16 @@ class AgentEngine:
                     s.id for s, _brand in resolved if negates_series(message, s.name)
                 }
                 profile.locked_series_ids = [i for i in profile.locked_series_ids if i not in dropped]
-            await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         if resolved:
             # 会话记忆：用户点名的车系持续锁定，直到明确要求「看其他车」；
             # 否定语境（「我不买汉兰达」）不加锁（评审 P2）
             if not wants_unlock and not NEGATION_RE.search(message):
                 mentioned = [s.id for s, _ in resolved]
                 profile.locked_series_ids = sorted(set(profile.locked_series_ids) | set(mentioned))
-                await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
+        # 唯一一次落盘：无条件，覆盖上面品牌合并 / 解锁 / 重新锁定三种变更。
+        # 原来分散在 3 处条件写里，任何一条分支漏写都会丢画像——统一到末尾后，
+        # 「本轮结束前画像一定已持久化」成为结构性保证而非人工纪律。
+        await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
 
         # 0.55) 同车系「版本 / 款型差异」提问 → 确定性版本级对比（用户反馈 P1）。
         #       必须排在车系档案问答之前：档案用的是车系级聚合事实（同键跨款归并成一行），

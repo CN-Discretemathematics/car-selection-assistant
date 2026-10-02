@@ -262,7 +262,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | H3 | `backend/app/agent/engine.py` 14 处 | `async def` 内裸调同步 `Session`，阻塞事件循环 |
 | H4 | `backend/app/agent/series_qa.py` | 两条最热问答路径的 N+1 —— ✅ **已修**（P5.2）→ `catalog.services.variants_current_prices` / `variants_facts`，5 例逐条等价性回归（性能优化的前提是结果逐字相同） |
 | H5 | `backend/app/agent/engine.py:677-679` | shadow 任务异常从未取回，静默死亡 |
-| H6 | `backend/app/sources/autohome_sku.py:25-28` | `MOBILE_UA` 伪装 iPhone，与 README 合规声明矛盾 |
+| H6 | `backend/app/sources/autohome_sku.py:25-28` | `MOBILE_UA` 伪装 iPhone，与 README 合规声明矛盾 —— ✅ **已修并实测**（2026-10-03）：改用 `fetcher.DEFAULT_USER_AGENT`，直调 `fetch_sku_config` 抓 3 个车系（8433/8529/8171）款型 4/8/9 条、配置组 21/22/23 组，无 403 无空数据 → 对方不拦非浏览器 UA，改动零代价 |
 | H7 | `web/app/compare/page.tsx:49,63,126,160` | 4 请求串行瀑布；后端每次查看执行**两次** `analyze_comparison` |
 | H8 | `web/app/ops/rag/page.tsx:296-311` | 轮询 interval 在 unmount 泄漏 |
 | H9 | `web/app/ops/rag/page.tsx:245,617` | 3/4 个 tab 失败后永久「加载中…」，无重试入口 |
@@ -272,7 +272,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | 位置 | 问题 |
 | --- | --- |
 | `backend/app/agent/engine.py`（`_shadow_route`） | `llm_elapsed_ms` 只计最后一次重试，**低估**重试样本开销 —— ✅ **已修**：改为总墙钟，并新增 `llm_last_attempt_ms`。⚠️ 切流判据 4 用的是**回答级**耗时日志，不受此字段影响；只影响 shadow 诊断的 p50/p95 |
-| `backend/app/agent/engine.py:789` 等 | 单轮最多 4 次串行 `set_profile` Redis 往返 |
+| `backend/app/agent/engine.py` | 单轮 8 次串行 `set_profile` Redis 往返（审计原记「4 次」，实测为 8）—— ✅ **2026-10-03 部分收敛**（P5.4 / M4）：品牌合并/解锁/重锁三处的 3 次**连续**写合并为 1 次无条件写，8 → 6。剩余 6 处各有不可替代职责（早退前 1、退路分支 3、解锁后 1、脏画像自愈 1），不再合并 |
 | `backend/app/agent/engine.py:1786-1788` | 全量 history 无 token 预算注入 prompt |
 | `backend/app/agent/tools.py` `tradeoffs` | **整条链曾是死代码**——`recommendation_tool` 从不 append，消费链恒空 —— ✅ **2026-10-02 已修活**（纯计算版取舍叙事，见 `docs/sales-agent-proposal.md` L3）。同时修 `engine.py` `break` 只跳出内层的上限失效 bug |
 | `backend/app/agent/tools.py:397-399` | `brand_series_count` 统计**过滤后候选集**而非品牌规模，跨查询不可比 |
@@ -341,8 +341,8 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | H2 `recommendation_tool` 加 SQL LIMIT | 最大延迟项，**每请求无缓存**。⚠️ **本轮只做了可观测化，未改行为**：加 LIMIT 会让「取前 N 条」退化成「随便取 N 条」（排名由 8 维软评分决定，SQL 侧复现不了同一排序），推荐结果静默改变且无法证明被丢掉的更差。已加 `candidates_scanned`（一次 COUNT）+ 超阈告警 + 7 例回归（`limit` 只截断输出、不改变入选者）。**真要收敛需先跑检索评测对齐基线**，本机无向量库/无 LLM key 跑不了 |
 | H4 `series_qa` N+1 | ✅ **已完成** → 批量装载价格与 facts（`catalog.services`），5 例等价性回归 |
 | `vehicles/router.py:41` 下推 SQL 过滤 | 须保持与 `/home`、详情页一致的口径 |
-| `engine.py` 4 次串行 `set_profile` | 收敛为末尾单次持久化 |
-| H6 `MOBILE_UA` → 诚实爬虫 UA | **合规修复**，不是风格调整 |
+| `engine.py` 8 次串行 `set_profile` | ✅ **已部分收敛**（P5.4 / M4）：3 次连续写合并为 1 次无条件写，8 → 6。剩余 6 处职责互不替代，再合并会改变「退路分支也持久化」的语义 |
+| H6 `MOBILE_UA` → 诚实爬虫 UA | ✅ **已修并实测**（2026-10-03，3/3 车系成功）：这是**合规修复**，不是风格调整 |
 | 库层补重试（退避+抖动） | 消除 tools/app 两处重复实现 |
 | H7 compare 请求瀑布 | 合并端点或并行；后端消除重复 `analyze_comparison` |
 | H8/H9 ops/rag 轮询泄漏 + tab 永久加载 | 统一 `useAsync` 同时修两者 |

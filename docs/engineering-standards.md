@@ -221,10 +221,10 @@ fan-out 指标与本文件的人工评审共同覆盖。待补的检查应扫描
 - **R8.4** checkpoint / 断点续传**必须**防并发写。
 - **R8.5** 落库的错误**必须**截断（如 `validate_payload` 截断到 100 条），调用方按该上限设计，不可取消。
 
-**现状基线（2026-10-02）**：
-- `backend/app/sources/autohome_sku.py:25-28` 定义 `MOBILE_UA` 伪装 iPhone 并配 `Referer`，与 `backend/app/sources/fetcher.py:19` 的诚实爬虫 UA 策略**直接矛盾**。
-- `backend/app/sources/autohome_sku.py:112`、`:123` 库层**零重试**；重试只在 `tools/` 层且为固定 3s、无退避无抖动、非瞬时错误也重试。
-- `backend/app/sources/importer.py:166` 的 `errors[:100]` 截断是 R8.5 的正面样板，**不可移除**（调用方按它切片）。
+**现状基线（2026-10-03 更新）**：
+- ✅ R8.1 曾唯一的违反点已修：`autohome_sku.py` 原有 `MOBILE_UA` 伪装 iPhone 并配 `Referer`，与 `fetcher.py:19` 的诚实爬虫 UA 策略直接矛盾。现已统一为 `fetcher.DEFAULT_USER_AGENT`，并**在真实网络上实测**（2026-10-03，3 个车系全部成功、无 403）——证明「诚实标识」在本项目唯一的目标站点上零代价，不需要为抓取成功率牺牲诚实性。
+- `backend/app/sources/autohome_sku.py` 库层**零重试**（R8.2/R8.3 未达标）；重试只在 `tools/` 层且为固定 3s、无退避无抖动、非瞬时错误也重试。
+- `backend/app/sources/importer.py` 的 `errors[:100]` 截断是 R8.5 的正面样板，**不可移除**（调用方按它切片）。
 
 ---
 
