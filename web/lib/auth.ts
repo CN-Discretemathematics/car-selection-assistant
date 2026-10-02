@@ -1,4 +1,5 @@
 import type { FavoriteOut, UserOut } from "@/lib/api";
+import { postJson, requestJson } from "@/lib/http";
 
 const TOKEN_KEY = "auth_token";
 
@@ -12,26 +13,8 @@ export function setToken(token: string | null) {
   else window.localStorage.removeItem(TOKEN_KEY);
 }
 
-async function post<T>(path: string, payload: unknown, token?: string): Promise<T> {
-  const res = await fetch(path, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify(payload),
-  });
-  const body = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(body?.detail ?? `请求失败（${res.status}）`);
-  return body as T;
-}
-
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, init);
-  const body = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(body?.detail ?? `请求失败（${res.status}）`);
-  return body as T;
-}
+const post = postJson;
+const request = requestJson;
 
 export interface AuthResult {
   token: string;

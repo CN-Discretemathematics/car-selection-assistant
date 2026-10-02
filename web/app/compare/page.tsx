@@ -9,6 +9,7 @@ import RiseText from "@/app/components/RiseText";
 import SiteHeader from "@/app/components/SiteHeader";
 import { askAgent } from "@/lib/agentTriggers";
 import { MISSING_VALUE_LABEL } from "@/lib/labels";
+import { extractErrorDetail } from "@/lib/http";
 import {
   CATEGORY_LABELS,
   ENERGY_LABELS,
@@ -56,7 +57,9 @@ function useComparison(): { data: ComparisonDetail | null; error: string | null 
           const body = await createdRes.json().catch(() => null);
           if (!cancelled) {
             setData(null);
-            setError(body?.detail ?? `请求失败（${createdRes.status}）`);
+            // detail 未必是字符串：FastAPI 422 返回对象数组，直接当 React child
+            // 渲染会抛 "Objects are not valid as a React child" 整页白屏。
+            setError(extractErrorDetail(body, `请求失败（${createdRes.status}）`));
           }
           return;
         }

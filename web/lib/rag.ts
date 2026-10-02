@@ -1,3 +1,5 @@
+import { authedJson } from "@/lib/http";
+
 /** RAG 流程管理 API（后端 /api/v1/admin/rag/*，管理凭据 Bearer token）。 */
 
 const TOKEN_KEY = "***";
@@ -12,19 +14,11 @@ export function setAdminToken(token: string | null) {
   else window.localStorage.removeItem(TOKEN_KEY);
 }
 
-async function request<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(`/api/v1/admin/rag${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      ...(init.headers ?? {}),
-    },
-  });
-  const body = await res.json().catch(() => null);
-  if (!res.ok) throw new Error((body && body.detail) ?? `请求失败（${res.status}）`);
-  return body as T;
-}
+// 取 JSON / 判 ok / 抛错统一走 lib/http：那里对 `detail` 做了 string 收窄，
+// 避免 FastAPI 422 的对象数组被当成文案（此前这里与 auth.ts、compare 页各写一份，
+// 4 份都缺这个守卫）。
+const request = <T,>(path: string, token: string, init: RequestInit = {}) =>
+  authedJson<T>(path, init, token, "/api/v1/admin/rag");
 
 export interface GraphEdge {
   source: string;
