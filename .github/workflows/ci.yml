@@ -1,12 +1,14 @@
-# CI 门禁（2026-09-14 接入）：PR 与 main 的每次 push 都会执行
-#
+# CI 门禁（2026-09-14 接入；2026-10-02 补 lint 看板与两处缺失检查）：
 #   backend  —— 全量用例（vendor 不入库，按 requirements.txt 安装；Linux 下 PYTHONPATH 分隔符是冒号）
 #   gates    —— 三道静态门禁：密钥扫描 + 用户可见文案门禁 + 文档一致性（退出码必须为 0）
 #   autofix  —— gates 失败时对「确定性计数」自动跑 --fix 并推回 PR 分支（仅同仓库 PR）
-#   web      —— tsc 类型检查 + next build
+#   web      —— tsc 类型检查 + next build + **前端测试**（此前从不执行）
+#   metrics  —— 8 维代码质量看板（tools/quality_metrics.py），产出 artifact 供趋势对比
 #
 # 启用强制门禁：仓库 Settings → Branches → main 分支保护 →
 #   勾选 Require status checks → 选中 backend / gates / web 三个 check。
+# ⚠️ 2026-10-02：新增的 **metrics** 需手动勾选才会成为 required check，
+#    未勾选时它只产出 artifact，不阻止合入（见 docs/engineering-standards.md R10.5）。
 # autofix 需要写权限：Settings → Actions → General → Workflow permissions 勾
 #   Read and write permissions（否则只推不动，日志里报错，不影响其它 job）。
 # 部署不受影响：仍是服务器 05:00 拉 main（CI 只把关 PR 合入）。
@@ -45,7 +47,9 @@ jobs:
           python -m pip install -r requirements.txt
       - name: 测试
         env:
-          PYTHONPATH: 'vendor:.'        # Linux 分隔符是冒号（本地 Windows 为分号）
+          # 2026-10-02：去掉 vendor —— 该目录 0 个跟踪文件且被 .gitignore，
+          # 是死配置（git ls-files backend/vendor 返回 0）。
+          PYTHONPATH: '.'                # Linux 分隔符是冒号（本地 Windows 为分号）
           RETRIEVAL_BACKEND: inmemory
         run: python -m pytest -q
 
@@ -73,9 +77,39 @@ jobs:
       - name: 文档一致性门禁（退出码必须 0）
         working-directory: backend
         env:
-          PYTHONPATH: 'vendor:.'        # Linux 分隔符是冒号（本地 Windows 为分号）
+          PYTHONPATH: '.'
           RETRIEVAL_BACKEND: inmemory
         run: python ../skills/doc_sync_check.py
+      # 2026-10-02 补：AGENTS.md:41 强制「改过门禁判定逻辑后跑 doc_sync_selftest」，
+      # 但此前它不在任何 CI job 里——也就是说这条规则从未被自动执行过。
+      - name: 门禁自测（退出码必须 0）
+        run: python skills/doc_sync_selftest.py
+
+  # 8 维代码质量看板（2026-10-02 接入）：只报不拦，产出 artifact。
+  # 定位见 docs/engineering-standards.md §4.2 / §4.5——坏味道泳道（P6）**全表最低优先级**，
+  # 不排期、不阻塞，但**必须持续可见**；本 job 就是那个「可见」的技术实现。
+  # 一旦本 job 不再产出 artifact，P6 即视为失访。
+  metrics:
+    name: metrics (quality dashboard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # 纯标准库 AST，零第三方依赖——不装 requirements.txt 也能跑
+      - name: 生成质量看板
+        run: python tools/quality_metrics.py | tee quality-metrics.txt
+      - name: 生成机读看板
+        run: python tools/quality_metrics.py --json > quality-metrics.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quality-metrics
+          path: |
+            quality-metrics.txt
+            quality-metrics.json
+          retention-days: 90
 
   web:
     name: web (tsc + build)
@@ -97,6 +131,9 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec tsc --noEmit
+      # 2026-10-02 补：package.json 里 test 脚本从 4cdd7cc 起就存在，
+      # 但此前 CI 只跑 install/tsc/build——**前端测试从未在 CI 执行过**。
+      - run: pnpm test
       - run: pnpm run build
 
   # 自动修复（2026-09-16 接入）：gates 失败且是**同仓库 PR** 时，用 `--fix` 自愈「确定性计数」

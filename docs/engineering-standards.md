@@ -50,6 +50,7 @@
 - **R2.4** 编排层**禁止**在自身内写业务规则（评分、口径、优先级）。规则必须在域层。
 
 **判定方式**：计划新增 `skills/tools/arch_check.py`（roadmap P0 建立）扫描 `app/*` 下的 `import app.*`，命中 R2.1/R2.2/R2.3 即失败。
+（当前过渡期：这一维度由 `tools/quality_metrics.py` 的 fan-out 指标与本文件的人工评审共同覆盖，arch_check 待补。）
 
 **现状基线（2026-10-02）**：**3 处真实 import 环**
 - `app.rag.ingest` ↔ `app.rag.service`
@@ -125,7 +126,7 @@
 补充：**死代码目标为 0**。当前疑似 1 处；`TODO`/`FIXME`/`HACK`/`XXX` 全仓仅 2 处——**这是本仓的亮点，规范予以肯定而非批判**。
 
 **判定方式**：1/2/6 由 `ruff` 的 `C901`、`PLR0912`、`PLR0915`、`ARG001` 产出报告（**只报不 fail 起步**）；
-3/4/5/7/8 由计划新增的 `skills/tools/quality_metrics.py` 产出报告并归档为 CI artifact。**报告即看板**——看板存在即代表没忽略。
+3/4/5/7/8 由 `tools/quality_metrics.py` 产出报告并归档为 CI artifact。**报告即看板**——看板存在即代表没忽略。
 
 ### 4.3 长参数列表的排除项
 

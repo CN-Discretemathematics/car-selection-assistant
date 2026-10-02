@@ -90,6 +90,22 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 
 **P0.4** 删掉 `ci.yml` 中 `PYTHONPATH: 'vendor:.'` 的 `vendor`——该目录 0 个跟踪文件且被 gitignore，是死配置。
 
+**P0 本轮执行结果（如实记录，勿当成「已验证」）**：
+
+| 项 | 结果 |
+| --- | --- |
+| `backend/pyproject.toml` | ✅ 已建。ruff 规则集按既有 180 处抑制码反推，`mccabe.max-complexity=20` 定为**报告线非拦截线** |
+| `web/eslint.config.mjs` | ✅ 配置已建；**依赖刻意未加进 package.json**（加了不更新 lockfile 会让 CI `--frozen-lockfile` 直接失败）。启用需一次真实 `pnpm add -D` |
+| `web` 的 `pnpm test` | ✅ 已接进 CI——此前前端测试**从未在 CI 执行过** |
+| `doc_sync_selftest.py` | ✅ 已接进 `gates` job——此前 AGENTS.md 强制要求却无人执行 |
+| 删 `vendor` 死配置 | ✅ 两处 PYTHONPATH 已清理 |
+| `tools/quality_metrics.py` | ✅ 已建并**实跑通过**。纯标准库 AST，8 维看板，CI 归档为 artifact。这是 P6 泳道的「可见性」技术实现 |
+| **ruff 实测存量（P0.1）** | ❌ **未完成**。本机网络不可达（`pip install ruff` 连接被重置），装不上 ruff。**因此不声称「ruff 规则集已验证为绿」**——首次实跑结果待 CI 确认 |
+| eslint 实跑 | ❌ 未完成，同上（且本机 pnpm 会试图重装 node_modules，已按 R10 规避） |
+| 覆盖率 `fail_under` | ❌ 未设。实测基线需 `pytest-cov`，本机装不上；先只出报告，实测后再逐版本抬升 |
+
+> 降级路径按 R11 执行：配置按证据写、不谎报已绿；能跑的部分（`quality_metrics.py`）**已实跑验证**并成为 P6 的真实看板。
+
 ---
 
 ## 3. P1｜治理修正：让门禁真的生效

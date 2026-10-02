@@ -1,0 +1,84 @@
+# backend 工具配置（2026-10-02 建立）
+#
+# 建立背景：全仓此前**没有任何**静态分析配置——没有 ruff / mypy / eslint / pyproject，
+# 但代码里已有 180 处 ruff|mypy 抑制注释（96 E402、63 BLE001、5 F401、3 E731、
+# 2 SLF001、1 ANN001、1 B018、9 type:ignore）。抑制码的分布说明作者**曾经本地跑过**
+# 这套门禁，只是配置从未提交。本文件把那次隐式约定显式化。
+#
+# 注意：pytest 的配置**不在本文件**——backend/pytest.ini 优先级高于 pyproject.toml，
+# 同时写两处会让 pyproject 的 [tool.pytest.ini_options] 被静默忽略。
+# 覆盖率改为 CI 侧显式传 --cov（见 [tool.coverage] 与 .github/workflows/ci.yml）。
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "car-selection-backend"
+version = "0.1.0"
+description = "车型选择助手后端（FastAPI + SQLAlchemy + LangGraph RAG）"
+requires-python = ">=3.11"
+# 依赖真值仍在 requirements.txt（生产镜像与 CI 都按它装）；此处不重复声明，
+# 避免两处漂移。需要完整元数据时改为 dynamic = ["dependencies"] + tool.setuptools。
+
+# 开发/门禁专用依赖。**不进生产镜像**（deploy/backend.Dockerfile 只装 requirements.txt）。
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.6",        # lint + 复杂度报告（C901/PLR/ARG）
+  "pytest-cov>=5.0",  # 覆盖率（CI 的 backend job 用）
+]
+
+# ── ruff ────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["alembic/versions", ".venv"]
+
+[tool.ruff.lint]
+# 与既有 180 处抑制码对齐：E402/F401/BLE001/SLF001/B018/ANN001/E731 全部落在此集合内。
+select = ["E", "F", "W", "I", "B", "BLE", "C4", "SIM"]
+ignore = [
+  "E501",    # 行长交给 formatter，不在 lint 阶段拦
+  "SIM108",  # 三元表达式不强制——多处 if/else 刻意写开以提高可读性
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 96 处 E402 几乎全在 tools/ 的启动样板：load_dotenv() 必须在读环境之后再 import app.*
+# 根因是这 8 份样板逐字重复，已在 roadmap P6.1 计划收敛到 tools/_bootstrap.py；
+# 收敛完成后应删除本行。
+"tools/*.py" = ["E402"]
+"alembic/env.py" = ["E402"]
+# 测试里大量 monkeypatch / 私有属性访问是刻意的（隔离外部依赖）
+"tests/*.py" = ["SLF001", "B011"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tools"]
+
+# ── 复杂度（docs/engineering-standards.md §4.2 的指标 1/2/6）────────────────
+# ⚠️ max-complexity = 20 是**报告线不是拦截线**。
+# 存量有 43 个函数 > 20、7 个 ≥ 51（最大 148），一次性 fail 会把 CI 直接打红。
+# 当前 CI 以「产出报告并归档」方式运行（见 ci.yml 的 lint job）；
+# 待首次实跑确认为绿后，再把 ruff 步骤改为阻塞。
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
+[tool.ruff.lint.pylint]
+max-branches = 12
+max-statements = 50
+max-args = 5
+ignore-variadic-names = true
+
+# ── 覆盖率 ──────────────────────────────────────────────────────────────────
+# 只声明报告口径与棘轮下限；--cov 由 CI 显式传入（本地默认不启用，
+# 避免没装 pytest-cov 时 `pytest -q` 直接失败）。
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = ["alembic/*", "*/__init__.py"]
+
+[tool.coverage.report]
+show_missing = true
+# 2026-10-02 起棘轮下限。当前基线未实测（本地装不上 pytest-cov），
+# 故**不设 fail_under**——先只出报告，实测出基线后再逐版本抬升。
+# 抬升时改这一行即可，是本仓唯一的覆盖率真值点。
+# fail_under = 0

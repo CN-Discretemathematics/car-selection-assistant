@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --experimental-strip-types --test \"lib/**/*.test.mts\""
+    "test": "node --experimental-strip-types --test \"lib/**/*.test.mts\"",
+    "lint": "eslint ."
   },
   "dependencies": {
     "next": "^15.5.0",
