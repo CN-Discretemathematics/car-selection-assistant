@@ -166,8 +166,9 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 | 来源引用块 | copy-paste 6 遍（`backend/app/agent/engine.py:1029-1042` 等），`[:3]` 上限与 `or '来源'` 兜底**微妙不一致** | 提取单一 `_source_citation_block()`；**6 处逐个对照差异并记录**——不一致本身就是缺陷线索 |
 | `tools/` CLI 样板 | 8 份逐字重复 | ✅ **本轮已完成** → `tools/_bootstrap.py` |
 | 能源类型泛化规则 | 3 份（其中 2 份行为不一致） | ✅ **本轮已完成** → `app/common/enums.py`（并修掉真实缺陷） |
-| 前端 `官方资料未披露` | 4 份副本 | 提取常量；**改用户可见文案必须过 `scan_ui_copy.py`** |
-| 前端 `priceDisplay` 空值规则 | 3 份逐字副本 | 提取共用函数并补测试 |
+| 前端 `官方资料未披露` 字面量 | 散落 4 处 | ✅ **本轮已完成** → `web/lib/labels.ts`，与后端 `MISSING_VALUE_LABEL` 对齐 |
+| 前端 `priceDisplay` 空值规则 | 3 份逐字三元式 | ✅ **本轮已完成** → `api.ts` 的 `resolvePriceRangeNote`，补 5 例测试 |
+| `formatPrice(null)` 与 `MISSING_VALUE_LABEL` 不一致 | 价格缺失说「暂无」，参数/在售款型缺失说「官方资料未披露」 | **刻意不改**：属产品口径决策（改 `formatPrice` 会影响所有调用点的用户可见文案）。已记入 `labels.ts` 注释，等产品拍板 |
 | 前端 fetch/`ok`/`json().catch` | 4 份 | 提取共用层，带上 `typeof body?.detail === "string"` 守卫 |
 | `HomeFilters` / `BrowseFilters` | ~85% 重复 | 提取共用组件 |
 

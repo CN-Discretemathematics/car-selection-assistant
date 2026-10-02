@@ -8,6 +8,7 @@ import Reveal from "@/app/components/Reveal";
 import RiseText from "@/app/components/RiseText";
 import SiteHeader from "@/app/components/SiteHeader";
 import { askAgent } from "@/lib/agentTriggers";
+import { MISSING_VALUE_LABEL } from "@/lib/labels";
 import {
   CATEGORY_LABELS,
   ENERGY_LABELS,
@@ -16,7 +17,7 @@ import {
   type CompareVariantOut,
 } from "@/lib/api";
 
-const MISSING_LABEL = "官方资料未披露";
+const MISSING_LABEL = MISSING_VALUE_LABEL;
 const MAX_COMPARE = 5;
 
 function useComparison(): { data: ComparisonDetail | null; error: string | null } {

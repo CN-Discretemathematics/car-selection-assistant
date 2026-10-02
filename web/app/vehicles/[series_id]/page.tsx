@@ -7,6 +7,7 @@ import Reveal from "@/app/components/Reveal";
 import RiseText from "@/app/components/RiseText";
 import ScrollToVariant from "@/app/components/ScrollToVariant";
 import SiteHeader from "@/app/components/SiteHeader";
+import { MISSING_VALUE_LABEL } from "@/lib/labels";
 import {
   BODY_LABELS,
   ENERGY_LABELS,
@@ -14,12 +15,12 @@ import {
   fetchServerJson,
   formatCount,
   formatPrice,
-  formatPriceRange,
+  resolvePriceRangeNote,
   type VariantOut,
   type VehicleDetail,
 } from "@/lib/api";
 
-const MISSING_LABEL = "官方资料未披露";
+const MISSING_LABEL = MISSING_VALUE_LABEL;
 
 /** 车型详情页：车系档案 + 参数配置 + 款型列表 + 唯一对外跳转入口。 */
 export default async function VehiclePage({
@@ -163,9 +164,7 @@ export default async function VehiclePage({
                   官方指导价区间
                 </p>
                 <p className="mt-2.5 text-[24px] font-semibold leading-8 tracking-tight text-ink">
-                  {detail.price_range.min === null && detail.price_range.max === null && detail.price_range_note
-                    ? detail.price_range_note
-                    : formatPriceRange(detail.price_range)}
+                  {resolvePriceRangeNote(detail.price_range, detail.price_range_note)}
                 </p>
                 <p className="mt-1.5 text-xs text-ash">只展示官方指导价，非成交价</p>
               </div>

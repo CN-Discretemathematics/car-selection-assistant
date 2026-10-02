@@ -10,6 +10,7 @@ import {
   type Clarification,
   type RecommendedVariant,
 } from "@/lib/api";
+import { MISSING_VALUE_LABEL } from "@/lib/labels";
 import { readCompareIds, writeCompareIds } from "./CompareBar";
 import { AGENT_ASK_EVENT } from "@/lib/agentTriggers";
 
@@ -485,7 +486,7 @@ function RecommendationCard({ variant }: { variant: RecommendedVariant }) {
       </Link>
       <p className="mt-1 flex flex-wrap items-baseline gap-x-2">
         <span className="text-gradient text-[17px] font-semibold tracking-tight">
-          {variant.price_cny != null ? formatPrice(variant.price_cny) : "官方资料未披露"}
+          {variant.price_cny != null ? formatPrice(variant.price_cny) : MISSING_VALUE_LABEL}
         </span>
         <span className="text-[11px] text-ash">
           {ENERGY_LABELS[variant.energy_type] ?? variant.energy_type}
