@@ -82,7 +82,19 @@ def warn(msg: str) -> None:
 
 
 def iter_project_md() -> list[Path]:
+    """枚举受本门禁约束的文档。
+
+    2026-10-02（P1.7）：新增「跳过 gitignored 文件」。此前只按硬编码的
+    SKIP_DIRS（其中含 docs-local）跳过本地文档，于是 `/backend/eval/`、
+    `resume/` 这些**已被 .gitignore 排除、CI 检出里根本不存在**的目录
+    仍被扫描——里面的悬空引用会让本地红、CI 绿，直接违反本脚本自己的
+    首要原则「判定真值 = git 索引，保证本地跑 == CI 跑」。
+
+    改用 `git check-ignore` 判定，与本文件其它检查（ignored_paths /
+    tracked_paths）同一套真值来源，不再维护第二份目录白名单。
+    """
     out: list[Path] = []
+    candidates: list[Path] = []
     for base in DOC_DIRS:
         if not base.exists():
             continue
@@ -92,7 +104,24 @@ def iter_project_md() -> list[Path]:
                 continue
             if any(rel.is_relative_to(pre) for pre in EXEMPT_PREFIXES):
                 continue
-            out.append(p)
+            candidates.append(p)
+
+    # 一次性批量问 git：哪些候选文件是本地专属（不会入库）
+    ignored: set[str] = set()
+    if candidates:
+        proc = _git(
+            ["check-ignore", "-z", "--stdin"],
+            stdin="\0".join(
+                p.relative_to(ROOT).as_posix() for p in candidates
+            ) + "\0",
+        )
+        if proc is not None and proc.returncode in (0, 1):
+            ignored = {x for x in proc.stdout.split("\0") if x}
+
+    for p in candidates:
+        if p.relative_to(ROOT).as_posix() in ignored:
+            continue
+        out.append(p)
     return sorted(set(out))
 
 
@@ -322,8 +351,12 @@ def check_dangling_refs(docs: list[tuple[Path, list[str]]]) -> None:
         if path in HISTORICAL_FILES:
             continue
         for i, line in enumerate(lines, 1):
-            if any(w in line for w in ALLOW_WORDS):
-                continue
+            # 2026-10-02（P1.7）：**悬空引用不再受 ALLOW_WORDS 豁免**。
+            # 实测此前有 194 条非空行（4.8%）因含「旧/历史/曾/删除/改用」等词
+            # 而被**整行**跳过悬空引用检查——而悬空引用是**机械事实**
+            # （路径在不在仓库里），不是需要语义判断的表述。任何一个只要
+            # 提到「历史」的行都能藏住一个坏路径，逃生口过宽。
+            # ALLOW_WORDS 仍然为「过期表述」检查保留（那是需要判读的部分）。
             for m in PATH_TOKEN.finditer(line):
                 token = m.group(1).strip().rstrip("。：,，;；)）").rstrip("/")
                 token = token.split("::", 1)[0]  # 「path.py::func」只核对文件部分

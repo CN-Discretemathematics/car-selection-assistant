@@ -63,6 +63,21 @@ def main() -> int:
         check(not any(l.startswith("FAIL") for l in out.splitlines()),
               "本地专属（gitignore）引用不再误报 FAIL")
 
+        # 2026-10-02（P1.7）：gitignored **文档本身**不再纳入扫描范围。
+        # 此前只跳过其中的「引用」，文件仍在被扫描——于是本地专属文档里的坏路径
+        # 照样让本地红、CI 绿，直接违反本脚本「判定真值 = git 索引」的首要原则。
+        # 探针放在 resume/：它既在 DOC_DIRS 里，又确实被 .gitignore 排除
+        # （不能放 skills/——那是入库目录，会被正常扫描，测不到本条）。
+        resume_dir = SANDBOX / "resume"
+        resume_dir.mkdir(exist_ok=True)
+        local_only = resume_dir / "_selftest_localonly.md"
+        local_only.write_text("- 引用 `skills/definitely_not_here_xyz.py`（本地专属）\n",
+                              encoding="utf-8")
+        rc, out = run_checker(SANDBOX)
+        check(rc == 0 and "definitely_not_here_xyz" not in out,
+              f"gitignored 文档整体跳过扫描（rc={rc}）")
+        local_only.unlink()
+
         # CI 视角没有 backend/.venv，用例数算不出来——`--fix` 此时**不许猜**；
         # 迁移数只依赖仓库文件，用它验证自愈路径。
         readme = SANDBOX / "README.md"
@@ -91,14 +106,16 @@ def main() -> int:
         probe.unlink()
         shutil.rmtree(scratch, ignore_errors=True)  # 探针目录必须清掉，否则下一轮误触 README 模块核对
 
-        # 前瞻豁免：带「计划/待建」标记的行引用**尚未创建**的目标文件，不判悬空
-        #（2026-09-17 全方向执行计划：计划文档会点名 tools/verify_mobile_matrix.py 等待建产物）
+        # 2026-10-02（P1.7）语义**反转**：「计划/待建」等前瞻词**不再**豁免悬空引用。
+        # 悬空引用是机械事实（路径在不在仓库里），不需要语义判断；此前任何一行只要
+        # 提到「计划」就能藏住一个坏路径，逃生口过宽（实测 194 条非空行被整行豁免）。
+        # 前瞻文档要引用尚未创建的文件，正确做法是**别把路径写进反引号**。
         probe = SANDBOX / "skills" / "_selftest_planned_probe.md"
         probe.write_text("- 计划新建 `backend/app/planned_scratch/module.py`（待建）\n",
                          encoding="utf-8")
         rc, out = run_checker(SANDBOX)
-        check(rc == 0 and "悬空路径引用" not in out,
-              f"「计划/待建」标记的前瞻引用不判悬空（rc={rc}）")
+        check(rc == 1 and "悬空路径引用" in out,
+              f"「计划/待建」标记**不再**豁免悬空引用（rc={rc}）")
         probe.unlink()
 
         # 2026-09 备案上线事故回归：过期表述黑名单（规则 8）

@@ -209,10 +209,33 @@ def _looks_like_identifier_or_path(value: str) -> bool:
 
 
 def _is_placeholder_url(url: str) -> bool:
-    """带凭据 URL 是否只是文档示例（含 ...、xxx、example、<...> 等占位标记）。"""
-    return bool(
-        re.search(r"(\.\.\.|xxx+|example|your[-_]|<[^>]+>|@\.\.\.)", url, re.IGNORECASE)
-    )
+    """带凭据 URL 是否只是文档示例。
+
+    2026-10-02（P1.9）：原先只对**整条 URL** 做标记匹配，于是
+    `backend/.env.example` 是**侥幸**通过的——
+
+        REDIS_URL=redis://:你的密码@r-xxx.redis.rds.aliyuncs.com:6379/0
+
+    密码 `你的密码` 是中文、不匹配任何标记；真正让它豁免的是**主机名**里的
+    `xxx`。也就是说：只要有人把主机名改成 `r-car01.redis...`（一个完全正常的
+    运维改名），这个**不含任何真实密钥**的示例文件就会开始报警，CI 变红。
+
+    现在分两层判：
+    1. URL 整体含占位标记（...、xxx、example、your-、<...>）——原有行为；
+    2. **凭据段本身**含中文/常见占位词（你的密码 / 密码 / 占位 / 替换 / 示例 …）——
+       与主机名无关地判它是示例。
+    """
+    if re.search(r"(\.\.\.|xxx+|example|your[-_]|<[^>]+>|@\.\.\.)", url, re.IGNORECASE):
+        return True
+    # 只看 userinfo（用户名:密码）——主机名不参与，否则会误伤正常域名
+    m = re.search(r"://([^/@\s]+)@", url)
+    if m and re.search(
+        r"(你的?密码|密码|口令|占位|示例|样例|替换|改成|填入|user|password|passwd|secret|token|changeme)",
+        m.group(1),
+        re.IGNORECASE,
+    ):
+        return True
+    return False
 
 
 def _git_ignored_paths(root: Path, rel_paths: list[str]) -> set[str]:

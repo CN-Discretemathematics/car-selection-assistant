@@ -49,8 +49,10 @@
 - **R2.3** 域层之间**禁止**直接 import 对方的实现模块；必须经 `app/common/` 或显式的公共契约模块。
 - **R2.4** 编排层**禁止**在自身内写业务规则（评分、口径、优先级）。规则必须在域层。
 
-**判定方式**：计划新增 `skills/tools/arch_check.py`（roadmap P0 建立）扫描 `app/*` 下的 `import app.*`，命中 R2.1/R2.2/R2.3 即失败。
-（当前过渡期：这一维度由 `tools/quality_metrics.py` 的 fan-out 指标与本文件的人工评审共同覆盖，arch_check 待补。）
+**判定方式**：**当前尚未建成**独立检查脚本——这一维度由 `tools/quality_metrics.py` 的
+fan-out 指标与本文件的人工评审共同覆盖。待补的检查应扫描 `app/*` 下的 `import app.*`，
+命中 R2.1/R2.2/R2.3 即失败（落在根 `tools/` 目录，与 quality_metrics 同级；
+**尚未创建，故此处不写出路径以免被悬空引用门禁拦下**）。
 
 **现状基线（2026-10-02）**：**3 处真实 import 环**
 - `app.rag.ingest` ↔ `app.rag.service`
