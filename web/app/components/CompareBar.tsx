@@ -4,7 +4,10 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 const STORAGE_KEY = "compare_variant_ids";
-const COMPARE_EVENT = "compare-changed";
+// 导出而非各自复制字面量：对比栏的清空/移除、卡片上的「加入对比」按钮必须
+// 订阅**同一个**事件名。此前 AddToCompareButton 根本没订阅（它只更新自己的
+// useState），于是底部移除后按钮仍显示「已加入对比」，再点一下反而把款型加回来。
+export const COMPARE_EVENT = "compare-changed";
 
 export function readCompareIds(): number[] {
   if (typeof window === "undefined") return [];
