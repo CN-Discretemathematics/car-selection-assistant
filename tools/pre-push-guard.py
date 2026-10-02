@@ -129,6 +129,9 @@ SCOPE_PATHS: dict[str, list[str]] = {
     "skills": ["skills/"],
     "sync": ["docs/", "skills/", "README", "RAG.md"],
     "docs": ["docs/", "skills/", "AGENTS.md", "README", "RAG.md", "tools/", ".githooks/", "LICENSE"],
+    # 2026-10-02：docs/engineering-standards.md 等规范性文档成批落地，需要一个只覆盖
+    # docs/ 的窄 scope——复用 "docs" 会顺带授权 tools/ 与 .githooks/（即门禁自身）。
+    "standards": ["docs/"],
     "hygiene": ["tools/", ".githooks/", "skills/", "docs/", "AGENTS.md", "README", "RAG.md", "reviewer/"],
     "chore": [".github/", ".gitignore", "tools/", ".githooks/", "README", "LICENSE"],
     "test": ["backend/tests/", "web/"],
