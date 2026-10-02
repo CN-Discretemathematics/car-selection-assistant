@@ -153,6 +153,15 @@ SCOPE_PATHS: dict[str, list[str]] = {
     # 2026-10-02：backend/tools/ 此前无任何 scope 覆盖（data 只覆盖 app/ 下的域目录），
     # 导致抓取/导入/评测脚本的修复无法通过本门禁，只能走 PUSH_GUARD_ALLOW 放行。
     "tools": ["backend/tools/", "backend/tests/test_autohome", "backend/tests/test_sku"],
+    # 2026-10-02：backend/app/common/ 此前只有 database.py 一个单文件 scope
+    # （见上方 database 条目的注释），其余 13 个模块（enums / errors / config /
+    # models / llm / redis_client / ratelimit / images / oss …）**完全无覆盖**。
+    # 动这些文件只能走 PUSH_GUARD_ALLOW。本条把 common/ 整体纳入，并把
+    # database 收窄为「双栈语义」（PRAGMA / 连接池），保持两者的职责区分。
+    "common": [
+        "backend/app/common/",
+        "backend/tests/test_database",
+    ],
 }
 
 # 中性路径：任何 scope 都允许触碰（跨切面的测试 / 文档 / CI / 根级工具）。
