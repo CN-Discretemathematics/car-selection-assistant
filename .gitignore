@@ -76,3 +76,11 @@ backend/.embed_cache.json*
 /backend/eval/
 /.tmp/
 *.tgz
+
+# ── 覆盖率产物（2026-10-03）──
+# backend job 起用了 --cov，产物落在 backend/ 下。此前 .coverage 既不在
+# 索引也不在 ignore，`git add -A` 会把二进制覆盖率库提交进仓库。
+/backend/.coverage
+/backend/.coverage.*
+/backend/coverage.xml
+/backend/htmlcov/

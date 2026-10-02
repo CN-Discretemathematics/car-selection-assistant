@@ -56,14 +56,20 @@ select = ["E", "F", "W", "I", "B", "BLE", "C4", "SIM"]
 ignore = [
   "E501",    # 行长交给 formatter，不在 lint 阶段拦
   "SIM108",  # 三元表达式不强制——多处 if/else 刻意写开以提高可读性
+  "B008",    # FastAPI 路由的 `x: T = Depends(y)` 是框架惯用法（35 处），
+             # 不是「在默认值里调用函数」的 bug。逐处 noqa 只会淹没真问题。
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# 96 处 E402 几乎全在 tools/ 的启动样板：load_dotenv() 必须在读环境之后再 import app.*
-# 根因是这 8 份样板逐字重复，已在 roadmap P6.1 计划收敛到 tools/_bootstrap.py；
-# 收敛完成后应删除本行。
-"tools/*.py" = ["E402"]
-"alembic/env.py" = ["E402"]
+# E402 现状（2026-10-03 首次实跑）：**全仓只剩 1 处**，在 app/retrieval/backends.py
+# ——已归位到文件顶部（config 只依赖 os/dotenv，无循环风险）。
+# 此前这里列的 96 处 tools/ 启动样板**已随 P2 的 tools/_bootstrap.py 收敛而消失**，
+# 故 tools/*.py / alembic/env.py 两条 E402 豁免已随之删除——留着会让新引入的
+# E402 静默通过，正是「豁免腐化」最常见的形态。
+#
+# ⚠️ 唯一风险点：若有人把 `load_dotenv()` 重新写回 import 之前，本仓会**再次**出现
+# 大量 E402，而那时这里已无豁免来兜底。这是刻意的：兜底会掩盖根因复发。
+
 # 测试里大量 monkeypatch / 私有属性访问是刻意的（隔离外部依赖）
 "tests/*.py" = ["SLF001", "B011"]
 
@@ -73,8 +79,14 @@ known-first-party = ["app", "tools"]
 # ── 复杂度（docs/engineering-standards.md §4.2 的指标 1/2/6）────────────────
 # ⚠️ max-complexity = 20 是**报告线不是拦截线**。
 # 存量有 43 个函数 > 20、7 个 ≥ 51（最大 148），一次性 fail 会把 CI 直接打红。
-# 当前 CI 以「产出报告并归档」方式运行（见 ci.yml 的 lint job）；
-# 待首次实跑确认为绿后，再把 ruff 步骤改为阻塞。
+#
+# ⚠️ 2026-10-03 首次实跑（ruff 0.16.10）更正两处此前"声明了但没人验证过"的问题：
+#   1. 旧配置里的 `pylint.ignore-variadic-names` 已被新版 ruff 移除，导致**整份配置
+#      无法解析**——`ruff check` 直接以 exit 2 死在读配置阶段。任何一次真跑都会
+#      立刻撞上它，这正是「声明 ≠ 可用」的典型代价。
+#   2. 下面的阈值**当前不生效**：C901(C90) / PLR0913 等规则不在上方 `select` 里，
+#      阈值只对「已选中的规则」起作用。复杂度报告的真实来源是
+#      tools/quality_metrics.py（纯 AST 看板），ruff 侧的复杂度口径待启用时再生效。
 [tool.ruff.lint.mccabe]
 max-complexity = 20
 
@@ -82,11 +94,10 @@ max-complexity = 20
 max-branches = 12
 max-statements = 50
 max-args = 5
-ignore-variadic-names = true
 
 # ── 覆盖率 ──────────────────────────────────────────────────────────────────
-# 只声明报告口径与棘轮下限；--cov 由 CI 显式传入（本地默认不启用，
-# 避免没装 pytest-cov 时 `pytest -q` 直接失败）。
+# --cov 由 CI 显式传入（本地 `pytest -q` 默认不启用，避免没装 pytest-cov 时直接失败）。
+# 2026-10-03 起 backend job 已真的传入 --cov（此前 pyproject 声明了口径，CI 却没执行）。
 [tool.coverage.run]
 source = ["app"]
 branch = true
@@ -94,7 +105,11 @@ omit = ["alembic/*", "*/__init__.py"]
 
 [tool.coverage.report]
 show_missing = true
-# 2026-10-02 起棘轮下限。当前基线未实测（本地装不上 pytest-cov），
-# 故**不设 fail_under**——先只出报告，实测出基线后再逐版本抬升。
-# 抬升时改这一行即可，是本仓唯一的覆盖率真值点。
-# fail_under = 0
+# 2026-10-03 首次实测：634 passed + 8 skipped，TOTAL 87%（7395 语句 / 778 未覆盖 /
+# 分支 2626 条中 389 条部分覆盖），pytest-cov 7.1.0 / Python 3.12 / Windows。
+#
+# 下限定 85 而非 87，是**故意留 2 个点的余量**：上面那个数是单平台单次采样，
+# Linux CI 上路径覆盖会有细微差异，把地板正好压在采样值上等于给 CI 埋一颗
+# 「今天红了但没人知道为什么」的雷。棘轮节奏：连续两次 CI 实测都 ≥ 87 再抬到 87，
+# 之后每版抬 1。抬升只改这一行——本仓唯一的覆盖率真值点。
+fail_under = 85

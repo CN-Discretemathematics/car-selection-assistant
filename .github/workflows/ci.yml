@@ -1,14 +1,22 @@
-# CI 门禁（2026-09-14 接入；2026-10-02 补 lint 看板与两处缺失检查）：
+# CI 门禁（2026-09-14 接入；2026-10-02 补 lint 看板与两处缺失检查；2026-10-03 补 ruff 报告 job）：
 #   backend  —— 全量用例（vendor 不入库，按 requirements.txt 安装；Linux 下 PYTHONPATH 分隔符是冒号）
 #   gates    —— 三道静态门禁：密钥扫描 + 用户可见文案门禁 + 文档一致性（退出码必须为 0）
 #   autofix  —— gates 失败时算出「确定性计数」自愈补丁，**以 PR 评论贴出，不推分支**
 #   web      —— tsc 类型检查 + next build + **前端测试**（此前从不执行）
 #   metrics  —— 8 维代码质量看板（tools/quality_metrics.py），产出 artifact 供趋势对比
+#   lint     —— ruff 报告（**只报不拦**，产出 artifact；2026-10-03 首次执行）
+#
+# ⚠️ 2026-10-03：backend/pyproject.toml 里的 ruff 规则集此前**从未被执行过**——
+#   没有 lint job，且配置里 `pylint.ignore-variadic-names` 已被新版 ruff 移除，
+#   导致 `ruff check` 直接以 exit 2 死在读配置阶段。本 job 存在的意义就是把
+#   「声明」变成「每提交都跑一次的真实数据」。详见 docs/refactoring-roadmap.md。
 #
 # 启用强制门禁：仓库 Settings → Branches → main 分支保护 →
 #   勾选 Require status checks → 选中 backend / gates / web 三个 check。
 # ⚠️ 2026-10-02：新增的 **metrics** 需手动勾选才会成为 required check，
 #    未勾选时它只产出 artifact，不阻止合入（见 docs/engineering-standards.md R10.5）。
+# ⚠️ 2026-10-03：新增的 **lint** 同样需手动勾选，且**在基线降到 0 之前不应勾选**
+#    （基线 130 条，ruff 0.16.10 / Windows 本地实测；勾了会把每个 PR 都打红）。
 # autofix 需要写权限：Settings → Actions → General → Workflow permissions 勾
 #   Read and write permissions（否则只发不出评论，日志里报错，不影响其它 job）。
 # 部署不受影响：仍是服务器 05:00 拉 main（CI 只把关 PR 合入）。
@@ -51,7 +59,18 @@ jobs:
           # 是死配置（git ls-files backend/vendor 返回 0）。
           PYTHONPATH: '.'                # Linux 分隔符是冒号（本地 Windows 为分号）
           RETRIEVAL_BACKEND: inmemory
-        run: python -m pytest -q
+        # 2026-10-03 接入 --cov：pyproject 早已声明覆盖率口径与棘轮下限，
+        # 但 CI 此前**只跑 pytest 不传 --cov**——即那份配置同样从不生效。
+        # fail_under=85 见 pyproject（实测基线 87%，留 2 点平台余量）。
+        run: |
+          python -m pip install --disable-pip-version-check "pytest-cov>=5.0"
+          python -m pytest -q --cov=app --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: backend/coverage.xml
+          retention-days: 90
 
   gates:
     name: gates (secrets + ui-copy + doc-sync)
@@ -129,6 +148,52 @@ jobs:
           path: |
             quality-metrics.txt
             quality-metrics.json
+          retention-days: 90
+
+  # ruff 报告（2026-10-03 接入）：**只报不拦**。
+  #
+  # 为什么此前没有这个 job：backend/pyproject.toml 里的 ruff 规则集是 2026-10-02
+  # 声明的，但当时**装不上 ruff**，于是既没有本地实跑、CI 里也没有对应 job——
+  # 一份「已声明」的配置成了永不执行的承诺。代价立刻兑现：配置里有一个已被新版
+  # ruff 移除的字段（pylint.ignore-variadic-names），`ruff check` 会在读配置阶段
+  # 直接 exit 2。本 job 的存在意义就是把承诺变成每提交都跑的真实数据。
+  #
+  # 为什么只报不拦：存量 130 条里 85 条集中在 F401/I001，且**自动修复有真实风险**
+  #   - I001 会把 app.* 排到 load_dotenv() 之前，直接搞坏环境加载顺序；
+  #   - F401 会删掉 __init__.py 里的 re-export，让外部 import 崩掉。
+  # 这两类留给人工逐处判断（见 docs/refactoring-roadmap.md P6）。
+  #
+  # 版本必须钉住：ruff 跨版本会改规则集与判定，计数不可比，棘轮才有意义。
+  lint:
+    name: lint (ruff, report-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true          # 只报不拦：失败不阻塞 PR（见上方基线说明）
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装 ruff（钉版本，理由见上）
+        run: python -m pip install --disable-pip-version-check "ruff==0.16.10"
+      - name: 分类统计（机读）
+        run: python -m ruff check . --statistics 2>&1 | tee /tmp/ruff-stat.txt || true
+      - name: 逐条明细（机读）
+        run: python -m ruff check . --output-format concise 2>&1 | tee /tmp/ruff-detail.txt || true
+      - name: 记录基线计数
+        run: |
+          # 基线 = 本地 Windows / ruff 0.16.10 实测 130。Linux 上若有差异
+          # （理论上这批规则与平台无关），以本 job 首次产出为准并回写 pyproject 注释。
+          COUNT=$(grep -cE '^[A-Za-z0-9_./\\-]+\.py:[0-9]+:[0-9]+:' /tmp/ruff-detail.txt || true)
+          echo "ruff findings: ${COUNT:-0} (baseline 130)" | tee /tmp/ruff-baseline.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ruff-report
+          path: /tmp/ruff-*.txt
           retention-days: 90
 
   web:
