@@ -1,3 +1,6 @@
+import Link from "next/link";
+import type { ReactNode } from "react";
+
 interface PaginationProps {
   /** 当前页（1-based）。 */
   page: number;
@@ -51,6 +54,35 @@ export default function Pagination({
   query,
   total,
 }: PaginationProps) {
+  /** 页码导航元素：可点时用 next/link（客户端跳转，不再整页重载），禁用时用 span。
+   *
+   * 为什么不留 `<a href={undefined}>`：next/link 的 href 是**必填**的 URL，传
+   * undefined 过不了 tsc；而「没有 href 的 <a>」虽然不可聚焦、点不动，却仍挂着
+   * hover 样式，看上去像能点。禁用态直接换 span，语义与观感一致。
+   */
+  function NavItem({
+    to,
+    className,
+    children,
+  }: {
+    to: string | null;
+    className: string;
+    children: ReactNode;
+  }) {
+    if (to === null) {
+      return (
+        <span aria-disabled className={className}>
+          {children}
+        </span>
+      );
+    }
+    return (
+      <Link href={to} className={className}>
+        {children}
+      </Link>
+    );
+  }
+
   if (totalPages <= 1) {
     return (
       <div className="mt-10 text-center text-sm text-ash">
@@ -62,13 +94,12 @@ export default function Pagination({
   return (
     <div className="mt-10 flex flex-col items-center gap-5">
       <nav aria-label="分页" className="flex flex-wrap items-center justify-center gap-1.5 text-sm">
-        <a
-          href={page > 1 ? pageHref(basePath, query, page - 1) : undefined}
-          aria-disabled={page <= 1}
+        <NavItem
+          to={page > 1 ? pageHref(basePath, query, page - 1) : null}
           className={`${navButton} ${page <= 1 ? disabled : enabled}`}
         >
           ← 上一页
-        </a>
+        </NavItem>
 
         {pageList(page, totalPages).map((p, i) =>
           p === "…" ? (
@@ -76,26 +107,31 @@ export default function Pagination({
               …
             </span>
           ) : (
-            <a
+            <Link
               key={p}
               href={pageHref(basePath, query, p)}
               aria-current={p === page ? "page" : undefined}
               className={`${pageButton} ${p === page ? pageActive : pageInactive}`}
             >
               {p}
-            </a>
+            </Link>
           ),
         )}
 
-        <a
-          href={page < totalPages ? pageHref(basePath, query, page + 1) : undefined}
-          aria-disabled={page >= totalPages}
+        <NavItem
+          to={page < totalPages ? pageHref(basePath, query, page + 1) : null}
           className={`${navButton} ${page >= totalPages ? disabled : enabled}`}
         >
           下一页 →
-        </a>
+        </NavItem>
       </nav>
 
+      {/* 跳页表单**刻意保留原生 GET**：它不依赖 JS 即可工作（渐进增强），且隐藏域
+          已经把除 page 外的筛选参数原样带过去。改成 router.push 只能省一次整页
+          加载，代价是必须加 "use client" 客户端边界、并亲手重建 query 串——
+          那才是会真的丢筛选的地方（对比 HomeFilters 修的正是这类问题）。
+          审计台账把它与裸 <a> 并列为「整页重载」，但两者的风险并不对等：
+          上面 3 个页码链接已换成 next/link，这里的 GET 提交不动。 */}
       <form
         method="get"
         action={basePath}
