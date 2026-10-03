@@ -43,6 +43,10 @@ for _router_env in (
     "AGENT_ROUTER_TIMEOUT_MS",
     "AGENT_ROUTER_MIN_CONFIDENCE",
     "AGENT_ROUTER_MODEL",
+    # L1 软偏好（soft_prefs）：同一道理——本机 .env 可能写了 shadow 调试值，
+    # 漏清会让「默认 off、行为不变」的测试在有 .env 的机器上偏移。
+    "AGENT_SOFT_PREF_MODE",
+    "AGENT_SOFT_PREF_TIMEOUT_MS",
 ):
     os.environ.pop(_router_env, None)
 

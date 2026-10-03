@@ -70,6 +70,7 @@ from app.agent.series_qa import (
     should_answer,  # noqa: F401  # re-export：保持既有导入面（评审二轮建议 5）
 )
 from app.agent.session import SessionStore, get_session_store
+from app.agent import soft_prefs
 from app.agent.tools import (
     DEFAULT_WEIGHTS,
     TOOL_SCHEMAS,
@@ -960,6 +961,11 @@ class AgentEngine:
         profile = await _load_profile(self._store, session_id)
         hints = extract_hints(message)
         profile = merge_profile(profile, hints)
+        # L1 软偏好抽取（sales-agent-proposal §3 L1）。默认 AGENT_SOFT_PREF_MODE=off，
+        # 此时下面只多一次 env 读取、**不发起任何 LLM 调用**，行为与接入前逐位相同——
+        # 提案 §6 第 2 步要求「先只输出结构化、不接入回答」，先离线评测抽取质量。
+        # 闸门与回退全在 soft_prefs.run_if_enabled 内部，本行不承载任何逻辑。
+        await soft_prefs.run_if_enabled(profile, message)
         # 已补齐的字段从 unknowns 中移除（评审 M1）：unknowns 语义 = 「最近一次追问未答」，
         # 而非永久未知——否则用户后补的字段永远不会再次校验/追问
         for answered in ("budget", "usage", "passengers"):
