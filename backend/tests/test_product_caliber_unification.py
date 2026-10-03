@@ -155,11 +155,44 @@ def test_energy_hints_keys_are_case_insensitive_by_construction():
 
 
 def test_body_and_energy_hint_loops_all_match_lowercased_text():
-    """两张表的所有消费方都必须在小写化文本上匹配。"""
+    """两张表的**逐行式**消费方都必须在小写化文本上匹配。
+
+    2026-10-03 否定句重写：avoid 路径的 2 处消费方被搬进 `_negated_values()`
+    （全句级判定 → 逐关键词判定，见提案 §4.3），故此处由 5 处变 3 处。
+    搬走的那处**并没有失去约束**——见下面两条专门针对它的测试。
+    """
     targets = _match_targets("_BODY_HINTS", "_ENERGY_HINTS")
-    assert len(targets) == 5, f"应恰好 5 处 hints 匹配消费方，实际 {len(targets)}: {targets}"
+    assert len(targets) == 3, f"应恰好 3 处 hints 匹配消费方，实际 {len(targets)}: {targets}"
     for t in targets:
         assert t in ("msg_low", "low"), (
             f"hints 匹配用了 `{t}`——必须是小写化文本（msg_low/low），"
             "否则大写输入会静默漏匹配"
         )
+
+
+def test_negated_values_receives_lowercased_text():
+    """`_negated_values` 必须是小写化文本的消费者。
+
+    它不再写成 `if key in X` 两行式（整段判定被重写），所以上面那条扫描器
+    看不见它——**不变式的覆盖出现空洞**。这里显式补上：判定函数的入参名一旦
+    从 msg_low 改成 message，大写输入就会静默漏匹配。
+
+    用正则直接扫源文件而不用 `_body()`：那个取函数体的辅助函数对 `extract_hints`
+    实测返回了**别的函数**的内容，拿它断言等于没断言。
+    """
+    assert re.search(r"_negated_values\(\s*msg_low\s*\)", _SRC), (
+        "否定句判定必须传 msg_low；传 message 会让「不要MPV」大小写敏感"
+    )
+
+
+def test_negated_values_lowercases_the_hint_key():
+    """入参是小写化文本，键也要小写化——两个条件缺一不可。
+
+    只做其中一半是中文表的老坑（`_BODY_HINTS` 当初被迫留「MPV」「mpv」双键）。
+    """
+    body = re.search(
+        r"^def _negated_values\(.*?(?=^\S)", _SRC, re.M | re.S
+    )
+    assert body, "找不到 _negated_values 定义"
+    fn = body.group(0)
+    assert "key.lower()" in fn, "提示词键未小写化，大写/混合大小写输入会静默漏匹配"
