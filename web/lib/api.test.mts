@@ -36,8 +36,16 @@ test("formatPrice：整万元不得丢数字（10 万不得显示为 1 万）", 
   assert.equal(formatPrice(1000000), "100 万元");
 });
 
-test("formatPrice：空值返回占位文案", () => {
-  assert.equal(formatPrice(null), "暂无");
+test("formatPrice：空值返回与缺失字段同一口径的占位文案", () => {
+  // 2026-10-03 统一口径：价格缺失不再用「暂无」，改用 PRICE_MISSING_LABEL
+  // （= MISSING_VALUE_LABEL「官方资料未披露」）。断言引用常量而非字面量——
+  // 这样将来若有人再写回「暂无」，失败信息会直接指出该改常量还是该改实现。
+  assert.equal(formatPrice(null), PRICE_MISSING_LABEL);
+  assert.equal(
+    formatPrice(null),
+    MISSING_VALUE_LABEL,
+    "价格缺失与其他字段缺失必须是同一句诚实措辞",
+  );
 });
 
 test("formatPriceRange：区间、单点、开区间与全空各自成文", () => {
@@ -45,7 +53,7 @@ test("formatPriceRange：区间、单点、开区间与全空各自成文", () =
   assert.equal(formatPriceRange(range(150000, 150000)), "15 万元");
   assert.equal(formatPriceRange(range(null, 200000)), "最高 20 万元");
   assert.equal(formatPriceRange(range(150000, null)), "15 万元 起");
-  assert.equal(formatPriceRange(range(null, null)), "官方指导价：暂无");
+  assert.equal(formatPriceRange(range(null, null)), `官方指导价：${PRICE_MISSING_LABEL}`);
 });
 
 test("resolvePriceRangeNote：两端皆空时回落库内文案", () => {
@@ -65,16 +73,19 @@ test("resolvePriceRangeNote：有区间时忽略 note", () => {
 });
 
 test("resolvePriceRangeNote：两端皆空且无 note 时退回 formatPriceRange", () => {
-  assert.equal(resolvePriceRangeNote(range(null, null), null), "官方指导价：暂无");
-  assert.equal(resolvePriceRangeNote(range(null, null), ""), "官方指导价：暂无");
+  assert.equal(resolvePriceRangeNote(range(null, null), null), `官方指导价：${PRICE_MISSING_LABEL}`);
+  assert.equal(resolvePriceRangeNote(range(null, null), ""), `官方指导价：${PRICE_MISSING_LABEL}`);
 });
 
-test("诚实性文案：与后端 MISSING_VALUE_LABEL 保持一致", () => {
+test("诚实性文案：价格缺失与其他字段缺失**必须同一句**", () => {
   // 散落的字面量改文案要改多处，漏一处就出现「同一种缺失、两种说法」。
   assert.equal(MISSING_VALUE_LABEL, "官方资料未披露");
-  // ⚠️ 已知不一致：价格缺失用的是短文案，刻意未改（属产品口径决策），
-  // 见 labels.ts 与 docs/refactoring-roadmap.md 的 P2 不修清单。
-  assert.notEqual(PRICE_MISSING_LABEL, MISSING_VALUE_LABEL);
+  // 2026-10-03 产品拍板：两者已统一。此前这里是 assert.notEqual(…)——一条把
+  // 「已知不一致」钉成契约的**特征化测试**。它当时是对的（如实记录现状），
+  // 但产品一旦决定统一，它就必须被翻过来，否则修复本身会让测试变红。
+  // 留着这条断言还有个额外好处：谁想再把价格文案改回短文案，会立刻看到它红。
+  assert.equal(PRICE_MISSING_LABEL, MISSING_VALUE_LABEL);
+  assert.equal(resolvePriceRangeNote(range(null, null), ""), `官方指导价：${MISSING_VALUE_LABEL}`);
 });
 
 test("formatCount：zh-CN 千分位", () => {

@@ -8,6 +8,7 @@ import RiseText from "@/app/components/RiseText";
 import SiteHeader from "@/app/components/SiteHeader";
 import { deleteAccount, getToken, listFavorites, setToken } from "@/lib/auth";
 import { formatPrice, type FavoriteOut } from "@/lib/api";
+import { PRICE_MISSING_LABEL } from "@/lib/labels";
 
 export default function FavoritesPage() {
   // token **不能在 render 期读**。原先写成 `useState(() => getToken())`：服务端
@@ -135,7 +136,7 @@ export default function FavoritesPage() {
                       </div>
                     </div>
                     <span className="nums ml-3 shrink-0 text-[15px] font-semibold tracking-tight text-ink">
-                      {item.price_cny != null ? formatPrice(item.price_cny) : "暂无"}
+                      {item.price_cny != null ? formatPrice(item.price_cny) : PRICE_MISSING_LABEL}
                     </span>
                   </Link>
                 </Reveal>

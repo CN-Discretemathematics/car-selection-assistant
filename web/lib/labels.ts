@@ -14,15 +14,15 @@
 export const MISSING_VALUE_LABEL = "官方资料未披露";
 
 /**
- * ⚠️ 已知的不一致，**本轮刻意不改**（属产品口径决策，不是重构）：
+ * 价格缺失时的文案。**2026-10-03 产品拍板：与 `MISSING_VALUE_LABEL` 统一。**
  *
- * `formatPrice(null)` 返回 `"暂无"`，而缺失的能源/参数/在售款型返回
- * `MISSING_VALUE_LABEL`。同一个「库里没有」的事实有两种诚实措辞。
- * `AgentChat.tsx` 已经在调用点自己兜了 `MISSING_VALUE_LABEL`，
- * 说明作者认为价格缺失也该用长文案——但改 `formatPrice` 会影响
- * 所有调用点的用户可见文案。
+ * 此前是 `"暂无"`，而缺失的能源/参数/在售款型用 `MISSING_VALUE_LABEL`
+ * （"官方资料未披露"）——同一个「库里没有」的事实有两种诚实措辞。
+ * 「暂无」的问题在于它**指向不明**：既像"加载中"，也像"没有这款车"，
+ * 而真实原因是**来源方没给**。「官方资料未披露」明确指向来源方，
+ * 与本项目「缺失要显式、不得沉默跳过」的原则一致。
  *
- * 已记入 `docs/refactoring-roadmap.md` 的 P2「不修清单」，
- * 需产品侧拍板后再统一。
+ * `AgentChat.tsx` 此前已在调用点自己兜了长文案，说明作者也是这个判断。
+ * 现在统一到常量，`formatPrice` / `formatPriceRange` 走同一口径。
  */
-export const PRICE_MISSING_LABEL = "暂无";
+export const PRICE_MISSING_LABEL = MISSING_VALUE_LABEL;
