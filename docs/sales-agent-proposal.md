@@ -249,6 +249,64 @@ comfort/intelligence←配置类事实键、maintenance←品牌规模+销量活
 - 空偏好：完全不说软需求时，L1 必须返回空向量，**不得编造一个**。
 - 越界偏好：说「我要个能自动驾驶的」——若库中无该 fact_key，L1 必须拒绝并退回正则路径。
 
+### 5.1 判据 1 的实测基线（2026-10-03，PR #47）
+
+判据 1 此前只是一句**没人执行过**的要求。现把它变成可执行、可复现的基线。
+
+**结论：本 PR 的 14 笔提交对全部评测指标零影响——315 个指标字段逐位一致**
+（含四桶分桶指标与硬约束满足率 valid_hit@5 / valid_mrr / valid_precision@5）。
+
+对比对象：`origin/main`(80b39a7) vs 本分支 HEAD(d9c9c1a)。
+本地快照库 `sqlite:///.tmp/eval-local.db`（89.7MB），同一份 `eval/questions.json`。
+
+| 策略 | Hit@5 | MRR | NDCG@10 |
+| --- | --- | --- | --- |
+| sparse-nooverlap | 0.6475 | 0.6277 | 0.5237 |
+| sparse | 0.6475 | 0.6277 | 0.5237 |
+| pipeline | 0.6341 | 0.6126 | 0.5755 |
+| pipeline-norerank | 0.6341 | 0.6129 | 0.5757 |
+
+复现命令（**两次运行的环境必须一致**，见下）：
+
+```powershell
+cd backend
+$env:DATABASE_URL="sqlite:///.tmp/eval-local.db"; $env:RETRIEVAL_BACKEND="inmemory"
+python tools/eval_rag.py --report ..\.tmp\eval_head.json
+python tools/compare_eval_reports.py ..\.tmp\eval_base2.json ..\.tmp\eval_head.json
+```
+
+工具：`backend/tools/compare_eval_reports.py`（逐位比较 + `--self-test` 自验证）。
+
+### 5.2 两次评测对比的三个假绿灯（都实测踩过）
+
+做上面这个对比时踩了三个坑，**每一个都会让人得出「结论相反」的错误答案**，
+故写进提案，避免下一次有人重踩：
+
+1. **别把 list 折成长度。** 报告里 `strategies` 是 `list[dict]`。第一版比较器把整个
+   列表折成 `.len` → 4 个策略 12 个指标**一个都没比**，却输出「逐位一致」。
+2. **两次运行的环境必须一致。** `app/retrieval/config.py` 的 `load_dotenv()` 会把
+   `backend/.env` 灌进 `os.environ`。在**没有 .env 的 worktree** 里跑，rerank/LLM
+   全部降级，于是 base 与 HEAD 差出 25 处指标——包括 `valid_hit@5`
+   **0.5096 vs 0.8344** 这种「大幅改善」假象。真相是 base 被 handicapped
+   （`semantic` 桶 MRR 0.0027 本身就是降级特征）。这与 conftest 里
+   「测试必须对环境免疫」是同一条纪律，**评测侧同样适用**。
+3. **比较器自己也要被验证。** `--self-test` 会确认关键指标确实参与了比较，并
+   **注入一个假差异**看能不能抓到。没通过自测的「一致」不许采信。
+   （注入时踩了个坑：策略名在 `strategy` 键上而不是 `name`，写成 `name` 会一个都
+   匹配不到 → 注入是空操作 → 「注入后仍报一致」，等于在验证一个没发生过的事件。）
+
+### 5.3 题库不在版本控制里（判据 1 的结构性限制）
+
+`backend/eval/` 整个目录被 gitignore 且 `git ls-files` 为空——**题库由
+`gen_eval_questions.py` 从当时的库抽样生成，不在 git 里**。
+
+因此判据 1 的「逐位不变」**只能在同一台机器、同一个库、同一份题库上比较**；
+换库重生成题库，指标就换了口径。anchor 错位已由 `test_eval_corpus_portability.py`
+处理（按车系名重解析 + stale 告警），但**题集本身不可复现**这件事没有解决。
+
+> 上表因此只能标注为**本地快照库基线**，不是生产库基线。生产库那组数字
+> （Hit@5 0.6763）从本机无法复现——阿里云 RDS 安全组只放行生产服务器 IP。
+
 ---
 
 ## 6. 实施顺序建议
