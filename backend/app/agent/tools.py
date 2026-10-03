@@ -329,13 +329,24 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 WEIGHT_CEILING = 1.0
 
 
-def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> dict:
+def recommendation_tool(
+    db: Session,
+    profile: UserProfile,
+    limit: int = 5,
+    *,
+    include_dims: bool = False,
+) -> dict:
     """确定性推荐：PostgreSQL 硬条件筛选 + 软评分。
 
     事实全部来自数据库；评分维度无数据时不计分，禁止猜测。
     硬约束（在售/锁定车系/车身/能源/价格区间）全部下推 SQL（评审 P1：
     此前每次消息全量拉全部在售款型再 Python 过滤，大库下内存/延迟线性增长），
     剩余约束（座位数等基于事实的）在 Python 内完成。
+
+    include_dims（2026-10-03，仅评测用，默认 **False**）：为真时把每个候选的
+    逐维得分 `_dims` 与「本候选有实值的维度」`_measured` 一并返回，供
+    `tools/eval_tradeoffs.py` 独立复核取舍叙事。**默认路径行为逐位不变**——
+    这两个键照旧在返回前剥离，不进生产响应体。
     """
     weights = {**DEFAULT_WEIGHTS, **{k: float(v) for k, v in (profile.weights or {}).items() if v is not None}}
 
@@ -677,8 +688,10 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
 
     for _score, item in scored:
         item["tradeoffs"] = _tradeoff_gaps(item["_dims"], item["_measured"], best_by_dim)
-        item.pop("_dims", None)
-        item.pop("_measured", None)
+        if not include_dims:
+            # 私有字段不进生产响应体；include_dims=True 时保留给评测复核
+            item.pop("_dims", None)
+            item.pop("_measured", None)
 
     top = scored[:limit]
     return {
