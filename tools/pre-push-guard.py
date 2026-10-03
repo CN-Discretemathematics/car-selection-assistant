@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """pre-push 提交批门禁 —— 防「并行会话提交串台」事故复发。
 
 背景（2026-09-16 实测事故）：两个会话并行开发不同功能，共用 .tools/commit-msg.txt 写
@@ -301,7 +301,13 @@ def main() -> int:
         print("[pre-push-guard] 无待推送提交，放行。")
         return 0
 
-    failures: list[str] = []
+    # 失败**按提交归属**记录（2026-10-03 修：豁免必须是逐提交的）。
+    # 此前 failures 是一条**范围级**的总账，只要范围内**任意一笔**带
+    # `# gate-allow` trailer 就整段 return 0——于是一笔合法的跨切面豁免会顺带
+    # 放行范围内其它提交的真实越界。本地手动跑 `origin/main..HEAD` 时尤其危险：
+    # 本地范围含早期那笔 trailer，hook 跑「待推送子范围」时不含，判定结果不一致，
+    # 表现为「本地说通过、push 被拦」（2026-10-03 实测踩到）。
+    failures_by_sha: dict[str, list[str]] = {}
     warnings: list[str] = []
     subjects: dict[str, str] = {}
     rows: list[str] = []
@@ -313,10 +319,11 @@ def main() -> int:
             rows.append(f"  {short}  (merge, 跳过)  {subject[:60]}")
             continue
         rows.append(f"  {short}  {len(files)} 文件  {subject[:60]}")
+        cur = failures_by_sha.setdefault(sha, [])
 
         # R4 完全相同的标题
         if subject in subjects:
-            failures.append(
+            cur.append(
                 f"R4 {short} 与 {subjects[subject][:9]} 标题完全相同 —— 疑似信息文件串台：{subject[:60]}"
             )
         else:
@@ -324,7 +331,7 @@ def main() -> int:
 
         m = SUBJECT_RE.match(subject)
         if not m:
-            failures.append(
+            cur.append(
                 f"R1 {short} 标题不符合 `type(scope): 摘要` 形式：{subject[:60]}\n"
                 f"   → 仓库约定用 git commit -F <独立信息文件>；并行会话严禁共用 .tools/commit-msg.txt"
             )
@@ -347,7 +354,7 @@ def main() -> int:
         ]
         if offenders:
             show = "\n   ".join(offenders[:8]) + ("\n   …" if len(offenders) > 8 else "")
-            failures.append(
+            cur.append(
                 f"R2 {short} 有改动文件超出 scope `{scope_raw}` 声明的路径 —— "
                 f"信息与代码不匹配，疑似顶包：\n   {show}"
             )
@@ -360,42 +367,61 @@ def main() -> int:
                 for f in files
                 for p in prefixes
             ):
-                failures.append(f"R3 {short} scope `{t}` 没有任何改动文件与之匹配（改动：{len(files)} 个文件）")
+                cur.append(f"R3 {short} scope `{t}` 没有任何改动文件与之匹配（改动：{len(files)} 个文件）")
 
     print("[pre-push-guard] 将推送的提交：")
     print("\n".join(rows))
     for w in warnings:
         print(f"[pre-push-guard][WARN] {w}")
 
-    if failures:
-        print("\n[pre-push-guard] 拦截本次 push（逐条核对将推送的提交信息与代码是否属于同一功能）：")
-        for f in failures:
-            print(f"  ✗ {f}")
-        # 内联 trailer 豁免：可追溯，逐条打印理由（优先于 --allow）
-        waived = [(s, gate_allow_reason(s)) for s in shas]
-        waived = [(s, r) for s, r in waived if r]
-        if waived:
-            print("\n[pre-push-guard] 以下提交带内联豁免 trailer，人工放行（理由已入 git 历史，可审计）：")
-            for s, r in waived:
+    # 逐提交判定：有失败的提交，**各自**决定是被自己的 trailer 豁免、还是拦截。
+    # 关键：一笔的豁免**不再**顺带放行其它提交的越界。
+    failing = {s: fs for s, fs in failures_by_sha.items() if fs}
+    if failing:
+        waived_rows: list[tuple[str, str]] = []
+        blocking: list[tuple[str, list[str]]] = []
+        for sha, fs in failing.items():
+            reason = gate_allow_reason(sha)
+            if reason:
+                waived_rows.append((sha, reason))
+            else:
+                blocking.append((sha, fs))
+
+        if waived_rows:
+            print("\n[pre-push-guard] 以下提交带内联豁免 trailer，已按提交逐一放行"
+                  "（理由已入 git 历史，可审计）：")
+            for s, r in waived_rows:
                 print(f"  · {s[:9]}  {r}")
-            return 0
-        if allow:
+
+        if blocking:
+            print("\n[pre-push-guard] 拦截本次 push（逐条核对将推送的提交信息与代码是否属于同一功能）：")
+            for sha, fs in blocking:
+                for f in fs:
+                    print(f"  ✗ {f}")
+            if waived_rows:
+                print(f"\n  ⚠️ 另有 {len(waived_rows)} 笔提交凭自己的 trailer 放行了——"
+                      "**豁免只作用于该提交本身**，不覆盖上面这些。")
+            if allow:
+                print(
+                    "\n[pre-push-guard] PUSH_GUARD_ALLOW/--allow 人工放行 —— ⚠️ 此方式**不可追溯**：\n"
+                    "  git 历史里不会留下「这条提交被硬推」的痕迹。优先改用提交信息里的\n"
+                    "  `# gate-allow: <理由>` trailer（见下一条）。"
+                )
+                return 0
             print(
-                "\n[pre-push-guard] PUSH_GUARD_ALLOW/--allow 人工放行 —— ⚠️ 此方式**不可追溯**：\n"
-                "  git 历史里不会留下「这条提交被硬推」的痕迹。优先改用提交信息里的\n"
-                "  `# gate-allow: <理由>` trailer（见下一条）。"
+                "\n  处理办法：\n"
+                "  1) 逐条核对 git show <sha> —— 信息与代码不符的提交先 amend 改正（用独立的信息文件）；\n"
+                "  2) 确属跨切面的合法提交：在**该提交**信息正文加一行可追溯的豁免说明后 amend，再推：\n"
+                "       # gate-allow: <为什么这是有意的跨切面提交>\n"
+                "     （trailer 进 git 历史，事后可 git log --grep 审计；理由不得为空）\n"
+                "     ⚠️ 豁免**只对该提交生效**：别的提交有越界就得各自处理。\n"
+                "     应急才用：PUSH_GUARD_ALLOW=1 git push …（不可追溯）；\n"
+                "  3) 新 scope 请登记进 tools/pre-push-guard.py 的 SCOPE_PATHS。"
             )
-            return 0
-        print(
-            "\n  处理办法：\n"
-            "  1) 逐条核对 git show <sha> —— 信息与代码不符的提交先 amend 改正（用独立的信息文件）；\n"
-            "  2) 确属跨切面的合法提交：在**提交信息正文**加一行可追溯的豁免说明后 amend，再推：\n"
-            "       # gate-allow: <为什么这是有意的跨切面提交>\n"
-            "     （trailer 进 git 历史，事后可 git log --grep 审计；理由不得为空）\n"
-            "     应急才用：PUSH_GUARD_ALLOW=1 git push …（不可追溯）；\n"
-            "  3) 新 scope 请登记进 tools/pre-push-guard.py 的 SCOPE_PATHS。"
-        )
-        return 1
+            return 1
+
+        print("\n[pre-push-guard] 所有失败项均已由各自的 trailer 逐条豁免，放行。")
+        return 0
 
     print("[pre-push-guard] 通过。")
     return 0
