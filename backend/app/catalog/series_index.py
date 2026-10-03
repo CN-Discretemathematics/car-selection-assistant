@@ -110,7 +110,18 @@ def _load_name_entries(db: Session) -> tuple[tuple[str, int], ...]:
         seen: set[str] = set()
         for name in names:
             norm = normalize_name(name)
-            if len(norm) >= 2 and norm not in seen:
+            # 2026-10-04：**纯数字名不进对话解析的候选**。
+            # 「去掉品牌前缀」会把 领克20 变成 "20"、坦克500 变成 "500"、睿蓝7 变成 "7"…
+            # 全库 26 个车系中招。而中文购车语里裸数字几乎总是**预算或年份**：
+            #   「我最看重后排空间，预算20万要家用SUV」 → 命中 "20" → 认成 领克20
+            #   → decide_route 判 series_qa → **推荐链整条被跳过**，用户只看到一台车的
+            #   「官方资料未披露」。实测这不是个例：预算 6/7/8/9/10/11/12/20 万都会中招。
+            # 中文没有词边界，靠子串匹配无法把「20万」和「领克20」分开；但反过来，
+            # 用户真要问 领克20 时**必然带上品牌**（「领克20」是完整名候选），
+            # 砍掉纯数字短名不会伤到任何真实用法，却能消掉整类误伤。
+            # ⚠️ 只改对话解析（_load_name_entries）；目录搜索 keyword_score 走另一条
+            # 路径、保留裸数字命中——那是用户主动搜「20」，语义与预算无关。
+            if len(norm) >= 2 and norm not in seen and not norm.isdigit():
                 seen.add(norm)
                 entries.append((norm, series.id))
     # 在售款型显示名 → 车系（v6.1）：对比/参数题常以款型名表述（「2023款 470km

@@ -55,6 +55,12 @@ _CAR_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 _CAR_BUY_RE = re.compile(r"(?:买|购|选|提|试)[^。！？!?]{0,6}车")
+# 用户表达了偏好/强调（与 engine._EMPHASIS_RE 同一份词表，两处需同步）：
+# 「我最看重后排」「空间优先」「主要看油耗」——这是「你帮我挑」的信号，不是「怎么选」。
+_EMPHASIS_RE = re.compile(
+    r"(优先|最看重|比较看重|更看重|特别看重|最在意|比较在意|更在意|主要看|重点|"
+    r"看重|在乎|重视|希望)"
+)
 # 通用购车咨询（无画像时也给出有据可查的回答，而不是硬推“没预算的推荐”）
 _GENERAL_ADVICE_RE = re.compile(
     r"(哪个好|怎么选|如何选|怎么挑|区别|优缺点|值得买|推荐吗|怎么样|好不好|适合我|"
@@ -378,7 +384,21 @@ def decide_route(
 
     # 2) 通用购车咨询但还没有核心画像（「电动车和油车哪个好」）→ 有据可查的回答，
     #    不硬推「没有预算的推荐」
-    if asks_general_advice(message) and not profile_has_core_constraints(profile):
+    #
+    # 2026-10-04 修：用户**表达了偏好/强调**时不得走 general_advice。
+    # 实测缺陷：「我比较看重动力，预算15万」「我比较看重空间，预算15万」首轮被判成
+    # general_advice —— 用户拿到一段聊天的回答，**一张推荐卡片都没有**。
+    # 根因是 `_GENERAL_ADVICE_RE` 里的裸 `比较` 命中了「比**较**看重」，
+    # 而本条的判据只看**已持久化的画像**（首轮必然为空），不看本条消息里的强调词。
+    #
+    # 「最看重/优先/主要看」这类词是「你帮我挑」的最强信号，与「怎么选？」正相反，
+    # 因此它应当**否决** general_advice。这里不 import engine（避免成环），
+    # 与 `engine._EMPHASIS_RE` 保持同一份词表。
+    if (
+        asks_general_advice(message)
+        and not profile_has_core_constraints(profile)
+        and not _EMPHASIS_RE.search(message)
+    ):
         return RouteDecision(
             intent="general_advice",
             matched_rule="2:asks_general_advice+no_core_profile",
@@ -458,7 +478,13 @@ def llm_intent_executable(
     if intent == "chitchat":
         return not has_car_intent(message) and not structured
     if intent == "general_advice":
-        return asks_general_advice(message) and not profile_has_core_constraints(profile)
+        # 与 decide_route 规则 2 保持**同一份**判据（含强调词否决），
+        # 否则一致性校验会和真实决策打架，出现「日志说通过、实际走了别的分支」。
+        return (
+            asks_general_advice(message)
+            and not profile_has_core_constraints(profile)
+            and not _EMPHASIS_RE.search(message)
+        )
     if intent == "recommendation":
         return True
     return False
