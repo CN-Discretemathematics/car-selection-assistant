@@ -1,0 +1,23 @@
+{"id": "u01", "text": "平时上下班通勤", "expect": {"usage_scenario": "通勤"}, "note": "最典型的用途表述"}
+{"id": "u02", "text": "主要家用，偶尔买菜接送孩子", "expect": {"usage_scenario": "家庭"}, "note": "家庭用途"}
+{"id": "u03", "text": "经常自驾出远门旅游", "expect": {"usage_scenario": "长途"}, "note": "长途用途"}
+{"id": "u04", "text": "平时商务接待比较多", "expect": {"usage_scenario": "商务"}, "note": "商务用途"}
+{"id": "u05", "text": "我们一家五口人，要个大的", "expect": {"household_size": "3~5人", "pain_points": ["空间尺寸"], "priority_order": ["space"]}, "note": "「要个大的」本身就是空间诉求——首版金标只写 household，属**金标漏标**"}
+{"id": "u06", "text": "就我一个人开", "expect": {"household_size": "1~2人"}, "note": "单人归入 1~2 档"}
+{"id": "u07", "text": "五人以上经常坐", "expect": {"household_size": "5人以上"}, "note": "开区间取下界"}
+{"id": "u08", "text": "我最看重后排空间", "expect": {"pain_points": ["空间尺寸"], "priority_order": ["space"]}, "note": "销售高频话术：后排"}
+{"id": "u09", "text": "我比较看重油耗，别太费油", "expect": {"pain_points": ["油耗/电耗"], "priority_order": ["energy"]}, "note": "能耗诉求"}
+{"id": "u10", "text": "主要看续航，冬天要跑得远", "expect": {"pain_points": ["续航"], "priority_order": ["energy"]}, "note": "「主要看」是显式强调词 → priority_order 必含 energy。⚠️ 模型额外给了 pain_points 电池与充电，**这条保留为已知误报**（不并入金标洗白）"}
+{"id": "u11", "text": "我比较看重动力，加速要强", "expect": {"pain_points": ["动力参数"], "priority_order": ["power"]}, "note": "动力诉求"}
+{"id": "u12", "text": "平时通勤，周末偶尔带孩子", "expect": {"usage_scenario": "通勤"}, "note": "混合句，只该拿到通勤"}
+{"id": "u13", "text": "一家五口日常通勤，最看重后排", "expect": {"household_size": "3~5人", "usage_scenario": "通勤", "pain_points": ["空间尺寸"], "priority_order": ["space"]}, "note": "「后排」既标痛点也标权重；首版金标漏了 pain_points，属**金标漏标**"}
+{"id": "e01", "text": "今天天气不错", "expect": {}, "note": "空偏好：不得编造"}
+{"id": "e02", "text": "谢谢啊", "expect": {}, "note": "寒暄：不得编造"}
+{"id": "e03", "text": "随便看看", "expect": {}, "note": "无约束闲聊"}
+{"id": "e04", "text": "帮我算一下利息", "expect": {}, "note": "非汽车语境：不得劫持"}
+{"id": "x01", "text": "我要个能自动驾驶的", "expect": {"pain_points": ["智驾与座舱"], "priority_order": ["intelligence"]}, "note": "⚠️ **首版金标判它为越界，前提是错的**：「智驾与座舱」是参数探针的**真实**维度、背后有 fact_key，intelligence 也是**真被测量**的维度。它不越界。提案 §5 那条「越界」示例的措辞需要改"}
+{"id": "x02", "text": "我不要MPV，也不想买轿车", "expect": {}, "note": "否定由确定性路径处理；L1 不得凭空产出偏好"}
+{"id": "x03", "text": "别给我推太贵的", "expect": {}, "note": "价格诉求不属于 L1 四个字段"}
+{"id": "h01", "text": "我想要SUV，预算20万", "expect": {}, "note": "车身/预算是硬约束，由 regex 处理；L1 不得抽。本条要盯的是**不产出 body_type/budget**，期望保持空"}
+{"id": "h02", "text": "要纯电的，续航300以上", "expect": {"pain_points": ["续航"]}, "note": "首版金标判空属**过严**：续航是真实维度，模型抽它是对的；真正要盯的是**不产出 energy_type**（硬约束），故期望保留 pain_points"}
+{"id": "s01", "text": "我最看重安全", "expect": {}, "note": "安全无法变成排序依据（8 维公式里没有任何一个读安全类 fact_key），必须拒绝"}
