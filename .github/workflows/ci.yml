@@ -107,13 +107,14 @@ jobs:
       # core.hooksPath 是本地配置，新 clone 的仓库没有它，CI 也没补位——
       # 等于这道门禁对所有 CI 提交形同虚设。
       #
-      # ⚠️ 当前为「只报不拦」：范围 origin/main..HEAD 内含历史提交 f590eb2
-      #   （一次 docs(sync) 同时改了 tools/pre-push-guard.py 与 skills/doc_sync_check.py，
-      #   正是本仓已确认的门禁自我改写）。该提交已在上游分支，本轮按 roadmap R13
-      #   **不追溯处理**，故先归档报告、待其清理后再改为阻塞。
-      - name: commit-scope 门禁（当前只报不拦）
-        id: guard
-        continue-on-error: true
+      # 2026-10-03 改为**阻塞**。此前「只报不拦」的唯一起因是范围 origin/main..HEAD 里
+      # 含历史提交 f590eb2（一次 docs(sync) 同时改了 tools/pre-push-guard.py 与
+      # skills/doc_sync_check.py，正是本仓确认过的门禁自我改写），按 roadmap R13 不追溯。
+      # **该提交已随 PR #46 合入 main**（实测 `git merge-base --is-ancestor f590eb2
+      # origin/main` 返回 0），因此它不会再出现在任何**未来** PR 的
+      # origin/main..HEAD 范围里——当初拦路的那个提交已经自己走出范围了。
+      # 保留 artifact 上传：拦截时仍需能看到它到底判了什么。
+      - name: commit-scope 门禁（退出码必须 0）
         run: |
           set -o pipefail
           python tools/pre-push-guard.py origin/main..HEAD 2>&1 | tee /tmp/guard.log
