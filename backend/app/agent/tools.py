@@ -460,9 +460,20 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
 
     # 维护便利性的统一数据代理（评审：全量数据已在库内，不再「暂无统一数据源」）：
     # = 品牌在库车系数（规模/网络） + 该品牌是否有月度销量记录（渠道活跃度）
-    brand_series_count: dict[int, int] = {}
-    for s in series_map.values():
-        brand_series_count[s.brand_id] = brand_series_count.get(s.brand_id, 0) + 1
+    #
+    # 2026-10-03 口径修正：原先 `brand_series_count` 是在**过滤后的候选集**上累加
+    # （`for s in series_map.values()`，而 series_map 只含通过硬约束的车系）。于是
+    # 「品牌规模」这个**品牌的固有属性**会随用户筛选条件变化——筛选得越窄，维护
+    # 便利性看起来越好；一个品牌只剩 1 个车系通过筛选时 min(1/5,1)=0.2，规模被系统性
+    # 低估。这不是命名问题，是维度算错了对象。
+    # 改为**全库口径**（一次 GROUP BY 聚合，代价可忽略），并由
+    # tests/test_brand_scale_full_catalog.py 钉住「与筛选条件无关」。
+    brand_series_count: dict[int, int] = {
+        int(bid): int(n)
+        for bid, n in db.execute(
+            select(VehicleSeries.brand_id, func.count()).group_by(VehicleSeries.brand_id)
+        ).all()
+    }
     brands_with_sales = set(
         db.scalars(
             select(VehicleSeries.brand_id).join(MonthlySales, MonthlySales.series_id == VehicleSeries.id).distinct()
