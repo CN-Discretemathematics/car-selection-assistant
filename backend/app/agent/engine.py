@@ -353,12 +353,11 @@ def _parse_count(text: str) -> int | None:
     if text in _CN_DIGITS:
         return _CN_DIGITS[text]
     return None
-# 「MPV」与「mpv」两个键**都要保留**，不是冗余：偏好路径用小写化的 msg_low 匹配
-# （`"mpv" in msg_low`），而「不要…」的 avoid 路径用的是**原始 message**、
-# 大小写敏感（`"MPV" in message`）。删掉大写键会让「不要MPV」漏掉排除项。
-# ⚠️ 这条路径的大小写处理与偏好路径不一致（一个 lower 一个原样），属可记录的
-# 不对称，但**统一它就是行为变更**，需产品拍板；见 docs/refactoring-roadmap.md。
-_BODY_HINTS = {"轿车": "sedan", "suv": "suv", "MPV": "mpv", "mpv": "mpv"}
+# 两条匹配路径（偏好 `body` / avoid 排除项）现已**统一用小写化的 msg_low**，
+# 因此这张表**只需要小写键**。此前偏好路径用 msg_low、avoid 路径用原始 message，
+# 于是不得不同时留「MPV」与「mpv」两个键——当时功能没坏，但看起来像冗余，
+# 删掉大写键就会让「不要MPV」静默漏掉排除项（2026-10-03 统一后消除该陷阱）。
+_BODY_HINTS = {"轿车": "sedan", "suv": "suv", "mpv": "mpv"}
 _ENERGY_HINTS = {
     "纯电": "BEV",
     "插混": "PHEV",
@@ -521,11 +520,16 @@ def extract_hints(message: str) -> dict:
             hints["charging_tolerance"] = True
 
     if "不要" in message or "不考虑" in message:
+        # 与偏好路径统一用小写化的 msg_low 匹配（2026-10-03）。
+        # 此前这里用**原始 message**、大小写敏感，导致 _BODY_HINTS 被迫同时保留
+        # 「MPV」与「mpv」两个键——功能上当时没坏（两键并存时大小写输入都命中），
+        # 但它**看起来像冗余**：下一个人删掉大写键，「不要MPV」就会静默漏掉排除项。
+        # 统一到 msg_low 后大写键不再需要，风险随之消失。
         for key, value in _ENERGY_HINTS.items():
-            if key in message:
+            if key in msg_low:
                 hints.setdefault("avoid", []).append(value)
         for key, value in _BODY_HINTS.items():
-            if key in message:
+            if key in msg_low:
                 hints.setdefault("avoid", []).append(value)
         # 同词同时命中「偏好」与「避开」时以避开为准（评审 L2）：
         # 如「不要燃油车」→ avoid=[ICE]，不得同时写入 energy_preference=[ICE]。
