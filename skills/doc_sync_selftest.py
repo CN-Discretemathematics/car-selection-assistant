@@ -85,7 +85,13 @@ def main() -> int:
         versions = SANDBOX / "backend" / "alembic" / "versions"
         actual_mig = len([p for p in versions.glob("*.py") if p.name != "__init__.py"])
         probe = SANDBOX / "skills" / "_selftest_fix_probe.md"
-        probe.write_text("- 迁移共 9 个迁移（自测探针）\n", encoding="utf-8")
+        # 2026-10-03：这里原先**硬编码**探针数 9。仓库迁移数一旦涨到 9，探针里的数字
+        # 恰好就是对的 → `--fix` 无事可做、不输出 FIX 行 → 断言 `"FIX" in out` 失败。
+        # 也就是说自测在「第 9 个迁移落地那天」会自己把自己搞红（实测：H2-A 加了
+        # b7e4c1d90a25 后 main 10/10、本分支 9/10，CI gates 因此变红）。
+        # 改为**按实际值算出一个必定不同的错数**，不削弱断言：healed 与 FIX 两条都还在。
+        wrong_mig = actual_mig + 7
+        probe.write_text(f"- 迁移共 {wrong_mig} 个迁移（自测探针）\n", encoding="utf-8")
         rc, out = run_checker(SANDBOX, "--fix")
         healed = f"{actual_mig} 个迁移" in probe.read_text(encoding="utf-8")
         check(rc == 0 and healed and "FIX" in out,
