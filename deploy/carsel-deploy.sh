@@ -20,7 +20,7 @@ APP_DIR="/srv/carsel"
 STATE_DIR="/var/lib/carsel"
 STATE_FILE="${STATE_DIR}/deployed-${BRANCH}.sha"
 PREV_FILE="${STATE_DIR}/previous-${BRANCH}.sha"
-LOCK_FILE="/var/lock/carsel-deploy.lock"
+LOCK_FILE="${STATE_DIR}/deploy.lock"
 DEPLOY_LOG="/var/log/carsel-deploy.log"
 HEALTH_URL="http://127.0.0.1:8000/api/v1/ready"
 SITE_URL="http://127.0.0.1/"
@@ -65,9 +65,22 @@ if [ "$remote_sha" = "$current_sha" ] && [ "$FORCE" != "1" ]; then
 fi
 
 # 单实例锁（--check 不加锁；dry-run 也加，避免与真实部署并行下载）
-exec 9>"$LOCK_FILE"
+#
+# 2026-10-03 修两处：
+# 1) 锁文件放在 /var/lock —— **非 root 用户没有写权限**，`exec 9>` 直接失败。
+#    改用 $STATE_DIR（部署用户本就可写，脚本已经往里写 STATE_FILE）。
+# 2) 更要紧的是失败**被误报**：脚本是 `set -uo pipefail`（**没有 -e**），所以
+#    `exec 9>` 失败后继续往下走，`flock -n 9` 随之失败，于是走进
+#    「已有部署在运行，本次跳过」并 `exit 0` —— **权限错误被当成「有人在部署」，
+#    还以成功退出**。运维看到的是一句像模像样的提示，而部署根本没发生。
+#    现在把「拿不到锁」与「锁被占用」分开：前者报错退出 1，不再伪装成跳过。
+if ! exec 9>"$LOCK_FILE" 2>/dev/null; then
+  log "ERROR 无法打开锁文件 ${LOCK_FILE}（权限不足？当前用户 $(id -un)）"
+  log "      请改用 sudo 运行，或修好该目录权限；**不会**继续部署"
+  exit 1
+fi
 if ! flock -n 9; then
-  log "已有部署在运行，本次跳过"
+  log "已有部署在运行（锁 ${LOCK_FILE} 被占用），本次跳过"
   exit 0
 fi
 
@@ -135,6 +148,18 @@ if ! docker compose build api web; then
   exit 1
 fi
 log "镜像构建完成"
+
+# 关于数据库迁移（2026-10-03 查证，**本脚本不需要加这一步**）
+#
+# 我一度以为「迁移漏执行会让部署静默瘫掉」——那是**错的**，这里留一句以免后人重蹈：
+# deploy/backend.Dockerfile 的 CMD 是
+#   python -m alembic upgrade head && python -m uvicorn ...
+# 即**迁移在容器启动时就跑**，且用 `&&` 串联：迁移失败 → uvicorn 根本不启动 →
+# 容器起不来 → /ready 无响应 → 本脚本健康检查失败 → 自动回滚到上一版镜像。
+# 所以「代码合并了、迁移忘执行」在本部署流程里是**抓得住**的。
+#
+# 2026-10-03 生产库停在 c8a1f2e4b9d3 而 main 已含 b7e4c1d90a25，只是因为
+# **新镜像还没部署**（旧镜像里没有那个迁移文件，无从执行），不是流程缺陷。
 
 # 5) 切流
 if ! docker compose up -d; then
