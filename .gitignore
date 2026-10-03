@@ -47,6 +47,7 @@ next-env.d.ts
 .tools/
 .arkcli-install/
 .dsh-test/
+.workbuddy/          # agent 工作记忆目录：本地专属，不入库
 ark-plan-api-*.tgz
 dsh-ark-plugin-install.*
 .ark-examples/
@@ -75,3 +76,26 @@ backend/.embed_cache.json*
 /backend/eval/
 /.tmp/
 *.tgz
+
+# ── 覆盖率产物（2026-10-03）──
+# backend job 起用了 --cov，产物落在 backend/ 下。此前 .coverage 既不在
+# 索引也不在 ignore，`git add -A` 会把二进制覆盖率库提交进仓库。
+/backend/.coverage
+/backend/.coverage.*
+/backend/coverage.xml
+/backend/htmlcov/
+
+# ── pnpm-workspace.yaml（2026-10-03，勿提交）──
+# pnpm 11 在装 eslint 时会自动生成这个文件（构建脚本审批清单 allowBuilds）。
+# 它**不能进仓库**，因为本仓三处 pnpm 版本互不兼容，这个文件在任何一个 major 上
+# 都会弄坏另一边（均为本机实测，非推断）：
+#   pnpm 9（CI 固定 version: 9）看到它但没有 packages 字段 → 立即
+#     `ERROR packages field missing or empty`，`pnpm install --frozen-lockfile` 整个挂掉；
+#   补上 packages: ['.'] 后 pnpm 11 会把 web/ 当成 workspace 根并**静默跳过安装**，
+#     结果是 node_modules 被清空且不重建（tsc/eslint 全部「command not found」，
+#     而 pnpm 自己仍报 "Already up to date"）。
+# 三处版本现状：CI 固定 pnpm 9；生产 Dockerfile 用 corepack 且**未钉版本**；
+# 本机 pnpm 11.9.0。收敛它是独立决策（会改生产安装路径），本轮不动，
+# 已记入 docs/refactoring-roadmap.md。
+web/pnpm-workspace.yaml
+web/pnpm-workspace.yaml.*

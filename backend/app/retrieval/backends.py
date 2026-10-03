@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any, Protocol, runtime_checkable
 
+from app.retrieval.config import TOKENIZER
+
 # ── 分词（优化③：jieba 中文整词 + 车圈领域词表；不可用时 CJK 二元组兜底）────────
 _STATIC_WORDS: tuple[str, ...] = tuple(
     line.strip()
@@ -54,8 +56,6 @@ def _get_jieba():
             _JIEBA = None
     return _JIEBA
 
-
-from app.retrieval.config import TOKENIZER
 
 _WORD_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")

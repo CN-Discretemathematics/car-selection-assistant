@@ -12,10 +12,10 @@ import os
 import sys
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from app.common.database import get_session_factory  # noqa: E402
-from app.sources.snapshot import export_payload  # noqa: E402
+from app.common.database import get_session_factory
+from app.sources.snapshot import export_payload
 
 
 def main(argv: list[str] | None = None) -> int:

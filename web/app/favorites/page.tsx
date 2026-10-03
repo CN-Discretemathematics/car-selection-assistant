@@ -10,9 +10,21 @@ import { deleteAccount, getToken, listFavorites, setToken } from "@/lib/auth";
 import { formatPrice, type FavoriteOut } from "@/lib/api";
 
 export default function FavoritesPage() {
-  const [token] = useState<string | null>(() => getToken());
+  // token **不能在 render 期读**。原先写成 `useState(() => getToken())`：服务端
+  // `getToken()` 因 SSR 守卫返回 null，而客户端首次渲染可能拿到真 token —— 两边
+  // 渲染出不同的树，React 会报 hydration 不一致。而且这个初值只算一次，token
+  // 之后怎么变（另一标签页登录/退出）本页都���会知道。
+  // 改到 effect 里读，并用一个 tokenReady 区分「还没读」与「读了、确实没登录」——
+  // 否则已登录用户会先闪一下「登录后才能查看收藏」，那是句假话。
+  const [token, setToken] = useState<string | null>(null);
+  const [tokenReady, setTokenReady] = useState(false);
   const [items, setItems] = useState<FavoriteOut[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setToken(getToken());
+    setTokenReady(true);
+  }, []);
 
   useEffect(() => {
     if (!token) return;
@@ -20,6 +32,14 @@ export default function FavoritesPage() {
       .then(setItems)
       .catch((err) => setError(err instanceof Error ? err.message : "加载失败"));
   }, [token]);
+
+  const skeletons = (
+    <div className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-2" aria-label="加载中">
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="h-20 animate-pulse rounded-[22px] bg-white/60" />
+      ))}
+    </div>
+  );
 
   async function onDeleteAccount() {
     if (!token) return;
@@ -54,7 +74,9 @@ export default function FavoritesPage() {
       </section>
 
       <main id="main-content" className="mx-auto max-w-6xl px-4 pb-8 sm:px-6">
-        {!token ? (
+        {!tokenReady ? (
+          skeletons
+        ) : !token ? (
           <Reveal className="glass rounded-[28px] border border-black/[0.05] p-14 text-center">
             <span className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-ice text-4xl shadow-inner shadow-apple/10">
               🔐
@@ -69,11 +91,7 @@ export default function FavoritesPage() {
             {error}
           </Reveal>
         ) : items === null ? (
-          <div className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-2" aria-label="加载中">
-            {[0, 1, 2, 3].map((i) => (
-              <div key={i} className="h-20 animate-pulse rounded-[22px] bg-white/60" />
-            ))}
-          </div>
+          skeletons
         ) : items.length === 0 ? (
           <Reveal className="glass rounded-[28px] border border-black/[0.05] p-14 text-center">
             <span className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-ice text-4xl shadow-inner shadow-apple/10">

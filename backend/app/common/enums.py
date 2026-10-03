@@ -54,3 +54,47 @@ MISSING_VALUE_LABEL = "官方资料未披露"
 
 # 对比规模上限（默认最多比较 3～5 个 SKU）
 COMPARISON_MAX_VARIANTS = 5
+
+
+# ── 能源偏好泛化（2026-10-02 收敛到唯一实现）──────────────────────────────
+# 用户说的是「新能源 / 燃油」这类**大类**，而库内是 BEV/PHEV/EREV/HEV/ICE 五个
+# 具体类型。泛化规则此前在 agent/engine.py 与 agent/tools.py 各写了一份
+# （2026-10-02 审计：两份逐字相同，engine 内部又另有一份 _expand_* 包装）。
+# 规则本身是**推荐口径**——改它等于改产品行为，因此集中到本文件，
+# 任何调用方都不得再自行展开。
+#
+# 口径：HEV 归燃油侧（见 NEW_ENERGY_TYPES 注释），即
+#   new_energy → {BEV, PHEV, EREV}
+#   fuel      → {HEV, ICE}
+_GENERIC_ENERGY_ALIASES = ("new_energy", "fuel")
+
+
+def expand_energy_prefs(prefs: list[str] | tuple[str, ...] | None) -> set[str]:
+    """把能源偏好里的 `new_energy` / `fuel` 大类展开为具体能源类型。
+
+    返回可直接用于 SQL `IN (...)` 的集合；**已按 ENERGY_TYPES 全集求并**，
+    调用方无需再自行补齐具体类型。
+    """
+    items = list(prefs or [])
+    allowed = {e for e in items if e not in _GENERIC_ENERGY_ALIASES}
+    if "new_energy" in items:
+        allowed |= set(NEW_ENERGY_TYPES)
+    if "fuel" in items:
+        allowed |= {t for t in ENERGY_TYPES if t not in NEW_ENERGY_TYPES}
+    return allowed
+
+
+def expand_avoid(avoid: list[str] | tuple[str, ...] | None) -> tuple[set[str], set[str]]:
+    """把排除项展开为 (能源类型集合, 车身类型集合)，用于 SQL `NOT IN (...)`。
+
+    泛化口径与 `expand_energy_prefs` **必须一致**——两处曾各自实现，
+    长期可能漂移；现在共用同一实现，杜绝「偏好说排除燃油、排除项却没排除」的偏差。
+    """
+    items = set(avoid or [])
+    energy_avoid = {e for e in items if e in ENERGY_TYPES}
+    if "new_energy" in items:
+        energy_avoid |= set(NEW_ENERGY_TYPES)
+    if "fuel" in items:
+        energy_avoid |= {t for t in ENERGY_TYPES if t not in NEW_ENERGY_TYPES}
+    body_avoid = {b for b in items if b in BODY_TYPES}
+    return energy_avoid, body_avoid

@@ -15,6 +15,7 @@ import random
 import re
 import time
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -70,7 +71,9 @@ from app.agent.series_qa import (
 )
 from app.agent.session import SessionStore, get_session_store
 from app.agent.tools import (
+    DEFAULT_WEIGHTS,
     TOOL_SCHEMAS,
+    WEIGHT_CEILING,
     comparison_tool,
     citation_verifier,
     recommendation_tool,
@@ -82,7 +85,7 @@ from app.agent.tools import (
 )
 from app.catalog.brands import brand_series_overview, resolve_brand_mentions
 from app.catalog.series_index import display_name, resolve_series
-from app.common.enums import NEW_ENERGY_TYPES
+from app.common.enums import NEW_ENERGY_TYPES, expand_avoid, expand_energy_prefs
 from app.common.llm import LLMClient, LLMError, get_llm_client
 from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, VehicleVariant
 from app.comparison.analysis import analyze_comparison, render_analysis_text
@@ -234,29 +237,24 @@ def _dispatch_tool(db: Session, name: str, arguments: dict) -> dict:
 # 与新的能源/预算硬约束叠加后必然为空——用户观感就是「Agent 把参数限定在星愿上」。
 # 这里按硬约束探测「锁定车系内是否还有可行 SKU」：为空即视为需求已转移，
 # 自动解除锁定并明确告知用户（不静默改变口径）。
-_ALL_ENERGY_TYPES = ("BEV", "PHEV", "EREV", "HEV", "ICE")
+#
+# 注：能源类型全集已下沉到 app.common.enums.ENERGY_TYPES——本模块不再自带副本
+# （2026-10-02 收敛能源泛化规则时删去 _ALL_ENERGY_TYPES，它当时已无引用）。
 
 
 def _expand_energy_prefs(prefs: list[str]) -> set[str]:
-    """能源偏好展开（与 recommendation_tool 同一口径：new_energy/fuel 泛化）。"""
-    allowed = {e for e in prefs if e not in ("new_energy", "fuel")}
-    if "new_energy" in prefs:
-        allowed |= set(NEW_ENERGY_TYPES)
-    if "fuel" in prefs:
-        allowed |= {t for t in _ALL_ENERGY_TYPES if t not in NEW_ENERGY_TYPES}
-    return allowed
+    """能源偏好展开（与 recommendation_tool 同一口径：new_energy/fuel 泛化）。
+
+    2026-10-02：实现已收敛到 `app/common/enums.py`——本文件、agent/tools.py
+    此前各有一份**逐字相同**的副本，而这是推荐口径，两份漂移即等于口径不一致。
+    此处保留薄包装仅为兼容本模块内的既有调用点。
+    """
+    return expand_energy_prefs(prefs)
 
 
 def _expand_avoid(avoid: list[str]) -> tuple[set[str], set[str]]:
-    """排除偏好展开为 (能源集合, 车身集合)。"""
-    avoided = set(avoid or [])
-    energy_avoid = {e for e in avoided if e in _ALL_ENERGY_TYPES}
-    if "new_energy" in avoided:
-        energy_avoid |= set(NEW_ENERGY_TYPES)
-    if "fuel" in avoided:
-        energy_avoid |= {t for t in _ALL_ENERGY_TYPES if t not in NEW_ENERGY_TYPES}
-    body_avoid = {b for b in avoided if b in ("sedan", "suv", "mpv", "pickup")}
-    return energy_avoid, body_avoid
+    """排除偏好展开为 (能源集合, 车身集合)。同上，唯一实现在 enums。"""
+    return expand_avoid(avoid)
 
 
 def locked_series_conflict(db: Session, profile: UserProfile) -> bool:
@@ -355,6 +353,11 @@ def _parse_count(text: str) -> int | None:
     if text in _CN_DIGITS:
         return _CN_DIGITS[text]
     return None
+# 「MPV」与「mpv」两个键**都要保留**，不是冗余：偏好路径用小写化的 msg_low 匹配
+# （`"mpv" in msg_low`），而「不要…」的 avoid 路径用的是**原始 message**、
+# 大小写敏感（`"MPV" in message`）。删掉大写键会让「不要MPV」漏掉排除项。
+# ⚠️ 这条路径的大小写处理与偏好路径不一致（一个 lower 一个原样），属可记录的
+# 不对称，但**统一它就是行为变更**，需产品拍板；见 docs/refactoring-roadmap.md。
 _BODY_HINTS = {"轿车": "sedan", "suv": "suv", "MPV": "mpv", "mpv": "mpv"}
 _ENERGY_HINTS = {
     "纯电": "BEV",
@@ -403,20 +406,50 @@ _USAGE_HINTS = {
 }
 
 # 评分维度关键词 → recommendation_tool 的 8 维权重键（§17.2 软评分）
+#
+# 2026-10-03（sales-agent-proposal L2 补齐）：新增词条的判定标准只有一条——
+# **这个维度在 recommendation_tool 里真的被计算，且这一轮真的被测到。**
+# sales-agent-proposal §2 举的典型销售话术「我最看重后排和家用」此前两个都落空：
+# 「后排」不在表里，「家用」在 _USAGE_HINTS 里但没有权重入口，用户的强调被静默丢弃。
 _WEIGHT_DIM_KEYWORDS: tuple[tuple[str, str], ...] = (
-    ("大空间", "space"), ("空间", "space"),
+    # 用途：8 维里**唯独没有关键词入口**的维度（DEFAULT_WEIGHTS 给它 0.15，最高）。
+    # 词表取 _USAGE_HINTS 键的**子集**，这是刻意的结构约束：只有同时也会写进
+    # profile.usage 的词，才能让 tools 侧把 usage 计入 measured 集合。
+    # 给 usage 加权却测不到 = 白白稀释其它维度而换不来任何排序变化。
+    # 该不变量由 tests/test_agent.py::test_usage_weight_keywords_are_measurable 钉住。
+    ("通勤", "usage"), ("上下班", "usage"), ("代步", "usage"),
+    ("家用", "usage"), ("家庭", "usage"), ("带娃", "usage"),
+    ("接送", "usage"), ("买菜", "usage"),
+    ("长途", "usage"), ("自驾", "usage"), ("旅游", "usage"),
+    ("出差", "usage"), ("商务", "usage"),
+    # 空间（space 由 length_mm 车长归一）：补销售高频的「后排/坐人」说法
+    ("大空间", "space"), ("空间", "space"), ("后排", "space"),
+    ("坐人", "space"), ("载人", "space"),
     ("动力", "power"), ("性能", "power"), ("马力", "power"), ("加速", "power"),
     ("续航", "energy"), ("油耗", "energy"), ("能耗", "energy"), ("电耗", "energy"),
     ("智驾", "intelligence"), ("智能", "intelligence"), ("辅助驾驶", "intelligence"),
     ("车机", "intelligence"), ("科技", "intelligence"),
     ("舒适", "comfort"), ("舒服", "comfort"), ("隔音", "comfort"),
-    ("保养", "maintenance"), ("维修", "maintenance"), ("省心", "maintenance"), ("售后", "maintenance"),
+    ("保养", "maintenance"), ("维修", "maintenance"), ("省心", "maintenance"),
+    ("售后", "maintenance"), ("网点", "maintenance"), ("配件", "maintenance"),
     ("性价比", "budget"), ("价格", "budget"),
 )
+# ⚠️ 「安全 / 碰撞 / 气囊」**刻意不映射到任何维度**（契约由测试钉住，见
+# tests/test_agent.py::test_safety_emphasis_is_deliberately_unmapped）：
+# 8 个维度的公式里**没有任何一个读安全类 fact_key**——budget←价格、usage←用途×车身、
+# space←length_mm、energy←能源类型、power←功率、comfort/intelligence←配置类事实键、
+# maintenance←品牌规模+销量活跃度。把「我最看重安全」映射到其中任何一个，都不会让排序
+# 更安全，只会让用户以为系统听懂了他最在意的东西——**用行为冒充理解**，比不回答更糟。
+# 真要支持，需要先加一个真读安全事实的维度（数据 + 公式 + 归一化），属新增能力，
+# 不是往这张表里加词能解决的。
 _EMPHASIS_RE = re.compile(
     r"(优先|最看重|比较看重|更看重|特别看重|最在意|比较在意|更在意|主要看|重点|看重|在乎|重视|希望)"
 )
-_WEIGHT_RAISE = 0.2  # 单次强调的权重增量（recommendation_tool 层归一化前叠加）
+# 单次强调的权重**增量**。⚠️ tools 侧 `profile.weights` 是**绝对权重（覆盖）**而非累加器，
+# 所以这里必须发出「默认值 + 增量」的绝对值，不能只发裸增量——
+# 否则默认本就高于增量的维度会被**反向压低**：「主要看价格」→ budget 由 0.30 掉到 0.20，
+# 用户越强调价格，系统越不看重价格（2026-10-03 实测发现，此前注释写「增量/叠加」而代码是覆盖）。
+_WEIGHT_RAISE = 0.2
 
 
 def extract_hints(message: str) -> dict:
@@ -509,11 +542,14 @@ def extract_hints(message: str) -> dict:
 
     # 评分权重线索（评审 M-R10/§17.2「权重来自用户对话」落地）：
     # 含强调词（优先/最看重/主要看…）且句中点到评分维度时，给出该维度的权重加成。
-    # 例：「空间优先，动力也要强」→ weights={space:+0.2, power:+0.2}
+    # 例：「空间优先，动力也要强」→ weights={space:0.30, power:0.30}
+    # （默认值 0.10 + 增量 0.2；发绝对值的原因见 _WEIGHT_RAISE 处的注释）
     if _EMPHASIS_RE.search(message):
         dims = sorted({dim for kw, dim in _WEIGHT_DIM_KEYWORDS if kw in message})
         if dims:
-            hints["weights"] = {dim: _WEIGHT_RAISE for dim in dims}
+            hints["weights"] = {
+                dim: round(DEFAULT_WEIGHTS.get(dim, 0.0) + _WEIGHT_RAISE, 3) for dim in dims
+            }
 
     return hints
 
@@ -595,10 +631,13 @@ def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
         profile.charging_tolerance = hints["charging_tolerance"]
     if hints.get("avoid"):
         profile.avoid = sorted(set(profile.avoid) | set(hints["avoid"]))
-    # 权重线索跨轮累加（如第一轮「空间优先」+0.2，后来说「再看重动力」动力也 +0.2）
+    # 权重线索跨轮累加（如第一轮「空间优先」0.30，后来说「再看重动力」动力也 0.30）。
+    # 上限 WEIGHT_CEILING：重复强调同一维度会线性累加，没有上限时一句车可以叠到 3.0，
+    # 那等于「只看这一个维度」，与综合推荐的产品意图相悖（2026-10-03）。
     if hints.get("weights"):
         for dim, w in hints["weights"].items():
-            profile.weights[dim] = round(profile.weights.get(dim, 0.0) + float(w), 3)
+            merged = profile.weights.get(dim, 0.0) + float(w)
+            profile.weights[dim] = round(min(merged, WEIGHT_CEILING), 3)
     return profile
 
 
@@ -623,6 +662,117 @@ def next_clarification(profile: UserProfile) -> Clarification | None:
             missing=["passengers"],
         )
     return None
+
+
+async def _load_profile(store: SessionStore, session_id: str) -> UserProfile:
+    """从 store 取回画像并反序列化；**脏数据自愈**，不把异常抛给调用方。
+
+    2026-10-02（Critical）：原实现是裸的
+    `UserProfile(**await run_in_threadpool(store.get_profile, session_id))`。
+    任何一次校验失败——部署时改了 UserProfile 的字段类型、Redis 里被半写、
+    历史脏值——都会让 `ValidationError` 逃出 `respond`，于是该 session
+    **之后每一次请求恒 500 且不自愈**，用户只能靠「新对话」重置。
+    也就是说：一次 schema 变更 = 一次线上批量 500。
+
+    自愈策略：**丢弃脏画像、按空画像重新播种**，并记 error 级日志。
+    丢的是缓存态（约束可从后续对话重新收集），不是用户资产；相比整条会话
+    卡死，这是明显更好的降级——也符合「失败要显式」的诚实性原则。
+    """
+    raw = await run_in_threadpool(store.get_profile, session_id)
+    try:
+        return UserProfile(**raw)
+    except (ValidationError, TypeError) as err:
+        # TypeError 同样要接：raw 根本不是映射（被写成 list / 字符串 / 数字）时，
+        # `**raw` 抛的是 TypeError 而非 ValidationError。两者都是「脏数据」，
+        # 自愈策略一致。
+        logging.getLogger("app.agent.router").error(
+            "会话画像反序列化失败，已重建为空画像: session=%s %s: %s",
+            session_id, type(err).__name__, err,
+        )
+        fresh = UserProfile()
+        # 重写回 store：否则下一轮还会读到同一份脏数据、每轮都走重建分支
+        await run_in_threadpool(store.set_profile, session_id, fresh.model_dump())
+        return fresh
+
+
+# 回答里的来源引用条数上限（多数回答类型只展示前 3 个来源，避免引用刷屏）
+CITATION_LIMIT = 3
+
+
+def _source_citations(
+    db: Session,
+    source_ids: list[int],
+    *,
+    label_suffix: str,
+    limit: int | None = CITATION_LIMIT,
+) -> list[Citation]:
+    """把来源 id 列表变成带来源名的引用列表（label 形如「<来源名> <后缀>」）。
+
+    2026-10-02 抽取。此前「查 Source → 循环 → Citation」这段在
+    `_comparison_analysis_reply` / `_catalog_overview_reply` /
+    `_brand_overview_reply` / `_tool_loop_reply` 各写一份，逐字相同却**上界不一致**：
+
+      | 调用点                        | 循环上界            | label 后缀   |
+      |-------------------------------|---------------------|--------------|
+      | _comparison_analysis_reply    | source_ids[:3]      | 配置数据     |
+      | _catalog_overview_reply       | **source_ids（无上限）** | 车型数据 |
+      | _brand_overview_reply         | source_ids[:3]      | 车型数据     |
+      | _tool_loop_reply              | sorted(...)[:3]     | 数据         |
+
+    统一后差异以参数暴露（`limit` / `label_suffix`），**行为逐字保持不变**——
+    盘点回答至今不下限、其余三条限 3，是既有行为，不是本轮引入的。
+    是否该统一属产品口径决策，留给评审拍板（见 docs/refactoring-roadmap.md）。
+    """
+    if not source_ids:
+        return []
+    names = {
+        s.id: s.name for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
+    }
+    ordered = source_ids if limit is None else source_ids[:limit]
+    return [
+        Citation(
+            source_id=sid,
+            source_name=names.get(sid),
+            label=f"{names.get(sid) or '来源'} {label_suffix}",
+        )
+        for sid in ordered
+    ]
+
+
+# 取舍/说明类文案里的「内部措辞」黑名单——这些是写给维护者看的，不该呈现给用户。
+# 2026-10-02 提升为模块级：原先它是 `_recommend_reply` 的局部变量，而
+# `collect_tradeoffs` 与构造 `RecommendedVariant` 两处都要用；挪进函数后另一处
+# 直接 NameError。提到模块级，两处共用一份定义。
+INTERNAL_NOTE_MARKERS = ("未参与", "暂无", "数据源", "未披露")
+
+
+def collect_tradeoffs(top: list[dict], limit: int = 4) -> list[str]:
+    """汇总各候选款型的「取舍说明」，去重且**严格不超过 limit 条**。
+
+    2026-10-02 修正 + 抽取。原实现把上限判断与 break 都放在内层循环里，
+    `break` 只跳出 `for t in ...`，外层 `for v in top` 会继续——于是每多一个
+    候选就可能多塞一条，「最多 4 条」实际上限是 `4 + (车系数 - 1)`。
+
+    过滤掉内部说明类措辞（未参与评分 / 暂无数据源 / 未披露）——这些不该呈现给用户。
+
+    ⚠️ 抽取本函数时**顺带暴露了一个潜伏 bug**：原先 INTERNAL_NOTE_MARKERS 是
+    `_recommend_reply` 的局部变量，而下方构造 `RecommendedVariant` 时也在用它——
+    把它挪进本函数后，那一行变成 NameError。已提升为模块级常量，两处共用。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in top:
+        if len(tradeoffs := (v.get("tradeoffs") or [])) and len(out) >= limit:
+            break
+        for t in tradeoffs:
+            if any(note in t for note in INTERNAL_NOTE_MARKERS):
+                continue
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+                if len(out) >= limit:
+                    break
+    return out
 
 
 class AgentEngine:
@@ -676,7 +826,28 @@ class AgentEngine:
             return
         task = asyncio.create_task(self._shadow_route(message, profile, regex_decision))
         self._pending_shadow_tasks.add(task)
-        task.add_done_callback(self._pending_shadow_tasks.discard)
+        task.add_done_callback(self._on_shadow_done)
+
+    def _on_shadow_done(self, task: asyncio.Task) -> None:
+        """回收旁路任务：既从 in-flight 集合摘除，也**取回异常**。
+
+        2026-10-02：原实现只 `discard`，从不调 `task.exception()`。`_shadow_route`
+        内部只兜底了 `route_with_llm` 一段（:701），其后的 `arbitrate_route` 与
+        `log_shadow_record` 一旦抛异常，任务静默死亡——唯一痕迹是 asyncio 在 GC 时
+        打的 "Task exception was never retrieved"，那行不在 `app.agent.router.shadow`
+        日志流里，`shadow_report.py` 解析不到。
+
+        这与已修复的 `_shadow_route` 签名事故属同一失败族：**旁路出错，零痕迹**。
+        """
+        self._pending_shadow_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logging.getLogger("app.agent.router.shadow").warning(
+                "shadow 旁路任务异常（不影响响应路径）: %s: %s",
+                type(exc).__name__, str(exc)[:200], exc_info=True,
+            )
 
     async def _shadow_route(self, message: str, profile: UserProfile, regex_decision) -> None:
         """shadow 旁路体：结果只写对拍日志（logger "app.agent.router.shadow"）。
@@ -690,8 +861,17 @@ class AgentEngine:
         llm_decision = None
         last_error: str | None = None
         routing_llm = self._routing_llm()
+        # 2026-10-02（M11）：原先 `started` 写在**循环体内**，每轮重试都被重置，
+        # 于是 llm_elapsed_ms 只反映**最后一次**尝试——重试的退避睡眠
+        # （_SHADOW_RETRY_DELAYS，当前 0.8s + 2.5s）被整段排除，
+        # shadow_report 的 p50/p95 因此系统性**低估**重试样本的路由开销。
+        # 现按真实墙钟计时，并额外记录「最后一次尝试」耗时，两种口径都留。
+        # 注意：llm_router.py 的切流判据 4 用的是回答级耗时日志
+        # （logger "app.agent.respond"），不受本字段影响；这里只影响 shadow 诊断。
+        started_total = time.perf_counter()
+        started_attempt = started_total
         for attempt in range(len(_SHADOW_RETRY_DELAYS) + 1):
-            started = time.perf_counter()
+            started_attempt = time.perf_counter()
             try:
                 llm_decision = await route_with_llm(
                     message, profile, llm=routing_llm, regex_intent=regex_decision.intent,
@@ -709,7 +889,8 @@ class AgentEngine:
             message,
             regex_intent=regex_decision.intent,
             llm_decision=llm_decision,
-            llm_elapsed_ms=(time.perf_counter() - started) * 1000,
+            llm_elapsed_ms=(time.perf_counter() - started_total) * 1000,
+            llm_last_attempt_ms=(time.perf_counter() - started_attempt) * 1000,
             llm_error=last_error,
             arbitrated_intent=arbitrated.intent,
             meta={
@@ -774,7 +955,7 @@ class AgentEngine:
         """
         await run_in_threadpool(self._store.append_message, session_id, "user", message)
 
-        profile = UserProfile(**await run_in_threadpool(self._store.get_profile, session_id))
+        profile = await _load_profile(self._store, session_id)
         hints = extract_hints(message)
         profile = merge_profile(profile, hints)
         # 已补齐的字段从 unknowns 中移除（评审 M1）：unknowns 语义 = 「最近一次追问未答」，
@@ -814,7 +995,13 @@ class AgentEngine:
             # 不含购车意图词的消息会掉进通用对话分支，由模型凭记忆回答（实测又答成
             # 「奔驰只有三款纯电」）——必须回到确定性链路，用累计画像重出推荐。
             structured = True
-            await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
+        # 2026-10-02（P5.4 / M4）：原先这里有 3 次**连续**的 set_profile
+        # （品牌合并后 / 解锁后 / 重新锁定后），写的是同一个 profile 对象——
+        # 后一次必然覆盖前一次。生产存储是云 Redis（socket_timeout=3s），
+        # 每次都是一次串行往返，最坏情况一轮对话多付 3 次。
+        # 合并为**一次无条件写**：放在 987 所在位置之后，三种变更都已被吸收。
+        # 注：932 那次保留——`is_chatty` 会在此之后直接 return，那时
+        # 品牌/锁定逻辑尚未执行，那次写是唯一一次落盘机会。
         # 评审 m2：否定词**直接指向**已锁定车系（「我不买星愿了，想要15万的燃油车」）
         # 等同明确解锁——否则「锁定车系 ∩ 新硬约束」为空，推荐必然为空。
         # 只按近距离共现判定：「不想要SUV了，看看银河星愿」否定的是车身形式，
@@ -834,14 +1021,16 @@ class AgentEngine:
                     s.id for s, _brand in resolved if negates_series(message, s.name)
                 }
                 profile.locked_series_ids = [i for i in profile.locked_series_ids if i not in dropped]
-            await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         if resolved:
             # 会话记忆：用户点名的车系持续锁定，直到明确要求「看其他车」；
             # 否定语境（「我不买汉兰达」）不加锁（评审 P2）
             if not wants_unlock and not NEGATION_RE.search(message):
                 mentioned = [s.id for s, _ in resolved]
                 profile.locked_series_ids = sorted(set(profile.locked_series_ids) | set(mentioned))
-                await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
+        # 唯一一次落盘：无条件，覆盖上面品牌合并 / 解锁 / 重新锁定三种变更。
+        # 原来分散在 3 处条件写里，任何一条分支漏写都会丢画像——统一到末尾后，
+        # 「本轮结束前画像一定已持久化」成为结构性保证而非人工纪律。
+        await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
 
         # 0.55) 同车系「版本 / 款型差异」提问 → 确定性版本级对比（用户反馈 P1）。
         #       必须排在车系档案问答之前：档案用的是车系级聚合事实（同键跨款归并成一行），
@@ -853,9 +1042,15 @@ class AgentEngine:
             if len(resolved) == 1:
                 target = resolved[0]
             elif not resolved and len(profile.locked_series_ids) == 1:
-                locked_series = db.get(VehicleSeries, profile.locked_series_ids[0])
+                # 2026-10-02：db.get() 是**立即**执行的（不像 db.scalars 那样惰性），
+                # 在 async def 里裸调会阻塞事件循环。按同文件 _variant_diff_reply 的
+                # 既有正确写法包进线程池。
+                locked_series = await run_in_threadpool(
+                    db.get, VehicleSeries, profile.locked_series_ids[0]
+                )
                 if locked_series is not None:
-                    target = (locked_series, db.get(Brand, locked_series.brand_id))
+                    brand = await run_in_threadpool(db.get, Brand, locked_series.brand_id)
+                    target = (locked_series, brand)
             if target is not None:
                 return await self._variant_diff_reply(db, session_id, target[0], target[1], message)
 
@@ -1058,18 +1253,7 @@ class AgentEngine:
             # 口径变化必须对用户可见：先说明「已不再限定在某车系」，再给推荐理由
             reasons.insert(0, unlock_note)
         # 内部说明类「妥协项」（未参与评分/暂无数据源等）不呈现给用户（评审：不应出现）
-        internal_notes = ("未参与", "暂无", "数据源", "未披露")
-        tradeoffs: list[str] = []
-        seen: set[str] = set()
-        for v in top:
-            for t in v["tradeoffs"] or []:
-                if any(note in t for note in internal_notes):
-                    continue
-                if t not in seen:
-                    seen.add(t)
-                    tradeoffs.append(t)
-                if len(tradeoffs) >= 4:
-                    break
+        tradeoffs = collect_tradeoffs(top, limit=4)
 
         # 混合检索证据（§13：官方资料片段作为解释佐证；检索不可用不影响推荐）
         evidence = await run_in_threadpool(self._collect_evidence, db, profile, top)
@@ -1087,7 +1271,8 @@ class AgentEngine:
                 price_cny=v["price_cny"],
                 score=v["score"],
                 matched=v["matched"],
-                tradeoffs=[t for t in (v["tradeoffs"] or []) if not any(n in t for n in internal_notes)],
+                tradeoffs=[t for t in (v["tradeoffs"] or [])
+                           if not any(n in t for n in INTERNAL_NOTE_MARKERS)],
             )
             for v in top
         ]
@@ -1165,14 +1350,7 @@ class AgentEngine:
                 if f.get("source_id")
             }
         )
-        if source_ids:
-            names = {
-                s.id: s.name for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
-            }
-            for sid in source_ids[:3]:
-                citations.append(
-                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 配置数据")
-                )
+        citations.extend(_source_citations(db, source_ids, label_suffix="配置数据"))
         out = AgentMessageOut(
             session_id=session_id,
             explanation=text,
@@ -1247,15 +1425,11 @@ class AgentEngine:
             )
         citations: list[Citation] = []
         source_ids = overview.get("source_ids") or []
-        if source_ids:
-            names = {
-                s.id: s.name
-                for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
-            }
-            for sid in source_ids:
-                citations.append(
-                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 车型数据")
-                )
+        # 盘点回答盼不下限（与其余三条的 [:3] 不同）——
+        # 属既有行为，本轮保持不变，差异已记入 roadmap。
+        citations.extend(
+            _source_citations(db, source_ids, label_suffix="车型数据", limit=None)
+        )
         out = AgentMessageOut(
             session_id=session_id,
             explanation=text,
@@ -1279,15 +1453,7 @@ class AgentEngine:
         text = self._brand_overview_text(profile, overview, energy_filter)
         citations: list[Citation] = []
         source_ids = sorted({s for s in (i.get("source_id") for i in overview["series"]) if s})
-        if source_ids:
-            names = {
-                s.id: s.name
-                for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
-            }
-            for sid in source_ids[:3]:
-                citations.append(
-                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 车型数据")
-                )
+        citations.extend(_source_citations(db, source_ids, label_suffix="车型数据"))
         out = AgentMessageOut(
             session_id=session_id,
             explanation=text,
@@ -1394,13 +1560,17 @@ class AgentEngine:
 
         # 会话上下文注入（第二轮审查：指代/追问类消息不能失去上下文）
         context_notes: list[str] = []
-        locked_names = [
-            series.name
-            for series in (
-                db.get(VehicleSeries, sid) for sid in profile.locked_series_ids
-            )
-            if series is not None
-        ]
+        # 2026-10-02：生成器里的 db.get() 同样是立即执行；且这是 per-id 的 N+1。
+        # 整段搬进线程池，一次往返拿完所有锁定车系名。
+        locked_names = await run_in_threadpool(
+            lambda: [
+                series.name
+                for series in (
+                    db.get(VehicleSeries, sid) for sid in profile.locked_series_ids
+                )
+                if series is not None
+            ]
+        )
         if locked_names:
             context_notes.append(f"用户此前锁定的车系：{'、'.join(locked_names)}（「它/这台」多指这些）")
         if profile.brand_labels:
@@ -1565,15 +1735,11 @@ class AgentEngine:
 
         # 引用只在「答案里确实出现数字」时附加：纯解释/拒答类回答不制造误导性溯源
         citations: list[Citation] = []
+        # 正文数字全部能溯源到这批来源时才引用（无数字则无需引用）
         if source_ids and any(ch.isdigit() for ch in final_text):
-            names = {
-                s.id: s.name
-                for s in db.scalars(select(Source).where(Source.id.in_(sorted(source_ids)))).all()
-            }
-            for sid in sorted(source_ids)[:3]:
-                citations.append(
-                    Citation(source_id=sid, source_name=names.get(sid), label=f"{names.get(sid) or '来源'} 数据")
-                )
+            citations.extend(
+                _source_citations(db, sorted(source_ids), label_suffix="数据")
+            )
         out = AgentMessageOut(
             session_id=session_id,
             explanation=final_text,
@@ -1699,7 +1865,10 @@ class AgentEngine:
         resolved: list,
     ) -> AgentMessageOut:
         """具体车系问答：确定性回答（全部来自库内真实参数），不依赖 LLM。"""
-        answer = build_series_qa_answer(db, resolved, message)
+        # 2026-10-02：build_series_qa_answer 内部会做多次库查询（且有 N+1），
+        # 在 async def 里裸调会阻塞事件循环。同文件 _variant_diff_reply 对
+        # 结构完全相同的调用已正确包裹，此处对齐——规则要一致应用。
+        answer = await run_in_threadpool(build_series_qa_answer, db, resolved, message)
         source_ids = sorted({s.source_id for s, _ in resolved if s.source_id})
         name_by_id: dict[int, str] = {}
         if source_ids:

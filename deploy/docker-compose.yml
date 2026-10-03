@@ -1,4 +1,4 @@
-# carSelection 生产部署（PROJECT_PLAN.md 阶段 2 云端架构）
+# carSelection 生产部署（阿里云轻量单机 + docker compose）
 #
 # 用法（服务器上，仓库根目录）：
 #   1) 准备 backend/.env（生产值：数据库、Redis、OSS、SMTP 与管理凭据，见 .env.example）

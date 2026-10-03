@@ -34,6 +34,10 @@
 - backend：`backend\.venv\Scripts\python.exe -m pytest -q`（在 `backend/` 下）
 - web：`pnpm --dir web exec tsc --noEmit`；改 UI 后按需 `next build`（先停 `next dev`，
   两者共用 `.next` 会互相破坏）
+- **eslint（2026-10-03 起已装且阻塞）**：`cd web` 后 `pnpm exec eslint . --max-warnings 0`。
+  基线 0。注意本机 pnpm 与 CI 的 pnpm major 不同（见 docs/refactoring-roadmap.md 的
+  「pnpm 版本三处不一致」），`web/pnpm-workspace.yaml` 已被 gitignore——**不要提交它**，
+  提交会让 CI 的 `pnpm install --frozen-lockfile` 直接失败。
 - 文案/密钥/文档门禁：`reviewer/scan_ui_copy.py`、`reviewer/scan_secrets.py`、
   `skills/doc_sync_check.py`（计数/悬空引用/配置表/编码；退出码必须 0，CI gates job 已接线。
   2026-09-16 实例：README 用例数 313 未随实际 347 更新，就是它抓出来的。
@@ -43,6 +47,12 @@
   （输入/产出/完整 prompt 见 `skills/doc-sync.md`），它直接改文档并出报告，报告并入提交说明；
   机械计数交给 `doc_sync_check.py --fix`；两道都过再 commit
 - 端到端判据先定义再动手（真后端 + 真 DOM 断言），参考 `skills/` 同类脚本。
+- **ruff（2026-10-03 起可跑）**：`backend\.venv\Scripts\python.exe -m ruff check .`
+  在 `backend/` 下。基线 **130 条**，CI `lint` job 只报不拦。**不要无脑 `--fix`**：
+  I001 会把 `app.*` 排到 `load_dotenv()` 之前（搞坏环境加载），F401 会删掉
+  `__init__.py` 的 re-export（外部 import 崩）。改动后若计数上升需在提交信息里说明。
+  它的 `target-version = "py311"` 是本仓 3.11 兼容承诺的**唯一自动化执行点**——
+  3.12-only 语法（如 f-string 内反斜杠）只有它能抓，CI 与本地 pytest 都不会红。
 
 ## Instincts（0.9 级教训，每次会话生效；完整库见 docs-local/instincts.md）
 

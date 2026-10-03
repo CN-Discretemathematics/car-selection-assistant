@@ -30,9 +30,9 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from app.common.llm import LLMClient  # noqa: E402
+from app.common.llm import LLMClient
 
 _PROMPT = (
     "把下面的用户买车提问改写成更口语化的说法，像真实用户在聊天窗口随手打字。\n"

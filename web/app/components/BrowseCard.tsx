@@ -4,7 +4,7 @@ import {
   ENERGY_CHIP,
   ENERGY_LABELS,
   formatCount,
-  formatPriceRange,
+  resolvePriceRangeNote,
   SALES_TYPE_LABELS,
   type VehicleListItem,
 } from "@/lib/api";
@@ -58,9 +58,7 @@ export default function BrowseCard({ item }: { item: VehicleListItem }) {
           {/* 与首页卡片同一套「仪表读数」：价格主视觉，销量次之 */}
           <p className="mt-2.5 text-[12px] leading-4 text-ash">官方指导价</p>
           <p className="truncate text-[21px] font-semibold leading-7 tracking-tight text-ink">
-            {item.price_range.min === null && item.price_range.max === null && item.price_range_note
-              ? item.price_range_note
-              : formatPriceRange(item.price_range)}
+            {resolvePriceRangeNote(item.price_range, item.price_range_note)}
           </p>
           {item.latest_sales.sales_count != null && (
             <p className="mt-1 text-[13px] text-ash">

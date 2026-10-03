@@ -4,7 +4,7 @@ import {
   ENERGY_CHIP,
   ENERGY_LABELS,
   formatCount,
-  formatPriceRange,
+  resolvePriceRangeNote,
   type HomeCard,
 } from "@/lib/api";
 
@@ -36,10 +36,7 @@ export default function CarCard({
     card.sales_count > 0
       ? Math.max(4, Math.round((card.sales_count / Math.max(maxCount, 1)) * 100))
       : 0;
-  const priceDisplay =
-    card.price_range.min === null && card.price_range.max === null && card.price_range_note
-      ? card.price_range_note
-      : formatPriceRange(card.price_range);
+  const priceDisplay = resolvePriceRangeNote(card.price_range, card.price_range_note);
 
   return (
     <Link

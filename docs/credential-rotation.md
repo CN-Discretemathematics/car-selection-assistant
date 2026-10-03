@@ -170,8 +170,8 @@ curl -s -X POST localhost:8000/api/v1/auth/email-code -H 'Content-Type: applicat
 - **已完成**：生产 `CORS_ORIGINS` 已由旧 ECS 来源改为正式域名集合
   （`https://hp-car-selection-assistant.cn`、`https://www.…`、`http://…`、`http://121.41.4.12`），
   预检验证通过：正式域名回 `access-control-allow-origin`，旧来源被拒。
-- **备案后待办**：域名解析就绪后配置 nginx `server_name` + HTTPS/HSTS，并按需收窄 `CORS_ORIGINS`
-  （只保留 https 来源）。
+- **已完成（2026-09）**：域名解析与 nginx `server_name` + 443 已上线（`deploy/nginx-https.conf` 为线上实态）；
+  `CORS_ORIGINS` 收窄为 https 域名集合（见上一条「已完成」）。
 - **对象存储观察**：bucket `car-selection` 的存储类型是 **ColdArchive（冷归档）**，新上传对象无法直接
   读取（实测 `get_object` 返回 403 `InvalidObjectState`），需先 `restore_object`。应用侧**只写不读**
   （`app/common/oss.py` 提供 `upload_file`，全仓无 `get_object` / `download_*` 调用），因此当前无影响；

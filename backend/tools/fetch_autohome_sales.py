@@ -13,16 +13,16 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from app.catalog.services import latest_full_month  # noqa: E402
-from app.sources.autohome import (  # noqa: E402
+from app.catalog.services import latest_full_month
+from app.sources.autohome import (
     build_payload,
     fetch_rank_page,
     fetch_rank_rows,
     parse_rank_page,
 )
-from app.sources.fetcher import record_snapshot  # noqa: E402
+from app.sources.fetcher import record_snapshot
 
 
 def fetch_and_import_month(

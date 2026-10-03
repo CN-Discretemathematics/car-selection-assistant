@@ -24,13 +24,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from app.common.database import get_session_factory  # noqa: E402
-from app.common.models import MonthlySales  # noqa: E402
-from app.rag.ingest import build_chunks  # noqa: E402
-from app.rag.service import db_counts, get_dense_backend, run_reindex  # noqa: E402
-from app.retrieval.config import MAX_CHUNKS  # noqa: E402
+from app.common.database import get_session_factory
+from app.common.models import MonthlySales
+from app.rag.ingest import build_chunks
+from app.rag.service import db_counts, get_dense_backend, run_reindex
+from app.retrieval.config import MAX_CHUNKS
 
 
 def _latest_sales_month(db) -> str | None:

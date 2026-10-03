@@ -1,10 +1,18 @@
 import type { FavoriteOut, UserOut } from "@/lib/api";
+import { postJson, requestJson } from "@/lib/http";
 
 const TOKEN_KEY = "auth_token";
 
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(TOKEN_KEY);
+  // 读取也要 try/catch：Safari 无痕模式 / 禁用 Cookie / 存储配额异常时
+  // `getItem` 会**抛异常**。此前只有 SSR 守卫没有容错，页面在 render 期读它，
+  // 一抛就整页渲染失败。写法对齐 CompareBar 的 readCompareIds。
+  try {
+    return window.localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
 }
 
 export function setToken(token: string | null) {
@@ -12,26 +20,8 @@ export function setToken(token: string | null) {
   else window.localStorage.removeItem(TOKEN_KEY);
 }
 
-async function post<T>(path: string, payload: unknown, token?: string): Promise<T> {
-  const res = await fetch(path, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify(payload),
-  });
-  const body = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(body?.detail ?? `请求失败（${res.status}）`);
-  return body as T;
-}
-
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, init);
-  const body = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(body?.detail ?? `请求失败（${res.status}）`);
-  return body as T;
-}
+const post = postJson;
+const request = requestJson;
 
 export interface AuthResult {
   token: string;

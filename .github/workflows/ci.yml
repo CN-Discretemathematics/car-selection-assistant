@@ -1,14 +1,24 @@
-# CI 门禁（2026-09-14 接入）：PR 与 main 的每次 push 都会执行
-#
+# CI 门禁（2026-09-14 接入；2026-10-02 补 lint 看板与两处缺失检查；2026-10-03 补 ruff 报告 job）：
 #   backend  —— 全量用例（vendor 不入库，按 requirements.txt 安装；Linux 下 PYTHONPATH 分隔符是冒号）
 #   gates    —— 三道静态门禁：密钥扫描 + 用户可见文案门禁 + 文档一致性（退出码必须为 0）
-#   autofix  —— gates 失败时对「确定性计数」自动跑 --fix 并推回 PR 分支（仅同仓库 PR）
-#   web      —— tsc 类型检查 + next build
+#   autofix  —— gates 失败时算出「确定性计数」自愈补丁，**以 PR 评论贴出，不推分支**
+#   web      —— tsc 类型检查 + next build + **前端测试**（此前从不执行）
+#   metrics  —— 8 维代码质量看板（tools/quality_metrics.py），产出 artifact 供趋势对比
+#   lint     —— ruff 报告（**只报不拦**，产出 artifact；2026-10-03 首次执行）
+#
+# ⚠️ 2026-10-03：backend/pyproject.toml 里的 ruff 规则集此前**从未被执行过**——
+#   没有 lint job，且配置里 `pylint.ignore-variadic-names` 已被新版 ruff 移除，
+#   导致 `ruff check` 直接以 exit 2 死在读配置阶段。本 job 存在的意义就是把
+#   「声明」变成「每提交都跑一次的真实数据」。详见 docs/refactoring-roadmap.md。
 #
 # 启用强制门禁：仓库 Settings → Branches → main 分支保护 →
 #   勾选 Require status checks → 选中 backend / gates / web 三个 check。
+# ⚠️ 2026-10-02：新增的 **metrics** 需手动勾选才会成为 required check，
+#    未勾选时它只产出 artifact，不阻止合入（见 docs/engineering-standards.md R10.5）。
+# ⚠️ 2026-10-03：新增的 **lint** 同样需手动勾选，且**在基线降到 0 之前不应勾选**
+#    （基线 130 条，ruff 0.16.10 / Windows 本地实测；勾了会把每个 PR 都打红）。
 # autofix 需要写权限：Settings → Actions → General → Workflow permissions 勾
-#   Read and write permissions（否则只推不动，日志里报错，不影响其它 job）。
+#   Read and write permissions（否则只发不出评论，日志里报错，不影响其它 job）。
 # 部署不受影响：仍是服务器 05:00 拉 main（CI 只把关 PR 合入）。
 name: CI
 
@@ -45,9 +55,22 @@ jobs:
           python -m pip install -r requirements.txt
       - name: 测试
         env:
-          PYTHONPATH: 'vendor:.'        # Linux 分隔符是冒号（本地 Windows 为分号）
+          # 2026-10-02：去掉 vendor —— 该目录 0 个跟踪文件且被 .gitignore，
+          # 是死配置（git ls-files backend/vendor 返回 0）。
+          PYTHONPATH: '.'                # Linux 分隔符是冒号（本地 Windows 为分号）
           RETRIEVAL_BACKEND: inmemory
-        run: python -m pytest -q
+        # 2026-10-03 接入 --cov：pyproject 早已声明覆盖率口径与棘轮下限，
+        # 但 CI 此前**只跑 pytest 不传 --cov**——即那份配置同样从不生效。
+        # fail_under=85 见 pyproject（实测基线 87%，留 2 点平台余量）。
+        run: |
+          python -m pip install --disable-pip-version-check "pytest-cov>=5.0"
+          python -m pytest -q --cov=app --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: backend/coverage.xml
+          retention-days: 90
 
   gates:
     name: gates (secrets + ui-copy + doc-sync)
@@ -73,12 +96,108 @@ jobs:
       - name: 文档一致性门禁（退出码必须 0）
         working-directory: backend
         env:
-          PYTHONPATH: 'vendor:.'        # Linux 分隔符是冒号（本地 Windows 为分号）
+          PYTHONPATH: '.'
           RETRIEVAL_BACKEND: inmemory
         run: python ../skills/doc_sync_check.py
+      # 2026-10-02 补：AGENTS.md:41 强制「改过门禁判定逻辑后跑 doc_sync_selftest」，
+      # 但此前它不在任何 CI job 里——也就是说这条规则从未被自动执行过。
+      - name: 门禁自测（退出码必须 0）
+        run: python skills/doc_sync_selftest.py
+      # 2026-10-02 补：commit-scope 门禁此前**只存在于本地 hook**。
+      # core.hooksPath 是本地配置，新 clone 的仓库没有它，CI 也没补位——
+      # 等于这道门禁对所有 CI 提交形同虚设。
+      #
+      # ⚠️ 当前为「只报不拦」：范围 origin/main..HEAD 内含历史提交 f590eb2
+      #   （一次 docs(sync) 同时改了 tools/pre-push-guard.py 与 skills/doc_sync_check.py，
+      #   正是本仓已确认的门禁自我改写）。该提交已在上游分支，本轮按 roadmap R13
+      #   **不追溯处理**，故先归档报告、待其清理后再改为阻塞。
+      - name: commit-scope 门禁（当前只报不拦）
+        id: guard
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python tools/pre-push-guard.py origin/main..HEAD 2>&1 | tee /tmp/guard.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pre-push-guard-report
+          path: /tmp/guard.log
+          retention-days: 30
+
+  # 8 维代码质量看板（2026-10-02 接入）：只报不拦，产出 artifact。
+  # 定位见 docs/engineering-standards.md §4.2 / §4.5——坏味道泳道（P6）**全表最低优先级**，
+  # 不排期、不阻塞，但**必须持续可见**；本 job 就是那个「可见」的技术实现。
+  # 一旦本 job 不再产出 artifact，P6 即视为失访。
+  metrics:
+    name: metrics (quality dashboard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # 纯标准库 AST，零第三方依赖——不装 requirements.txt 也能跑
+      - name: 生成质量看板
+        run: python tools/quality_metrics.py | tee quality-metrics.txt
+      - name: 生成机读看板
+        run: python tools/quality_metrics.py --json > quality-metrics.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quality-metrics
+          path: |
+            quality-metrics.txt
+            quality-metrics.json
+          retention-days: 90
+
+  # ruff 报告（2026-10-03 接入）：**只报不拦**。
+  #
+  # 为什么此前没有这个 job：backend/pyproject.toml 里的 ruff 规则集是 2026-10-02
+  # 声明的，但当时**装不上 ruff**，于是既没有本地实跑、CI 里也没有对应 job——
+  # 一份「已声明」的配置成了永不执行的承诺。代价立刻兑现：配置里有一个已被新版
+  # ruff 移除的字段（pylint.ignore-variadic-names），`ruff check` 会在读配置阶段
+  # 直接 exit 2。本 job 的存在意义就是把承诺变成每提交都跑的真实数据。
+  #
+  # 为什么只报不拦：存量 130 条里 85 条集中在 F401/I001，且**自动修复有真实风险**
+  #   - I001 会把 app.* 排到 load_dotenv() 之前，直接搞坏环境加载顺序；
+  #   - F401 会删掉 __init__.py 里的 re-export，让外部 import 崩掉。
+  # 这两类留给人工逐处判断（见 docs/refactoring-roadmap.md P6）。
+  #
+  # 版本必须钉住：ruff 跨版本会改规则集与判定，计数不可比，棘轮才有意义。
+  lint:
+    name: lint (ruff, report-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true          # 只报不拦：失败不阻塞 PR（见上方基线说明）
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装 ruff（钉版本，理由见上）
+        run: python -m pip install --disable-pip-version-check "ruff==0.16.10"
+      - name: 分类统计（机读）
+        run: python -m ruff check . --statistics 2>&1 | tee /tmp/ruff-stat.txt || true
+      - name: 逐条明细（机读）
+        run: python -m ruff check . --output-format concise 2>&1 | tee /tmp/ruff-detail.txt || true
+      - name: 记录基线计数
+        run: |
+          # 基线 = 本地 Windows / ruff 0.16.10 实测 130。Linux 上若有差异
+          # （理论上这批规则与平台无关），以本 job 首次产出为准并回写 pyproject 注释。
+          COUNT=$(grep -cE '^[A-Za-z0-9_./\\-]+\.py:[0-9]+:[0-9]+:' /tmp/ruff-detail.txt || true)
+          echo "ruff findings: ${COUNT:-0} (baseline 130)" | tee /tmp/ruff-baseline.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ruff-report
+          path: /tmp/ruff-*.txt
+          retention-days: 90
 
   web:
-    name: web (tsc + build)
+    name: web (lint + tsc + build)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -96,15 +215,33 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      # 2026-10-03 接入 eslint：eslint.config.mjs 从 4cdd7cc 起就存在、package.json
+      # 里 `lint` 脚本也一直有，但**依赖从未安装、CI 也从不执行**——第四份「声明了
+      # 但从不执行」的承诺。依赖已用 pnpm add 正常写入（package.json + lockfile 同步，
+      # 故 --frozen-lockfile 不受影响）。
+      #
+      # **这一条是阻塞的**（与 ruff 的 report-only 不同）：本地实跑基线是
+      # 0 error / 0 warning，且 lockfile 钉死了 eslint 与全部插件版本。
+      # 另用 --report-unused-disable-directives 验证过：仓库既有 6 处抑制注释
+      # （4 处 @next/next/no-img-element + 2 处 react-hooks/exhaustive-deps）
+      # **全部仍在生效**，没有一条是失效的僵尸注释。
+      - name: eslint（阻塞，基线 0）
+        run: pnpm exec eslint . --report-unused-disable-directives --max-warnings 0
       - run: pnpm exec tsc --noEmit
+      # 2026-10-02 补：package.json 里 test 脚本从 4cdd7cc 起就存在，
+      # 但此前 CI 只跑 install/tsc/build——**前端测试从未在 CI 执行过**。
+      - run: pnpm test
       - run: pnpm run build
 
-  # 自动修复（2026-09-16 接入）：gates 失败且是**同仓库 PR** 时，用 `--fix` 自愈「确定性计数」
-  # （用例数/迁移数/工具 schema 数），有改动就作为新提交推回 PR 分支；下一轮 CI 复跑确认转绿。
-  # 判读类 FAIL（悬空引用/过期表述/环境变量/README 结构）**不自动改**——按 skills/doc-sync.md
-  # 人工对齐，避免「改文档骗过门禁」。fork 的 PR 推不动，本 job 直接跳过。
+  # 自动修复（2026-09-16 接入；2026-10-02 改为**只评论不推分支**）：
+  # gates 失败且是**同仓库 PR** 时，用 `--fix` 算出「确定性计数」的自愈补丁，
+  # 以 **PR 评论**形式贴出补丁内容，由人核对后手动采纳。
+  #
+  # 为什么不再自动推分支：门禁改写自己的输入。一条 --fix 的正则回归就能静默把 PR
+  # 洗绿，而作者在 PR 列表里看不到任何 diff——这与「门禁存在是为了让人看见问题」相悖。
+  # 判读类 FAIL（悬空引用/过期表述/环境变量/README 结构）依然**不自动改**。
   autofix:
-    name: autofix (doc-sync --fix → PR branch)
+    name: autofix (doc-sync --fix → PR comment)
     needs: gates
     if: >-
       failure() && github.event_name == 'pull_request'
@@ -112,7 +249,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
+      # 2026-10-02：contents: write → pull-requests: write。
+      # 只需要发评论，不再需要推送分支——最小权限。
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -137,25 +276,53 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         working-directory: backend
         env:
-          PYTHONPATH: 'vendor:.'
+          PYTHONPATH: '.'
           RETRIEVAL_BACKEND: inmemory
         run: |
           set -o pipefail
-          # 退出码 1 = 仍有判读类 FAIL（悬空引用等）：计数已自愈，继续推补丁，剩余问题留给人/Agent；
+          # 退出码 1 = 仍有判读类 FAIL（悬空引用等）：计数已自愈，剩余问题留给人/Agent；
           # >1 才是脚本异常，直接失败。
           python ../skills/doc_sync_check.py --fix 2>&1 | tee /tmp/doc-sync-fix.log || rc=$?
           rc=${rc:-0}
           if [ "$rc" -gt 1 ]; then exit "$rc"; fi
-      - name: 有补丁才推回 PR 分支
+      # 2026-10-02 语义变更：原实现把 --fix 结果**推回 PR 分支**，即门禁改写自己的输入——
+      # 一条 --fix 的正则回归就能静默把 PR 洗绿，而作者在 PR 列表里看不到任何 diff。
+      # 改为**只发 PR 评论**：补丁内容可见、可审，由人决定是否采纳。
+      - name: 把自愈建议发成 PR 评论（不推分支）
         if: steps.guard.outputs.skip != 'true'
-        run: |
-          if git diff --quiet; then
-            echo "无可自愈改动（--fix 未改写任何计数），不推送"
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -u -- '*.md'   # 只提交 --fix 改写的已跟踪文档（不是 add -A）
-          git commit -m 'docs(sync): doc-sync 自动修复确定性计数（CI autofix）' \
-            -m "$(grep '^FIX' /tmp/doc-sync-fix.log || echo '明细见 autofix job 日志')"
-          git push origin "HEAD:${{ github.head_ref }}"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const log = fs.existsSync('/tmp/doc-sync-fix.log')
+              ? fs.readFileSync('/tmp/doc-sync-fix.log', 'utf8') : '';
+            const fixes = log.split('\n').filter(l => l.startsWith('FIX'));
+            const body = fixes.length
+              ? [
+                  '### doc-sync 自动修复建议（**未自动提交**）',
+                  '',
+                  '门禁发现文档计数与仓库事实不一致，可自愈如下。此处**只提议、不推送**——',
+                  '请自行核对后手动采纳（`doc_sync_check.py --fix`）。',
+                  '',
+                  '```diff',
+                  fixes.join('\n'),
+                  '```',
+                ].join('\n')
+              : '### doc-sync 自动修复：无计数漂移，无需处理。';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            // 幂等：更新上一次 bot 留下的评论，避免刷屏
+            const marker = '<!-- doc-sync-autofix -->';
+            const { data: existing } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
+            });
+            const prior = existing.find(c => c.body && c.body.includes(marker));
+            if (prior) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: prior.id, body: marker + '\n' + body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body: marker + '\n' + body,
+              });
+            }

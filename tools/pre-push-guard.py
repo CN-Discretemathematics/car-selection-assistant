@@ -109,6 +109,13 @@ SCOPE_PATHS: dict[str, list[str]] = {
         "backend/tests/test_augment",
         "backend/tests/test_sales",
     ],
+    # 数据层引擎与会话配置（连接池参数 / SQLite PRAGMA / 双栈行为差异）：
+    # common/ 目录此前无任何 scope 覆盖，连接池与外键修复无法被本门禁真实约束
+    # （2026-09-24 登记）
+    "database": [
+        "backend/app/common/database.py",
+        "backend/tests/test_database",
+    ],
     "security": [
         "backend/app/auth/",
         "backend/app/admin/",
@@ -120,11 +127,41 @@ SCOPE_PATHS: dict[str, list[str]] = {
     "deploy": ["deploy/", ".github/", "docs/"],
     "reviewer": ["reviewer/", "backend/tests/test_reviewer", "skills/"],
     "skills": ["skills/"],
-    "sync": ["docs/", "skills/", "README"],
-    "docs": ["docs/", "skills/", "AGENTS.md", "README", "tools/", ".githooks/", "LICENSE"],
-    "hygiene": ["tools/", ".githooks/", "skills/", "docs/", "AGENTS.md", "reviewer/"],
+    "sync": ["docs/", "skills/", "README", "RAG.md"],
+    # 2026-10-02：docs 不再有权改门禁自身。tools/ 与 .githooks/ 移出，
+    # skills/ 也一并移出——skills/doc_sync_check.py 同样是门禁。
+    # 此前一次 docs(sync)（f590eb2）同时改了 tools/pre-push-guard.py 与
+    # skills/doc_sync_check.py 并推上远端：门禁可以改写评判自己的规则。
+    # 改门禁现在必须用 chore / hygiene / skills（见 R10.2）。
+    "docs": ["docs/", "AGENTS.md", "README", "RAG.md", "LICENSE"],
+    # 2026-10-02：docs/engineering-standards.md 等规范性文档成批落地，需要一个只覆盖
+    # docs/ 的窄 scope——复用 "docs" 会顺带授权 tools/ 与 .githooks/（即门禁自身）。
+    "standards": ["docs/"],
+    # 2026-10-02：工程化基线（ruff / eslint / 覆盖率 / 质量看板 / CI 接线）天然跨切面——
+    # backend 配置、web 配置、根级 tools 看板脚本、CI workflow 同时动。此前没有任何
+    # scope 覆盖 backend/pyproject.toml，这类提交只能被 PUSH_GUARD_ALLOW 放行。
+    "lint": [
+        "backend/pyproject.toml",
+        "web/",
+        "tools/",
+        ".github/",
+        "docs/",
+    ],
+    "hygiene": ["tools/", ".githooks/", "skills/", "docs/", "AGENTS.md", "README", "RAG.md", "reviewer/"],
     "chore": [".github/", ".gitignore", "tools/", ".githooks/", "README", "LICENSE"],
     "test": ["backend/tests/", "web/"],
+    # 2026-10-02：backend/tools/ 此前无任何 scope 覆盖（data 只覆盖 app/ 下的域目录），
+    # 导致抓取/导入/评测脚本的修复无法通过本门禁，只能走 PUSH_GUARD_ALLOW 放行。
+    "tools": ["backend/tools/", "backend/tests/test_autohome", "backend/tests/test_sku"],
+    # 2026-10-02：backend/app/common/ 此前只有 database.py 一个单文件 scope
+    # （见上方 database 条目的注释），其余 13 个模块（enums / errors / config /
+    # models / llm / redis_client / ratelimit / images / oss …）**完全无覆盖**。
+    # 动这些文件只能走 PUSH_GUARD_ALLOW。本条把 common/ 整体纳入，并把
+    # database 收窄为「双栈语义」（PRAGMA / 连接池），保持两者的职责区分。
+    "common": [
+        "backend/app/common/",
+        "backend/tests/test_database",
+    ],
 }
 
 # 中性路径：任何 scope 都允许触碰（跨切面的测试 / 文档 / CI / 根级工具）。
@@ -220,6 +257,32 @@ def _shas_from_push_lines(lines: list[str]) -> list[str] | None:
     return shas if shas else None
 
 
+GATE_ALLOW_RE = re.compile(r"^#\s*gate-allow:\s*\S.*$", re.MULTILINE)
+
+
+def gate_allow_reason(sha: str) -> str | None:
+    """该提交是否带了**内联**豁免 trailer；返回其理由文本。
+
+    2026-10-02（P1.5）：原先只有 `PUSH_GUARD_ALLOW=1` / `--allow` 两种豁免，
+    两者都**临时、易失、不可追溯**——push 完就查不到「这条提交是不是被硬推上去的」。
+    门禁自己还把用法印在输出里（见报错文案），等于在邀请使用。
+
+    改为在**提交信息正文**写一行 trailer：
+
+        # gate-allow: 该提交同时改 tools/ 与 docs/，属跨切面
+
+    它进 git 历史，事后可审计、可 `git log --grep` 检索。**理由不得为空**——
+    空理由的 trailer 等于没写（正则用 \\S 强制其后至少一个非空白字符）。
+
+    仍保留 `--allow` / `PUSH_GUARD_ALLOW` 作应急，但输出会明确标注「不可追溯」。
+    """
+    body = run_git("log", "-1", "--format=%B", sha)
+    if not body:
+        return None
+    m = GATE_ALLOW_RE.search(body)
+    return m.group(0).strip() if m else None
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -308,13 +371,28 @@ def main() -> int:
         print("\n[pre-push-guard] 拦截本次 push（逐条核对将推送的提交信息与代码是否属于同一功能）：")
         for f in failures:
             print(f"  ✗ {f}")
+        # 内联 trailer 豁免：可追溯，逐条打印理由（优先于 --allow）
+        waived = [(s, gate_allow_reason(s)) for s in shas]
+        waived = [(s, r) for s, r in waived if r]
+        if waived:
+            print("\n[pre-push-guard] 以下提交带内联豁免 trailer，人工放行（理由已入 git 历史，可审计）：")
+            for s, r in waived:
+                print(f"  · {s[:9]}  {r}")
+            return 0
         if allow:
-            print("[pre-push-guard] PUSH_GUARD_ALLOW/--allow 人工放行 —— 请确认这是有意的跨切面提交。")
+            print(
+                "\n[pre-push-guard] PUSH_GUARD_ALLOW/--allow 人工放行 —— ⚠️ 此方式**不可追溯**：\n"
+                "  git 历史里不会留下「这条提交被硬推」的痕迹。优先改用提交信息里的\n"
+                "  `# gate-allow: <理由>` trailer（见下一条）。"
+            )
             return 0
         print(
             "\n  处理办法：\n"
             "  1) 逐条核对 git show <sha> —— 信息与代码不符的提交先 amend 改正（用独立的信息文件）；\n"
-            "  2) 确属跨切面的合法提交：PUSH_GUARD_ALLOW=1 git push … 或 git push --no-verify；\n"
+            "  2) 确属跨切面的合法提交：在**提交信息正文**加一行可追溯的豁免说明后 amend，再推：\n"
+            "       # gate-allow: <为什么这是有意的跨切面提交>\n"
+            "     （trailer 进 git 历史，事后可 git log --grep 审计；理由不得为空）\n"
+            "     应急才用：PUSH_GUARD_ALLOW=1 git push …（不可追溯）；\n"
             "  3) 新 scope 请登记进 tools/pre-push-guard.py 的 SCOPE_PATHS。"
         )
         return 1

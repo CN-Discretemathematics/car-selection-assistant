@@ -22,10 +22,26 @@ from app.sources.fetcher import DEFAULT_USER_AGENT
 INDEX_URL_TEMPLATE = "https://www.autohome.com.cn/grade/carhtml/{letter}.html"
 SKU_API = "https://car-web-m.autohome.com.cn/car/param/getParamConf"
 SKU_PAGE_TEMPLATE = "https://car.m.autohome.com.cn/config/series/{seriesid}.html"
-MOBILE_UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-)
+
+# 2026-10-02（H6 合规修复）：此前此处用 MOBILE_UA —— 一个完整的 iPhone Safari
+# 指纹（含 AppleWebKit/Version/Mobile 全套 token）。那不是「礼貌抓取」，是**冒充
+# 浏览器**：README 声明「遵守 robots 与服务条款」，而伪装 UA 恰恰会让对方无从
+# 识别与联系采集方（fetch_robots / _record_compliance 收集的合规结论也就失去意义）。
+#
+# 改用与同项目其它抓取点**同一个**诚实标识（fetcher.DEFAULT_USER_AGENT：
+# "car-selection-crawler/0.1 (data collection; contact via site footer)"）。
+#
+# ✅ 已在真实网络上实测（2026-10-03）：直调 fetch_sku_config 抓 3 个车系
+#    （8433 / 8529 / 8171）全部成功——款型 4 / 8 / 9 条，配置组 21 / 22 / 23 组，
+#    **无 403、无空数据、无降级**。对方不拦非浏览器 UA，改为诚实标识零代价。
+#    复测方式（绕开 DB/checkpoint，只验这一个函数）：
+#        python -c "from app.sources.autohome_sku import fetch_sku_config as f; \
+#                   print(len(f('8433')['variants']))"
+#
+# 若将来对方改策略开始拦非浏览器 UA：本函数会**抛错**而非静默返回垃圾（失败要
+# 可见），届时应改用带联系信息的 UA 并如实记入合规评估，而不是重新伪装浏览器。
+# Referer 保留：它说明请求来自哪个配置页，是透明性的一部分，不构成身份伪装。
+_SKU_UA = DEFAULT_USER_AGENT
 
 # 配置表空值符号：不写入事实表
 SKIP_VALUES = {"", "-", "—", "--", "暂无数据"}
@@ -126,7 +142,7 @@ def fetch_sku_config(series_id: str) -> dict:
     req = urllib.request.Request(
         SKU_API + "?" + params,
         headers={
-            "User-Agent": MOBILE_UA,
+            "User-Agent": _SKU_UA,
             "Referer": SKU_PAGE_TEMPLATE.format(seriesid=series_id),
             "Accept": "application/json",
         },

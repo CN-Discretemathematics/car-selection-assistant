@@ -133,8 +133,18 @@ def normalize_utterance(message: str) -> str:
 
 
 def _cache_key(message: str, model: str) -> str:
-    """缓存 key 含模型名：切换 AGENT_ROUTER_MODEL 时不命中旧裁决（评审三轮建议 2）。"""
-    return f"{model}::{normalize_utterance(message)}"
+    """缓存 key 含**模型名 + 路由版本**：换模型或改提示词后都不命中旧裁决。
+
+    2026-10-02（L12）：原先 key 只有 `model::utterance`。模型没换、但
+    `_ROUTER_SYSTEM_PROMPT` 改了（few-shot 增删、金标改判、仲裁阈值调整）时，
+    旧裁决会**一直活到进程重启**——而路由提示词恰恰是频繁调整的东西。
+    shadow 对拍数据因此会混入「旧提示词下的判定」，跨版本比较失真。
+
+    把 ROUTER_VERSION 并入 key：改提示词的人**顺手把版本号 +1**，
+    旧缓存自然失效；不改版本号则视为「这次改动不影响路由」，缓存继续复用。
+    失效是廉价的，错误复用不廉价。
+    """
+    return f"{model}@{ROUTER_VERSION}::{normalize_utterance(message)}"
 
 
 def clear_route_cache() -> None:
@@ -485,6 +495,7 @@ def log_shadow_record(
     llm_error: str | None = None,
     arbitrated_intent: str | None = None,
     meta: dict | None = None,
+    llm_last_attempt_ms: float | None = None,
 ) -> None:
     """单行 JSON 对拍记录 → logger "app.agent.router.shadow"。
 
@@ -494,6 +505,10 @@ def log_shadow_record(
     「按今天的仲裁策略，LLM 在哪些问句上会被采纳」——是放宽/收紧策略的证据源。
     meta：版本与环境标记（router_version/router_model/router_thinking），合并进记录，
     使跨版本对拍数据可以按字段切分而不靠时间窗猜测。
+
+    llm_elapsed_ms 是**含重试退避的真实墙钟**；llm_last_attempt_ms 是最后一次尝试
+    本身（2026-10-02 M11：原先只记后者，退避睡眠被整段排除，p50/p95 系统性低估）。
+    两者同时记录，跨版本比 p95 时须先确认口径一致。
     """
     payload: dict = {
         "utterance": _mask_pii(message or "")[:200],
@@ -506,6 +521,8 @@ def log_shadow_record(
         "llm_elapsed_ms": round(float(llm_elapsed_ms), 2),
         "arbitrated_intent": arbitrated_intent,
     }
+    if llm_last_attempt_ms is not None:
+        payload["llm_last_attempt_ms"] = round(float(llm_last_attempt_ms), 2)
     if meta:
         payload.update(meta)
     if llm_error:

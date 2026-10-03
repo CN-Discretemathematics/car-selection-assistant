@@ -1,0 +1,115 @@
+# backend 工具配置（2026-10-02 建立）
+#
+# 建立背景：全仓此前**没有任何**静态分析配置——没有 ruff / mypy / eslint / pyproject，
+# 但代码里已有 180 处 ruff|mypy 抑制注释（96 E402、63 BLE001、5 F401、3 E731、
+# 2 SLF001、1 ANN001、1 B018、9 type:ignore）。抑制码的分布说明作者**曾经本地跑过**
+# 这套门禁，只是配置从未提交。本文件把那次隐式约定显式化。
+#
+# 注意：pytest 的配置**不在本文件**——backend/pytest.ini 优先级高于 pyproject.toml，
+# 同时写两处会让 pyproject 的 [tool.pytest.ini_options] 被静默忽略。
+# 覆盖率改为 CI 侧显式传 --cov（见 [tool.coverage] 与 .github/workflows/ci.yml）。
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "car-selection-backend"
+version = "0.1.0"
+description = "车型选择助手后端（FastAPI + SQLAlchemy + LangGraph RAG）"
+requires-python = ">=3.11"
+# 依赖真值仍在 requirements.txt（生产镜像与 CI 都按它装）；此处不重复声明，
+# 避免两处漂移。需要完整元数据时改为 dynamic = ["dependencies"] + tool.setuptools。
+
+# ⚠️ 打包（P1.10）状态：**已声明、尚未启用**。
+#
+# 本项目是 flat layout（app/ tools/ tests/ alembic/ 并列），setuptools 的自动发现
+# 会因「发现多个顶层包」直接报错。不显式列出包，`pip install -e .` 必然失败。
+# 因此这里把包列表写死——app 与 tools 是运行时/运维真需要的两个包，tests 与
+# alembic 是非包目录（前者是测试、后者是迁移脚本），必须排除。
+#
+# 为什么不直接把 CI 的 `pip install -r requirements.txt` + `PYTHONPATH='.'`
+# 换成 `pip install -e .`：本机装不上 setuptools/wheel（网络受限），
+# **无法实测**这条路径。让 CI 去验证一条自己没跑过的安装方式，
+# 与本仓「不谎报已验证」的纪律冲突。故 CI 维持现状，切换留待首次实测后。
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*", "tools*"]
+exclude = ["tests*", "alembic*", "*.tests", "*.alembic"]
+
+# 开发/门禁专用依赖。**不进生产镜像**（deploy/backend.Dockerfile 只装 requirements.txt）。
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.6",        # lint + 复杂度报告（C901/PLR/ARG）
+  "pytest-cov>=5.0",  # 覆盖率（CI 的 backend job 用）
+]
+
+# ── ruff ────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["alembic/versions", ".venv"]
+
+[tool.ruff.lint]
+# 与既有 180 处抑制码对齐：E402/F401/BLE001/SLF001/B018/ANN001/E731 全部落在此集合内。
+select = ["E", "F", "W", "I", "B", "BLE", "C4", "SIM"]
+ignore = [
+  "E501",    # 行长交给 formatter，不在 lint 阶段拦
+  "SIM108",  # 三元表达式不强制——多处 if/else 刻意写开以提高可读性
+  "B008",    # FastAPI 路由的 `x: T = Depends(y)` 是框架惯用法（35 处），
+             # 不是「在默认值里调用函数」的 bug。逐处 noqa 只会淹没真问题。
+]
+
+[tool.ruff.lint.per-file-ignores]
+# E402 现状（2026-10-03 首次实跑）：**全仓只剩 1 处**，在 app/retrieval/backends.py
+# ——已归位到文件顶部（config 只依赖 os/dotenv，无循环风险）。
+# 此前这里列的 96 处 tools/ 启动样板**已随 P2 的 tools/_bootstrap.py 收敛而消失**，
+# 故 tools/*.py / alembic/env.py 两条 E402 豁免已随之删除——留着会让新引入的
+# E402 静默通过，正是「豁免腐化」最常见的形态。
+#
+# ⚠️ 唯一风险点：若有人把 `load_dotenv()` 重新写回 import 之前，本仓会**再次**出现
+# 大量 E402，而那时这里已无豁免来兜底。这是刻意的：兜底会掩盖根因复发。
+
+# 测试里大量 monkeypatch / 私有属性访问是刻意的（隔离外部依赖）
+"tests/*.py" = ["SLF001", "B011"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tools"]
+
+# ── 复杂度（docs/engineering-standards.md §4.2 的指标 1/2/6）────────────────
+# ⚠️ max-complexity = 20 是**报告线不是拦截线**。
+# 存量有 43 个函数 > 20、7 个 ≥ 51（最大 148），一次性 fail 会把 CI 直接打红。
+#
+# ⚠️ 2026-10-03 首次实跑（ruff 0.16.10）更正两处此前"声明了但没人验证过"的问题：
+#   1. 旧配置里的 `pylint.ignore-variadic-names` 已被新版 ruff 移除，导致**整份配置
+#      无法解析**——`ruff check` 直接以 exit 2 死在读配置阶段。任何一次真跑都会
+#      立刻撞上它，这正是「声明 ≠ 可用」的典型代价。
+#   2. 下面的阈值**当前不生效**：C901(C90) / PLR0913 等规则不在上方 `select` 里，
+#      阈值只对「已选中的规则」起作用。复杂度报告的真实来源是
+#      tools/quality_metrics.py（纯 AST 看板），ruff 侧的复杂度口径待启用时再生效。
+[tool.ruff.lint.mccabe]
+max-complexity = 20
+
+[tool.ruff.lint.pylint]
+max-branches = 12
+max-statements = 50
+max-args = 5
+
+# ── 覆盖率 ──────────────────────────────────────────────────────────────────
+# --cov 由 CI 显式传入（本地 `pytest -q` 默认不启用，避免没装 pytest-cov 时直接失败）。
+# 2026-10-03 起 backend job 已真的传入 --cov（此前 pyproject 声明了口径，CI 却没执行）。
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = ["alembic/*", "*/__init__.py"]
+
+[tool.coverage.report]
+show_missing = true
+# 2026-10-03 首次实测：634 passed + 8 skipped，TOTAL 87%（7395 语句 / 778 未覆盖 /
+# 分支 2626 条中 389 条部分覆盖），pytest-cov 7.1.0 / Python 3.12 / Windows。
+#
+# 下限定 85 而非 87，是**故意留 2 个点的余量**：上面那个数是单平台单次采样，
+# Linux CI 上路径覆盖会有细微差异，把地板正好压在采样值上等于给 CI 埋一颗
+# 「今天红了但没人知道为什么」的雷。棘轮节奏：连续两次 CI 实测都 ≥ 87 再抬到 87，
+# 之后每版抬 1。抬升只改这一行——本仓唯一的覆盖率真值点。
+fail_under = 85

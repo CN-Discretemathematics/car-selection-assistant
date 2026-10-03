@@ -4,7 +4,10 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 const STORAGE_KEY = "compare_variant_ids";
-const COMPARE_EVENT = "compare-changed";
+// 导出而非各自复制字面量：对比栏的清空/移除、卡片上的「加入对比」按钮必须
+// 订阅**同一个**事件名。此前 AddToCompareButton 根本没订阅（它只更新自己的
+// useState），于是底部移除后按钮仍显示「已加入对比」，再点一下反而把款型加回来。
+export const COMPARE_EVENT = "compare-changed";
 
 export function readCompareIds(): number[] {
   if (typeof window === "undefined") return [];
@@ -17,9 +20,24 @@ export function readCompareIds(): number[] {
   }
 }
 
-export function writeCompareIds(ids: number[]) {
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
+/** 写入对比选择。返回**是否真的写进去了**——调用方必须能区分「已加入」与「没写成」。
+ *
+ * 为什么需要这个返回值：Safari 无痕模式 / 用户禁用 Cookie / 配额满时
+ * `localStorage.setItem` 会**抛异常**。此前这里是裸调用，于是点「加入对比」
+ * 抛未捕获错误、按钮纹丝不动，看起来像坏了；而同文件的 `readCompareIds`
+ * 早就用 try/catch 挡住了读侧——**只防读不防写的不对称**是最容易漏掉的一种。
+ * 写法对齐 `AgentChat.tsx:70-74`（同仓已有的正确处理）。
+ *
+ * 写失败时**不派发事件**：没改成却广播，等于告诉所有订阅者「已经变了」。
+ */
+export function writeCompareIds(ids: number[]): boolean {
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(ids));
+  } catch {
+    return false;
+  }
   window.dispatchEvent(new Event(COMPARE_EVENT));
+  return true;
 }
 
 export function compareHref(ids: number[]): string {
@@ -41,7 +59,11 @@ export default function CompareBar() {
     };
   }, []);
 
-  const clear = useCallback(() => writeCompareIds([]), []);
+  const clear = useCallback(() => {
+    if (!writeCompareIds([])) {
+      window.alert("浏览器禁用了本地存储，无法清空对比栏（可能处于无痕模式）。");
+    }
+  }, []);
 
   if (ids.length === 0) return null;
 

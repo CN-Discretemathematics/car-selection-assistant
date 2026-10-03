@@ -29,16 +29,16 @@ import re
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select
 
-from app.agent.engine import AgentEngine  # noqa: E402
-from app.agent.session import SessionStore  # noqa: E402
-from app.common.database import get_session_factory  # noqa: E402
-from app.common.llm import LLMClient  # noqa: E402
-from app.common.models import MonthlySales, OfficialPrice, SpecFact, VehicleVariant  # noqa: E402
-from app.rag import service as rag  # noqa: E402
+from app.agent.engine import AgentEngine
+from app.agent.session import SessionStore
+from app.common.database import get_session_factory
+from app.common.llm import LLMClient
+from app.common.models import MonthlySales, OfficialPrice, SpecFact, VehicleVariant
+from app.rag import service as rag
 
 _UNANSWERABLE_MARKERS = ("未披露", "未查到", "暂无", "没有披露", "没有查到", "没有公布")
 # 评审 R4#10：保留「没有」的诚实复合短语，仅剔除裸「没有」（会误放行编造回答）  # 评审 E9：裸「没有」误放行编造回答

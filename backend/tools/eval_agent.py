@@ -20,14 +20,14 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from app.agent.engine import AgentEngine  # noqa: E402
-from app.agent.session import SessionStore  # noqa: E402
-from app.agent.tools import comparison_tool, retrieval_search  # noqa: E402
-from app.common.database import get_session_factory  # noqa: E402
-from app.common.enums import NEW_ENERGY_TYPES  # noqa: E402
-from app.common.llm import LLMClient  # noqa: E402
+from app.agent.engine import AgentEngine
+from app.agent.session import SessionStore
+from app.agent.tools import comparison_tool, retrieval_search
+from app.common.database import get_session_factory
+from app.common.enums import NEW_ENERGY_TYPES
+from app.common.llm import LLMClient
 
 RECOMMEND_INTENTS = {
     "budget_suv", "budget_sedan", "budget_mpv", "energy_bev", "energy_phev_erev",

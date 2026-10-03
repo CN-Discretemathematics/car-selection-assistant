@@ -8,6 +8,8 @@ import Reveal from "@/app/components/Reveal";
 import RiseText from "@/app/components/RiseText";
 import SiteHeader from "@/app/components/SiteHeader";
 import { askAgent } from "@/lib/agentTriggers";
+import { MISSING_VALUE_LABEL } from "@/lib/labels";
+import { extractErrorDetail } from "@/lib/http";
 import {
   CATEGORY_LABELS,
   ENERGY_LABELS,
@@ -16,7 +18,7 @@ import {
   type CompareVariantOut,
 } from "@/lib/api";
 
-const MISSING_LABEL = "官方资料未披露";
+const MISSING_LABEL = MISSING_VALUE_LABEL;
 const MAX_COMPARE = 5;
 
 function useComparison(): { data: ComparisonDetail | null; error: string | null } {
@@ -38,6 +40,11 @@ function useComparison(): { data: ComparisonDetail | null; error: string | null 
       return;
     }
 
+    // 参数变化即重新取数：错误态必须先复位。否则上一次失败（例如分享链接里含
+    // 失效款型、后端返回 404）会永久盖住本次成功取到的数据——页面一直显示旧错误，
+    // 对比表出不来，只能整页刷新才能恢复。
+    setError(null);
+
     let cancelled = false;
     (async () => {
       try {
@@ -48,7 +55,12 @@ function useComparison(): { data: ComparisonDetail | null; error: string | null 
         });
         if (!createdRes.ok) {
           const body = await createdRes.json().catch(() => null);
-          setError(body?.detail ?? `请求失败（${createdRes.status}）`);
+          if (!cancelled) {
+            setData(null);
+            // detail 未必是字符串：FastAPI 422 返回对象数组，直接当 React child
+            // 渲染会抛 "Objects are not valid as a React child" 整页白屏。
+            setError(extractErrorDetail(body, `请求失败（${createdRes.status}）`));
+          }
           return;
         }
         const created = await createdRes.json();
@@ -57,7 +69,10 @@ function useComparison(): { data: ComparisonDetail | null; error: string | null 
         const detail = (await detailRes.json()) as ComparisonDetail;
         if (!cancelled) setData(detail);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "网络错误");
+        if (!cancelled) {
+          setData(null);
+          setError(err instanceof Error ? err.message : "网络错误");
+        }
       }
     })();
     return () => {

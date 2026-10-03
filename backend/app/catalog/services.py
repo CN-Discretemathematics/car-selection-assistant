@@ -52,6 +52,56 @@ def get_variant(db: Session, variant_id: int) -> VehicleVariant | None:
     return db.get(VehicleVariant, variant_id)
 
 
+def variants_current_prices(db: Session, variant_ids: list[int]) -> dict[int, OfficialPrice]:
+    """批量取多款型的「当前生效官方指导价」，返回 {variant_id: OfficialPrice}。
+
+    2026-10-02（P5.2 / H4）：`variant_current_price` 每次一条 SELECT，在
+    「逐款型」的场景里就是 N+1（一个 8 款型的车系 = 8 次往返）。
+    本函数是它的批量版，口径与单条版**逐字一致**：
+    `effective_to IS NULL` + `price_type == "official_msrp"`，
+    同款型多条时取 `effective_from` 最新的一条。
+
+    注意：`official_msrp` 不按 variant 唯一，理论上同一 variant 可能有多条当前价；
+    排序 + 「只留第一条」的逻辑按 (variant_id, effective_from) 全局排序后取，
+    与逐条调用 `.first()` 的结果相同。
+    """
+    if not variant_ids:
+        return {}
+    stmt = (
+        select(OfficialPrice)
+        .where(
+            OfficialPrice.variant_id.in_(variant_ids),
+            OfficialPrice.effective_to.is_(None),
+            OfficialPrice.price_type == "official_msrp",
+        )
+        .order_by(OfficialPrice.variant_id, OfficialPrice.effective_from.desc())
+    )
+    out: dict[int, OfficialPrice] = {}
+    for price in db.scalars(stmt):
+        # 同 variant 的后续行（更旧的 effective_from）一律不覆盖
+        out.setdefault(price.variant_id, price)
+    return out
+
+
+def variants_facts(db: Session, variant_ids: list[int]) -> dict[int, list[SpecFact]]:
+    """批量取多款型的全部事实，返回 {variant_id: [SpecFact, ...]}。
+
+    2026-10-02（P5.2 / H4）：`variant_facts` 每次一条 SELECT，逐款型调用即 N+1。
+    排序口径与单条版一致（category, fact_key）。
+    """
+    if not variant_ids:
+        return {}
+    stmt = (
+        select(SpecFact)
+        .where(SpecFact.variant_id.in_(variant_ids))
+        .order_by(SpecFact.variant_id, SpecFact.category, SpecFact.fact_key)
+    )
+    out: dict[int, list[SpecFact]] = {}
+    for fact in db.scalars(stmt):
+        out.setdefault(fact.variant_id, []).append(fact)
+    return out
+
+
 def series_variants(
     db: Session,
     series_id: int,

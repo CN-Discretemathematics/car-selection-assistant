@@ -16,6 +16,9 @@
   6. 环境变量：文档表格里的 VAR 是否在代码/示例配置中真实可读
   7. 编码卫生：全部项目 .md 必须是合法 UTF-8 无 BOM（拦截 PowerShell 重定向写出的 UTF-16）
   8. 已知过期表述（stale patterns）：出现即 FAIL
+  9. 跨源对账：`deploy/*.conf` 已含 `listen 443 ssl`（TLS 已配置）时，文档不得再称
+     HTTPS/443「待办/待配置/备案完成后」——2026-09 备案上线事故：nginx 实态进仓（PR #41）
+     而 README 待办节未同步，两个仓库内真相源矛盾却无规则对读
 """
 from __future__ import annotations
 
@@ -44,6 +47,10 @@ STALE_PATTERNS = [
     "路权重按 query_type",    # 同上（RAG_TECH_SELECTION 旧文）
     "deploy/systemd",         # 非容器方案已废弃，deploy/ 下无该目录
     "deploy.sh 自动安装",     # systemd 装载路径已不存在
+    # 2026-09 备案上线事故残留口径（ICP 已通过、域名+HTTPS 已上线后 README 仍保留过渡期表述）：
+    # 收录当时实际命中的两句原文防复发；同类的「待办 vs nginx 实态」矛盾由规则 9 跨源对账兜住
+    "备案通过前对外只能用 IP 访问",
+    "HTTPS/HSTS（备案完成后配置）",
 ]
 
 # 行内出现这些词 = 有意的历史/删除记录，跳过该行的悬空引用与过期表述检查；
@@ -53,6 +60,9 @@ ALLOW_WORDS = ("删除", "移除", "取代", "一次性", "已完成使命", "�
                "旧", "改用", "已废弃", "清零", "计划", "待建", "规划")
 # 反引号 token 命中这些子串 = 占位/模板/通配，跳过
 TOKEN_SKIP_SUBSTR = ("...", "<", "{", "}", "*", "label:", "your-", "xxx", "XXX", " ")
+# 行号后缀：`path.py:12` / `path.py:12-20` / `path.py:1,5,9` / `path.tsx:245,617`。
+# 只在行首是数字时剥离，避免误伤路径本身含冒号的合法写法。
+LINE_SUFFIX_RE = re.compile(r":\d[\d,\-–—]*$")
 # 运行期/本地产物前缀：文档提及但仓库不保证存在，跳过悬空检查
 RUNTIME_PREFIXES = (
     "backend/logs/", "backend/snapshots/", "backend/.tmp/", "backend/.env",
@@ -72,7 +82,19 @@ def warn(msg: str) -> None:
 
 
 def iter_project_md() -> list[Path]:
+    """枚举受本门禁约束的文档。
+
+    2026-10-02（P1.7）：新增「跳过 gitignored 文件」。此前只按硬编码的
+    SKIP_DIRS（其中含 docs-local）跳过本地文档，于是 `/backend/eval/`、
+    `resume/` 这些**已被 .gitignore 排除、CI 检出里根本不存在**的目录
+    仍被扫描——里面的悬空引用会让本地红、CI 绿，直接违反本脚本自己的
+    首要原则「判定真值 = git 索引，保证本地跑 == CI 跑」。
+
+    改用 `git check-ignore` 判定，与本文件其它检查（ignored_paths /
+    tracked_paths）同一套真值来源，不再维护第二份目录白名单。
+    """
     out: list[Path] = []
+    candidates: list[Path] = []
     for base in DOC_DIRS:
         if not base.exists():
             continue
@@ -82,7 +104,24 @@ def iter_project_md() -> list[Path]:
                 continue
             if any(rel.is_relative_to(pre) for pre in EXEMPT_PREFIXES):
                 continue
-            out.append(p)
+            candidates.append(p)
+
+    # 一次性批量问 git：哪些候选文件是本地专属（不会入库）
+    ignored: set[str] = set()
+    if candidates:
+        proc = _git(
+            ["check-ignore", "-z", "--stdin"],
+            stdin="\0".join(
+                p.relative_to(ROOT).as_posix() for p in candidates
+            ) + "\0",
+        )
+        if proc is not None and proc.returncode in (0, 1):
+            ignored = {x for x in proc.stdout.split("\0") if x}
+
+    for p in candidates:
+        if p.relative_to(ROOT).as_posix() in ignored:
+            continue
+        out.append(p)
     return sorted(set(out))
 
 
@@ -226,9 +265,12 @@ PATH_TOKEN = re.compile(r"`([^`\n]+)`")
 # 让 `tools/x` 先解析到根级 tools/，再回退 backend/tools/（两个目录都真实存在）
 ROOT_PREFIXES = ("backend/", "web/", "deploy/", "docs/", "skills/", "reviewer/", "resume/", "tools/")
 BACKEND_REL_PREFIXES = ("app/", "tools/", "tests/", "alembic/")
+# 2026-09-23 清理：CHANGES.md / DELIVERY.md / DEPLOYMENT.md / OPS_GUIDE.md /
+# RAG_TECH_SELECTION.md / PROJECT_PLAN.md 已按「内部工作文档只留本地、重复内容归并到
+# 单一文档」的口径删除或归档到 .tmp/doc-backup/。不再登记：登记了只会对**已不存在**的
+# 文件发 WARN「本地专属引用」，属误报噪声。
 ROOT_MD_FILES = {
-    "README.md", "RAG.md", "CHANGES.md", "DELIVERY.md", "DEPLOYMENT.md",
-    "OPS_GUIDE.md", "PROJECT_PLAN.md", "RAG_TECH_SELECTION.md", "LICENSE",
+    "README.md", "RAG.md", "LICENSE",
 }
 
 
@@ -250,8 +292,8 @@ def token_exists(token: str) -> bool:
 
 
 # git 真值（缓存）。CI 检出的是 git 索引内容，工作区还可能有 gitignore 的本地专属文件
-# （PROJECT_PLAN.md / DEPLOYMENT.md / CHANGES.md / deploy/ALIYUN_RUNBOOK.md /
-#  reviewer/REVIEWER_AGENT.md / resume/ …）。2026-09-16 PR #29 实测：用 Path.exists()
+# （reviewer/REVIEWER_AGENT.md / resume/ / docs-local/ …）。
+# 2026-09-16 PR #29 实测：用 Path.exists()
 # 判悬空 → 本地「结论：一致」（exit 0）、CI 同一提交 FAIL 3 处，门禁在 push 前无法自证。
 # 故判定统一为：tracked → 存在；gitignored → 本地专属（WARN 提示后跳过）；
 # 未跟踪且未忽略 → FAIL（本地新增未提交，CI 检出后不存在）；其余 → FAIL（真悬空）。
@@ -309,11 +351,20 @@ def check_dangling_refs(docs: list[tuple[Path, list[str]]]) -> None:
         if path in HISTORICAL_FILES:
             continue
         for i, line in enumerate(lines, 1):
-            if any(w in line for w in ALLOW_WORDS):
-                continue
+            # 2026-10-02（P1.7）：**悬空引用不再受 ALLOW_WORDS 豁免**。
+            # 实测此前有 194 条非空行（4.8%）因含「旧/历史/曾/删除/改用」等词
+            # 而被**整行**跳过悬空引用检查——而悬空引用是**机械事实**
+            # （路径在不在仓库里），不是需要语义判断的表述。任何一个只要
+            # 提到「历史」的行都能藏住一个坏路径，逃生口过宽。
+            # ALLOW_WORDS 仍然为「过期表述」检查保留（那是需要判读的部分）。
             for m in PATH_TOKEN.finditer(line):
                 token = m.group(1).strip().rstrip("。：,，;；)）").rstrip("/")
                 token = token.split("::", 1)[0]  # 「path.py::func」只核对文件部分
+                # 「path.py:123」/「path.py:12-20」/「path.py:1,5,9」同样只核对文件部分。
+                # 2026-10-02：本门禁原先只认 `::` 不认 `:`，导致文档无法写精确行号——只能写裸路径，
+                # 评审结论失去可点击/可核对性（docs/engineering-standards.md 首次批量引用行号时暴露）。
+                # 行号本身不在本门禁职责内（它核对「路径是否存在」），行号准确性由作者负责。
+                token = LINE_SUFFIX_RE.sub("", token)
                 if not token or any(s in token for s in TOKEN_SKIP_SUBSTR):
                     continue
                 # 白名单写成带尾斜杠的前缀，但 token 已 rstrip("/")，故需同时比对去斜杠形式
@@ -378,9 +429,9 @@ def env_sources_text() -> str:
 
 
 # 环境变量检查只针对「会写配置表」的文档，避免把内部评审文档的枚举值误判为环境变量
-ENV_DOC_NAMES = {"README.md", "RAG.md", "RAG_TECH_SELECTION.md", "DELIVERY.md",
-                 "DEPLOYMENT.md", "OPS_GUIDE.md", "deployment.md", "aliyun-ops.md",
-                 "credential-rotation.md"}
+# （2026-09-23：同步删除已按本地归档口径移除的 DELIVERY/DEPLOYMENT/OPS_GUIDE/RAG_TECH_SELECTION）
+ENV_DOC_NAMES = {"README.md", "RAG.md",
+                 "deployment.md", "aliyun-ops.md", "credential-rotation.md"}
 
 
 def check_env_vars(docs: list[tuple[Path, list[str]]], source: str, source_lower: str) -> None:
@@ -428,7 +479,46 @@ def check_stale_patterns(docs: list[tuple[Path, list[str]]]) -> None:
                     fail(f"过期表述 {path.relative_to(ROOT)}:{i} 含「{pat}」")
 
 
-# ── 9. --fix：确定性计数自愈（可选，默认只读）────────────────────────────────
+# ── 9. 跨源对账：nginx TLS 实态 vs 文档「HTTPS 待办」类声明 ──────────────────
+# 真值仍是 git 索引（deploy/*.conf 是仓库文件，本地跑 == CI 跑），不引入仓库外依赖。
+# 只做单向判定：conf 已含 TLS 而文档仍称待办 → FAIL；反向（conf 无 TLS 而文档称已上线）
+# 暂不判——「已上线」类措辞变体多，宽匹配误报代价高，交由人工/文档评审兜底。
+_DOC_TLS_PENDING = [
+    re.compile(r"HTTPS[^\n]{0,24}(待办|待配置|未配置|备案完成后)"),
+    re.compile(r"备案通过后再上[^\n]{0,16}(HTTPS|HSTS|443)"),
+    re.compile(r"(待办|待配置)[^\n]{0,40}(HTTPS|HSTS)"),
+]
+
+
+def nginx_tls_ready() -> bool:
+    """deploy/*.conf 任一文件含 `listen 443 ssl` 即视为 TLS 已配置（仓库内实态）。"""
+    for conf in sorted(ROOT.glob("deploy/*.conf")):
+        try:
+            if "listen 443 ssl" in conf.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def check_nginx_tls_vs_docs(docs: list[tuple[Path, list[str]]]) -> None:
+    if not nginx_tls_ready():
+        return
+    for path, lines in docs:
+        if path in HISTORICAL_FILES:
+            continue
+        for i, line in enumerate(lines, 1):
+            if any(w in line for w in ALLOW_WORDS):
+                continue
+            if any(pat.search(line) for pat in _DOC_TLS_PENDING):
+                fail(
+                    f"跨源对账 {path.relative_to(ROOT)}:{i} 文档称 HTTPS/443 待办，"
+                    "而 deploy/*.conf 已含 listen 443 ssl（线上实态）——口径需随实态滚动"
+                )
+                break  # 每文件报首处即可，避免同一句式刷屏
+
+
+# ── 10. --fix：确定性计数自愈（可选，默认只读）────────────────────────────────
 # 只改写「能从仓库事实直接算出来」的计数：用例数（实测 pytest 收集数）、迁移数（文件数）、
 # LLM 工具 schema 数（tools.py 里的 name 去重数）。判读类的 FAIL（悬空引用、过期表述、
 # 环境变量存疑、README 结构）不自动改——猜错会把门禁变成「改文档骗过检查」。
@@ -494,6 +584,7 @@ def main(argv: list[str] | None = None) -> int:
     env_source = env_sources_text()
     check_env_vars(docs, env_source, env_source.lower())
     check_stale_patterns(docs)
+    check_nginx_tls_vs_docs(docs)
 
     print(f"doc-sync 检查报告（pytest 实测：{count if count is not None else '跳过'}）")
     for w in warns:

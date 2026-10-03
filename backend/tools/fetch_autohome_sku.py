@@ -23,14 +23,14 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
-from app.sources.autohome import (  # noqa: E402
+from app.sources.autohome import (
     build_series_payload,
     fetch_robots,
     parse_series_page,
 )
-from app.sources.autohome_sku import (  # noqa: E402
+from app.sources.autohome_sku import (
     SKU_API,
     build_sku_payload,
     decode_autohome_html,
@@ -38,7 +38,7 @@ from app.sources.autohome_sku import (  # noqa: E402
     fetch_sku_config,
     parse_series_index,
 )
-from app.sources.fetcher import DEFAULT_USER_AGENT  # noqa: E402
+from app.sources.fetcher import DEFAULT_USER_AGENT
 
 SNAPSHOT_DIR = os.path.join("snapshots")
 RAW_SKU_DIR = os.path.join("snapshots", "raw", "sku")
@@ -542,8 +542,19 @@ def stage_sku(args) -> int:
             print(f"[{i}/{len(pending)}] {sid} {s['name']} 失败：{err}")
         _save_checkpoint(cp)
         time.sleep(SLEEP_SECONDS)
-    print(f"阶段 sku 完成：{len(cp['sku_done'])} 成功 / {len(cp['failures'])} 失败")
-    return 0
+    # 退出码必须反映**本阶段**结果，且只统计本阶段处理过的车系。
+    #
+    # 两处修正（2026-10-02）：
+    # 1. 原为无条件 `return 0`。同一函数 :531-535 的注释刚写下「抓到 0 款型**不得
+    #    记为完成**」的 2026-09-14 事故教训，退出码却仍在报成功——全网失败也会
+    #    让 cron 链路绿灯放行。
+    # 2. `cp["failures"]` 是 series / sku 两阶段**共享**的，且 stage_sku 从不清除
+    #    非本阶段产生的条目。series 阶段遗留的一条失败会让 sku 阶段永远退出 1，
+    #    「重试直到 0」的收敛循环无法结束。故此处只按本轮 pending 统计。
+    stage_failures = [s["external_id"] for s in pending if s["external_id"] in cp["failures"]]
+    print(f"阶段 sku 完成：{len(cp['sku_done'])} 成功 / {len(stage_failures)} 失败"
+          f"（本轮待抓 {len(pending)} 个）")
+    return 1 if stage_failures else 0
 
 
 def _detail_energy_types(detail: dict) -> list[str]:

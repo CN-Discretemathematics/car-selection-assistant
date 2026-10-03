@@ -206,8 +206,13 @@ def render_markdown(report: dict) -> str:
         "|---|---|---|---|---|",
     ]
     for i, item in enumerate(report.get("disagreements") or [], start=1):
+        # 反斜杠转义必须提到 f-string 外面：f-string 内允许转义是 PEP 701，
+        # Python 3.12 才合法。本仓对外声明支持 3.11+（README 徽章 / requires-python），
+        # 内联写会在 3.11 上直接 SyntaxError——而 CI 与生产镜像都是 3.12，
+        # 谁也不会在 CI 里撞到它。2026-10-03 由 ruff 首次实跑发现。
+        utterance = str(item.get("utterance", "")).replace("|", "\\|")
         lines.append(
-            f"| {i} | {str(item.get('utterance', '')).replace('|', '\\|')} "
+            f"| {i} | {utterance} "
             f"| {item.get('regex_intent')} | {item.get('llm_intent')} | {item.get('llm_confidence')} |"
         )
     lines += [

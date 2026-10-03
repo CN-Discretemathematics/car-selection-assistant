@@ -292,16 +292,85 @@ def test_chat_evidence_bridges_locked_series(db_session: Session):
 
 
 def test_extract_hints_weight_emphasis():
-    """§17.2 落地：强调句式（X 优先/看重/主要看）→ 对应评分维度权重线索。"""
+    """§17.2 落地：强调句式（X 优先/看重/主要看）→ 对应评分维度权重线索。
+
+    ⚠️ 期望值是**绝对权重**（默认 + 0.2 增量），不是裸增量 0.2。
+    tools 侧 `weights = {**DEFAULT_WEIGHTS, **profile.weights}` 是覆盖语义，
+    发裸增量会把默认本就高于 0.2 的维度反向压低（budget 0.30 → 0.20）。
+    这条断言 2026-10-03 从 `{"space": 0.2, ...}` 改为绝对值——旧断言把实现
+    （覆盖）当成了契约，而 `_WEIGHT_RAISE` 的注释写的却是「增量/叠加」。
+    """
     from app.agent.engine import extract_hints
 
     hints = extract_hints("空间优先，动力也比较看重")
-    assert hints["weights"] == {"space": 0.2, "power": 0.2}
-    assert extract_hints("最看重续航")["weights"] == {"energy": 0.2}
-    assert extract_hints("主要看性价比")["weights"] == {"budget": 0.2}
+    assert hints["weights"] == {"space": 0.3, "power": 0.3}
+    assert extract_hints("最看重续航")["weights"] == {"energy": 0.35}
+    assert extract_hints("主要看性价比")["weights"] == {"budget": 0.5}
     # 无强调词不产生权重线索（不污染画像与闲聊判定）
     assert "weights" not in extract_hints("预算12万，2个人，想要纯电SUV")
     assert "weights" not in extract_hints("今天天气不错")
+
+
+def test_emphasis_never_lowers_a_dimension():
+    """缺陷回归：强调某维度必须抬高它，不能反向压低（2026-10-03 实测发现）。
+
+    症状：「主要看价格」曾把 budget 从 0.30 压到 0.20——用户越强调价格，
+    系统越不看重价格。只有 budget 的默认权重高于 0.2（增量），所以此前
+    其余 7 维全是「正常抬高」，缺陷被掩盖成看起来没毛病。
+    """
+    from app.agent.engine import extract_hints
+    from app.agent.tools import DEFAULT_WEIGHTS
+
+    for phrase, dim in (("主要看价格", "budget"), ("主要看性价比", "budget"),
+                        ("最看重舒适", "comfort"), ("最看重家用", "usage")):
+        got = extract_hints(phrase)["weights"][dim]
+        assert got > DEFAULT_WEIGHTS[dim], (
+            f"「{phrase}」把 {dim} 从 {DEFAULT_WEIGHTS[dim]} 变成了 {got}，"
+            "等于把用户最看重的维度调低了"
+        )
+
+
+def test_usage_weight_keywords_are_measurable():
+    """usage 维度的每个关键词都**必须同时**能写进 profile.usage（可测性契约）。
+
+    为什么这是契约而不是实现细节：tools 侧只在 `profile.usage` 非空时把 usage
+    计入 measured 集合。若某天有人往 _WEIGHT_DIM_KEYWORDS 加了「出行」这类
+    只在 _USAGE_HINTS 之外的词，权重会被记进画像，usage 维度却恒为未测量的
+    0.5——结果是**稀释其它所有维度的权重却换不来任何排序变化**，纯浪费，
+    而且从结果上看不出任何异常（本仓已在 tradeoffs 与 E402 豁免上各交过
+    一次这种学费：看起来在工作，实际什么都没做）。
+
+    这条测试把「能加权的词 ⊆ 能被测到的词」变成可执行断言。
+    """
+    from app.agent.engine import _USAGE_HINTS, _WEIGHT_DIM_KEYWORDS, extract_hints
+
+    usage_keywords = {kw for kw, dim in _WEIGHT_DIM_KEYWORDS if dim == "usage"}
+    assert usage_keywords, "usage 必须有关键词入口（8 维里它此前独缺，是 L2 的实际缺口）"
+    unmeasurable = usage_keywords - set(_USAGE_HINTS)
+    assert not unmeasurable, (
+        f"这些词被映射到 usage 维度却不会写进 profile.usage，导致该维恒为未测量：{unmeasurable}"
+    )
+    # 且必须真的能同时产出 usage 与权重（端到端一遍，不只比对表）
+    hints = extract_hints("我最看重家用")
+    assert hints.get("usage") == ["家庭"]
+    assert hints["weights"] == {"usage": 0.35}  # 默认 0.15 + 增量 0.2（绝对权重语义）
+
+
+def test_safety_emphasis_is_deliberately_unmapped():
+    """「最看重安全」**不得**映射到任何维度——这是刻意的不作为，不是遗漏。
+
+    8 个维度的公式里没有任何一个读安全类 fact_key，把安全映射到其中任何一个
+    都不会让排序更安全，只会让用户以为系统听懂了他最在意的东西。这条测试的
+    作用是拦下未来那个「顺手加个映射」的好意：那时它会变绿，从而把一次
+    **用行为冒充理解**的变更伪装成小修小补。
+    """
+    from app.agent.engine import extract_hints
+
+    for phrase in ("我最看重安全", "安全最重要", "碰撞成绩优先", "气囊越多越好"):
+        hints = extract_hints(phrase)
+        assert "weights" not in hints, f"「{phrase}」不应产生任何权重线索（无维度测安全）"
+        # 也不能被偷偷塞进硬约束或排除项——那同样是编造语义
+        assert "avoid" not in hints
 
 
 def test_merge_profile_accumulates_weights():
@@ -311,7 +380,23 @@ def test_merge_profile_accumulates_weights():
 
     profile = merge_profile(UserProfile(), extract_hints("空间优先"))
     profile = merge_profile(profile, extract_hints("更看重续航"))
-    assert profile.weights == {"space": 0.2, "energy": 0.2}
+    assert profile.weights == {"space": 0.3, "energy": 0.35}
+
+
+def test_repeated_emphasis_hits_ceiling():
+    """反复强调同一维度必须触顶（1.0），不能线性累加到任意大。
+
+    没有上限时「空间优先」说四遍就是 1.2，而其它维度合计仅 0.6——那已经不是
+    综合推荐，是单维筛选。触顶后继续说同一句不再变化，画像也不该无限膨胀。
+    """
+    from app.agent.engine import extract_hints, merge_profile
+    from app.agent.schemas import UserProfile
+    from app.agent.tools import WEIGHT_CEILING
+
+    profile = UserProfile()
+    for _ in range(6):
+        profile = merge_profile(profile, extract_hints("空间优先"))
+    assert profile.weights["space"] == WEIGHT_CEILING
 
 
 def test_passenger_options_family_aware():
