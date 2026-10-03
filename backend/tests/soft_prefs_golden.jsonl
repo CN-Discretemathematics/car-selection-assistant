@@ -21,3 +21,5 @@
 {"id": "h01", "text": "我想要SUV，预算20万", "expect": {}, "note": "车身/预算是硬约束，由 regex 处理；L1 不得抽。本条要盯的是**不产出 body_type/budget**，期望保持空"}
 {"id": "h02", "text": "要纯电的，续航300以上", "expect": {"pain_points": ["续航"]}, "note": "首版金标判空属**过严**：续航是真实维度，模型抽它是对的；真正要盯的是**不产出 energy_type**（硬约束），故期望保留 pain_points"}
 {"id": "s01", "text": "我最看重安全", "expect": {}, "note": "安全无法变成排序依据（8 维公式里没有任何一个读安全类 fact_key），必须拒绝"}
+{"id": "s02", "text": "我最看重保值率", "expect": {}, "note": "**真正的越界**：库中无对应 fact_key，8 维里也没有保值率（budget/usage/space/energy/power/comfort/intelligence/maintenance）。2026-10-03 实测返回 null"}
+{"id": "s03", "text": "我最看重操控", "expect": {}, "note": "同 s02，操控既无 fact_key 也无维度。实测返回 null"}
