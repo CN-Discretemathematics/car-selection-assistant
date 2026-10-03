@@ -10,7 +10,7 @@ import json
 import logging
 import re
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.agent.schemas import UserProfile
@@ -340,8 +340,6 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
     weights = {**DEFAULT_WEIGHTS, **{k: float(v) for k, v in (profile.weights or {}).items() if v is not None}}
 
     # ── 第一层：硬约束下推 SQL ────────────────────────────────────────────
-    from sqlalchemy import or_
-
     stmt = select(VehicleVariant).where(VehicleVariant.status == "on_sale")
     # 会话锁定的车系（用户点名过、尚未解锁）
     if profile.locked_series_ids:
@@ -384,6 +382,28 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
     if profile.budget.max is not None:
         price_cond.append(OfficialPrice.price_cny <= profile.budget.max)
     stmt = stmt.where(VehicleVariant.id.in_(select(OfficialPrice.variant_id).where(*price_cond)))
+
+    # ── 座位数下推（H2-A，2026-10-03）────────────────────────────────────
+    # 此前「≥N 座」只能在 Python 侧判：读 spec_facts 里的座位数事实，而事实必须
+    # 先把款型物化出来才读得到——**结构性的循环依赖**，所以 `candidates_scanned`
+    # 收不下来（实测与 `count` 的差 p50 = 0，即全表早已物化完）。
+    #
+    # 现在座位数已物化成 `vehicle_variants.seat_count`（回填见 tools/backfill_seat_count.py），
+    # 可以像 brand/body/energy/price 一样下推。
+    #
+    # ⚠️ **`IS NULL` 这一支不能省**。物化前的判定是
+    #     `seats is not None and seats < profile.passengers` 才过滤，
+    #     即**库里没有座位数事实的款型是被保留的**（缺数据 ≠ 不满足）。
+    # 写成 `seat_count >= N` 会把所有未回填的款型悄悄丢掉——推荐结果静默改变，
+    # 且没有任何东西会报错。实测本地快照库 6629 款型里只有 1007 个有座位事实
+    # （15%），漏掉 IS NULL 就会一次丢掉 85% 的候选。
+    if profile.passengers is not None:
+        stmt = stmt.where(
+            or_(
+                VehicleVariant.seat_count.is_(None),
+                VehicleVariant.seat_count >= profile.passengers,
+            )
+        )
 
     # ── 候选集规模（2026-10-02 P5.1）────────────────────────────────────
     # 这条 stmt **故意不加 LIMIT**：排名由下方 8 维软评分决定，而评分需要全量事实，
@@ -520,6 +540,9 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
             if variant.body_type and variant.body_type in body_avoid:
                 continue
         seats = _extract_seats(facts)
+        # ⚠️ 这一行**必须保留**：它是下推的兜底，不是冗余。
+        # `seat_count` 为 NULL 有两种情况——真的没座位事实，或**回填还没跑**。
+        # 后者下推等于没生效，全靠这里兜住；两者语义一致（缺数据 ≠ 不满足）。
         if profile.passengers is not None and seats is not None and seats < profile.passengers:
             continue
 

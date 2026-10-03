@@ -138,6 +138,11 @@ class VehicleVariant(Base):
     effective_from: Mapped[date] = mapped_column(Date)
     effective_to: Mapped[date | None] = mapped_column(Date, nullable=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 座位数（物化自 spec_facts，2026-10-03）：让「≥N 座」能与 brand/body/energy/price
+    # 一样下推 SQL。可空是**语义要求**：库里没有座位数事实的款型应当被**保留**
+    # （缺数据 ≠ 不满足），与原 Python 侧 `seats is not None` 判定完全一致。
+    # 回填见 tools/backfill_seat_count.py。
+    seat_count: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     source_id: Mapped[int | None] = mapped_column(ForeignKey("sources.id"), nullable=True)
 
     series: Mapped["VehicleSeries"] = relationship(back_populates="variants")
