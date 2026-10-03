@@ -80,7 +80,12 @@ SOFT_PREF_VERSION = "soft-pref-v1"
 MODE_ENV = "AGENT_SOFT_PREF_MODE"
 TIMEOUT_ENV = "AGENT_SOFT_PREF_TIMEOUT_MS"
 DEFAULT_MODE = "off"
-DEFAULT_TIMEOUT_MS = 1200
+# 2026-10-03 实测后从 1200 提到 3000：deepseek-flash 上 8 条真实语料的中位 818ms、
+# P90 1019ms、**最大 1656ms**。原先的 1200ms 对 P90 只有 1.18x 余量，而**最大值已经
+# 超过它**——切到 llm 模式后表现为「开关打开了却什么都没发生」：每次都在超时回退正则。
+# 这类静默降级比直接报错更难发现（没有任何日志指向超时本身，只有「没抽到偏好」）。
+# 3000ms ≈ 3x P90，留够生产并发下的抖动余量；仍可用 AGENT_SOFT_PREF_TIMEOUT_MS 覆盖。
+DEFAULT_TIMEOUT_MS = 3000
 _MODES = ("off", "shadow", "llm")
 
 # shadow 对拍日志（单行 JSON），由离线评测脚本消费
