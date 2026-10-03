@@ -77,7 +77,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # 2026-10-03：必须 fetch-depth 0（全历史）。本 job 末尾的 commit-scope 门禁跑的是
+      # `pre-push-guard.py origin/main..HEAD`，而 actions/checkout 默认 fetch-depth: 1
+      # 只拉当前 ref——浅克隆里**根本没有 origin/main**，于是
+      # `git rev-list origin/main..HEAD` 报 ambiguous argument，门禁以**环境错误 exit 2** 收场。
+      # 也就是说这道门禁自接入起就在 CI 里**从未真正执行过**：它不是「判过了」，是「跑不起来」，
+      # 且失败形态与「抓到顶包」完全无法区分。本仓最反感的就是这种「声明了但从不执行」。
+      # 代价很低（仓库很小），收益是这道门禁第一次真的会跑。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
