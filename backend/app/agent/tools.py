@@ -10,7 +10,7 @@ import json
 import logging
 import re
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.agent.schemas import UserProfile
@@ -329,19 +329,28 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 WEIGHT_CEILING = 1.0
 
 
-def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> dict:
+def recommendation_tool(
+    db: Session,
+    profile: UserProfile,
+    limit: int = 5,
+    *,
+    include_dims: bool = False,
+) -> dict:
     """确定性推荐：PostgreSQL 硬条件筛选 + 软评分。
 
     事实全部来自数据库；评分维度无数据时不计分，禁止猜测。
     硬约束（在售/锁定车系/车身/能源/价格区间）全部下推 SQL（评审 P1：
     此前每次消息全量拉全部在售款型再 Python 过滤，大库下内存/延迟线性增长），
     剩余约束（座位数等基于事实的）在 Python 内完成。
+
+    include_dims（2026-10-03，仅评测用，默认 **False**）：为真时把每个候选的
+    逐维得分 `_dims` 与「本候选有实值的维度」`_measured` 一并返回，供
+    `tools/eval_tradeoffs.py` 独立复核取舍叙事。**默认路径行为逐位不变**——
+    这两个键照旧在返回前剥离，不进生产响应体。
     """
     weights = {**DEFAULT_WEIGHTS, **{k: float(v) for k, v in (profile.weights or {}).items() if v is not None}}
 
     # ── 第一层：硬约束下推 SQL ────────────────────────────────────────────
-    from sqlalchemy import or_
-
     stmt = select(VehicleVariant).where(VehicleVariant.status == "on_sale")
     # 会话锁定的车系（用户点名过、尚未解锁）
     if profile.locked_series_ids:
@@ -384,6 +393,28 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
     if profile.budget.max is not None:
         price_cond.append(OfficialPrice.price_cny <= profile.budget.max)
     stmt = stmt.where(VehicleVariant.id.in_(select(OfficialPrice.variant_id).where(*price_cond)))
+
+    # ── 座位数下推（H2-A，2026-10-03）────────────────────────────────────
+    # 此前「≥N 座」只能在 Python 侧判：读 spec_facts 里的座位数事实，而事实必须
+    # 先把款型物化出来才读得到——**结构性的循环依赖**，所以 `candidates_scanned`
+    # 收不下来（实测与 `count` 的差 p50 = 0，即全表早已物化完）。
+    #
+    # 现在座位数已物化成 `vehicle_variants.seat_count`（回填见 tools/backfill_seat_count.py），
+    # 可以像 brand/body/energy/price 一样下推。
+    #
+    # ⚠️ **`IS NULL` 这一支不能省**。物化前的判定是
+    #     `seats is not None and seats < profile.passengers` 才过滤，
+    #     即**库里没有座位数事实的款型是被保留的**（缺数据 ≠ 不满足）。
+    # 写成 `seat_count >= N` 会把所有未回填的款型悄悄丢掉——推荐结果静默改变，
+    # 且没有任何东西会报错。实测本地快照库 6629 款型里只有 1007 个有座位事实
+    # （15%），漏掉 IS NULL 就会一次丢掉 85% 的候选。
+    if profile.passengers is not None:
+        stmt = stmt.where(
+            or_(
+                VehicleVariant.seat_count.is_(None),
+                VehicleVariant.seat_count >= profile.passengers,
+            )
+        )
 
     # ── 候选集规模（2026-10-02 P5.1）────────────────────────────────────
     # 这条 stmt **故意不加 LIMIT**：排名由下方 8 维软评分决定，而评分需要全量事实，
@@ -460,9 +491,20 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
 
     # 维护便利性的统一数据代理（评审：全量数据已在库内，不再「暂无统一数据源」）：
     # = 品牌在库车系数（规模/网络） + 该品牌是否有月度销量记录（渠道活跃度）
-    brand_series_count: dict[int, int] = {}
-    for s in series_map.values():
-        brand_series_count[s.brand_id] = brand_series_count.get(s.brand_id, 0) + 1
+    #
+    # 2026-10-03 口径修正：原先 `brand_series_count` 是在**过滤后的候选集**上累加
+    # （`for s in series_map.values()`，而 series_map 只含通过硬约束的车系）。于是
+    # 「品牌规模」这个**品牌的固有属性**会随用户筛选条件变化——筛选得越窄，维护
+    # 便利性看起来越好；一个品牌只剩 1 个车系通过筛选时 min(1/5,1)=0.2，规模被系统性
+    # 低估。这不是命名问题，是维度算错了对象。
+    # 改为**全库口径**（一次 GROUP BY 聚合，代价可忽略），并由
+    # tests/test_brand_scale_full_catalog.py 钉住「与筛选条件无关」。
+    brand_series_count: dict[int, int] = {
+        int(bid): int(n)
+        for bid, n in db.execute(
+            select(VehicleSeries.brand_id, func.count()).group_by(VehicleSeries.brand_id)
+        ).all()
+    }
     brands_with_sales = set(
         db.scalars(
             select(VehicleSeries.brand_id).join(MonthlySales, MonthlySales.series_id == VehicleSeries.id).distinct()
@@ -509,6 +551,9 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
             if variant.body_type and variant.body_type in body_avoid:
                 continue
         seats = _extract_seats(facts)
+        # ⚠️ 这一行**必须保留**：它是下推的兜底，不是冗余。
+        # `seat_count` 为 NULL 有两种情况——真的没座位事实，或**回填还没跑**。
+        # 后者下推等于没生效，全靠这里兜住；两者语义一致（缺数据 ≠ 不满足）。
         if profile.passengers is not None and seats is not None and seats < profile.passengers:
             continue
 
@@ -643,8 +688,10 @@ def recommendation_tool(db: Session, profile: UserProfile, limit: int = 5) -> di
 
     for _score, item in scored:
         item["tradeoffs"] = _tradeoff_gaps(item["_dims"], item["_measured"], best_by_dim)
-        item.pop("_dims", None)
-        item.pop("_measured", None)
+        if not include_dims:
+            # 私有字段不进生产响应体；include_dims=True 时保留给评测复核
+            item.pop("_dims", None)
+            item.pop("_measured", None)
 
     top = scored[:limit]
     return {

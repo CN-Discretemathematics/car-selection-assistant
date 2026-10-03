@@ -95,10 +95,27 @@ def test_no_two_sequential_writes_in_mutation_block():
 
     旧结构是 960 / 980 / 987 三个彼此相隔几行的写（写同一对象，纯冗余）。
     现在该区域只剩一次无条件写。
+
+    ## 为什么不再用行号窗口（2026-10-03 改）
+
+    原先断言写死了行号窗口 `936 <= ln <= 1010`。于是**在上方任何一次编辑**
+    （哪怕只是加几行注释或一个辅助函数）都会把窗口挪空、报 `0 != 1`——
+    一个与被测性质完全无关的假红灯。否定句重写在 `extract_hints` 上方加了约
+    110 行，`respond()` 整体下移，原窗口当场失效。
+
+    改为按**函数自身结构**判定，与行号彻底解耦：整段 `respond()` 里
+    **无条件**（不在 if/for/while/try 内）的落盘必须恰好是两处——早退前那次与
+    吸收变更后那次；其余每一处都在 return 分支里。比原来更强：原断言只检查
+    「某个魔法窗口里有 1 次写」，现在检查的是「全局只有 2 次无条件写」。
     """
     fn = _fn("respond")
-    lines = [ln for ln in _writes(fn) if 936 <= ln <= 1010]
-    assert len(lines) == 1, f"品牌/解锁/重锁区域仍有 {len(lines)} 次落盘：{lines}"
+    writes = _writes(fn)
+    assert len(writes) >= 5, f"退路分支上的落盘数量异常：{writes}"
+    unconditional = [ln for ln in writes if not _is_guarded(fn, ln)]
+    assert unconditional == writes[:2], (
+        f"无条件落盘应恰好是前两处（早退前 + 吸收变更后），实际 {unconditional}；"
+        f"多出来的即为本测试回归的冗余写，全部落盘：{writes}"
+    )
 
 
 def test_unlock_write_survives():

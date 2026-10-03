@@ -44,11 +44,20 @@ def test_default_limit_is_three(db_session: Session):
     assert [c.source_id for c in out] == ids[:3]
 
 
-def test_limit_none_emits_all(db_session: Session):
-    """limit=None → 全量（盘点回答的既有行为）。"""
+def test_no_way_to_opt_out_of_the_limit(db_session: Session):
+    """不再存在「不限条」这条路：四个调用点一律走 CITATION_LIMIT。
+
+    此前盘点回答传 `limit=None` 输出全量、其余三条限 3，同一页面两套引用密度
+    （2026-10-03 产品拍板统一）。`limit` 参数已随之删除——留着「可不传上限」的口子，
+    就是当初那条分歧得以存在的原因。本用例从**调用签名**上钉住：传 limit 会 TypeError。
+    """
     ids = _seed_sources(db_session, 5)
-    out = _source_citations(db_session, ids, label_suffix="车型数据", limit=None)
-    assert len(out) == 5
+    out = _source_citations(db_session, ids, label_suffix="车型数据")
+    assert len(out) == CITATION_LIMIT, "超出的来源必须被截断"
+    assert [c.source_id for c in out] == ids[:CITATION_LIMIT]
+
+    with pytest.raises(TypeError):
+        _source_citations(db_session, ids, label_suffix="车型数据", limit=None)
 
 
 def test_label_uses_source_name_with_fallback(db_session: Session):

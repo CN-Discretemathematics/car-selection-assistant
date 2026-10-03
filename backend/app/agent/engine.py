@@ -70,6 +70,7 @@ from app.agent.series_qa import (
     should_answer,  # noqa: F401  # re-export：保持既有导入面（评审二轮建议 5）
 )
 from app.agent.session import SessionStore, get_session_store
+from app.agent import soft_prefs
 from app.agent.tools import (
     DEFAULT_WEIGHTS,
     TOOL_SCHEMAS,
@@ -353,12 +354,11 @@ def _parse_count(text: str) -> int | None:
     if text in _CN_DIGITS:
         return _CN_DIGITS[text]
     return None
-# 「MPV」与「mpv」两个键**都要保留**，不是冗余：偏好路径用小写化的 msg_low 匹配
-# （`"mpv" in msg_low`），而「不要…」的 avoid 路径用的是**原始 message**、
-# 大小写敏感（`"MPV" in message`）。删掉大写键会让「不要MPV」漏掉排除项。
-# ⚠️ 这条路径的大小写处理与偏好路径不一致（一个 lower 一个原样），属可记录的
-# 不对称，但**统一它就是行为变更**，需产品拍板；见 docs/refactoring-roadmap.md。
-_BODY_HINTS = {"轿车": "sedan", "suv": "suv", "MPV": "mpv", "mpv": "mpv"}
+# 两条匹配路径（偏好 `body` / avoid 排除项）现已**统一用小写化的 msg_low**，
+# 因此这张表**只需要小写键**。此前偏好路径用 msg_low、avoid 路径用原始 message，
+# 于是不得不同时留「MPV」与「mpv」两个键——当时功能没坏，但看起来像冗余，
+# 删掉大写键就会让「不要MPV」静默漏掉排除项（2026-10-03 统一后消除该陷阱）。
+_BODY_HINTS = {"轿车": "sedan", "suv": "suv", "mpv": "mpv"}
 _ENERGY_HINTS = {
     "纯电": "BEV",
     "插混": "PHEV",
@@ -381,6 +381,66 @@ _ENERGY_LABEL = {
     "new_energy": "新能源",
     "fuel": "燃油（含油混）",
 }
+# ── 否定句判定（2026-10-03）─────────────────────────────────────────────────
+# 判定从「全句级」改成「**逐关键词 + 分句 + 邻近 + 「的」字边界**」。
+# 旧实现 `if "不要" in message or "不考虑" in message:` 只要句中出现否定词就
+# 把句中**所有**车型/能源关键词塞进 avoid，已确认两个缺陷（提案 §4.3）：
+#   ① 词表只 2 个词 →「不想开MPV」「不喜欢轿车」落进**偏好**路径，
+#      系统推荐用户明确排斥的车；
+#   ② 无词边界的子串匹配 →「不要**太贵的**SUV」把 SUV 排除，而 avoid 直接下推
+#      SQL `NOT body_type IN (...)`，等于把用户唯一想要的车型从候选集删掉。
+_NEGATION_WORDS: tuple[str, ...] = (
+    "不要", "不考虑", "不想", "不需要", "不喜欢", "不打算", "讨厌", "排除", "别",
+)
+# 假朋友：中文不做词边界就会命中「差**别**」「**别**克」。这条不是洁癖——
+# 本人审计脚本把语料里 41 处「别」全当否定，报出 7 条「误判」，7 条全是假的。
+_NEGATION_FRIENDS: tuple[tuple[str, str], ...] = (("差", "别"), ("别", "克"))
+# 否定词与关键词之间的最大字距（防止跨半句乱指）
+_NEGATION_WINDOW = 12
+# 分句符：否定作用域不跨这些符号（「不喜欢轿车，SUV可以」里的 SUV 不受影响）
+_CLAUSE_SPLIT_RE = re.compile(r"[，,。；;！!？?\s]")
+_DE = "的"
+
+
+def _negation_here(text: str, idx: int) -> bool:
+    """text[idx:] 是否以一个**真实**的否定词开头（已排除「差别」「别克」）。"""
+    for word in _NEGATION_WORDS:
+        if not text.startswith(word, idx):
+            continue
+        if word == "别" and idx > 0 and text[idx - 1] == "差":
+            continue  # 「差别」
+        if text.startswith("别克", idx):
+            continue  # 品牌名
+        return True
+    return False
+
+
+def _negated_values(msg_low: str) -> list[str]:
+    """返回被否定修饰的车型/能源值（已去重排序）。
+
+    逐个关键词判定：它**自己所在分句**的前缀里有没有否定词，且否定词与它之间
+    没有「的」。「的」是这条规则的关键——「不要太贵的SUV」里否定作用在「贵的」
+    上，SUV 是正向需求；「不要MPV」里否定直接管住 MPV。
+    """
+    out: set[str] = set()
+    for table in (_ENERGY_HINTS, _BODY_HINTS):
+        for key, value in table.items():
+            k = key.lower()
+            start = msg_low.find(k)
+            while start != -1:
+                clause_prefix = _CLAUSE_SPLIT_RE.split(msg_low[:start])[-1]
+                window = clause_prefix[-_NEGATION_WINDOW:]
+                hit = next(
+                    (i for i in range(len(window)) if _negation_here(window, i)),
+                    None,
+                )
+                if hit is not None and _DE not in window[hit:]:
+                    out.add(value)
+                    break
+                start = msg_low.find(k, start + 1)
+    return sorted(out)
+
+
 _USAGE_HINTS = {
     "上下班": "通勤",
     "通勤": "通勤",
@@ -520,21 +580,32 @@ def extract_hints(message: str) -> dict:
         else:
             hints["charging_tolerance"] = True
 
-    if "不要" in message or "不考虑" in message:
-        for key, value in _ENERGY_HINTS.items():
-            if key in message:
-                hints.setdefault("avoid", []).append(value)
-        for key, value in _BODY_HINTS.items():
-            if key in message:
-                hints.setdefault("avoid", []).append(value)
+    # 否定句 → avoid（2026-10-03 重写：从「全句级判定」改为**按分句 + 邻近 + 的字边界**）
+    #
+    # 此前是 `if "不要" in message or "不考虑" in message:`——只要句子里出现否定词，
+    # **句中所有**车型/能源关键词一律进 avoid。两个已确认的缺陷（见提案 §4.3）：
+    #   ① 词表只有 2 个词：「不想开MPV」「不喜欢轿车」进不了否定分支，
+    #      落进**偏好**路径 → 推荐用户明确排斥的车；
+    #   ② 无词边界的子串匹配：「不要**太贵的**SUV」里的「不要」否定的不是 SUV，
+    #      语义是「要 SUV、但别太贵」——旧实现把 SUV **排除**掉，
+    #      而 avoid 直接下推 SQL NOT body_type IN (...)，等于把用户唯一想要的车型删了。
+    #
+    # 现在逐个关键词判定「它自己前面那一小段里有没有否定」：
+    #   - 分句：只在本分句内找否定（「不喜欢轿车，SUV可以」里的 SUV 不受影响）；
+    #   - 邻近：否定词与关键词之间不超过 _NEGATION_WINDOW 字；
+    #   - 「的」：否定词与关键词之间有「的」→ 否定作用在「的」之前，关键词是**正向需求**；
+    #   - 假朋友：中文不做词边界就会把「差别」「别克」当成否定词（本人审计脚本实测踩过：
+    #     把语料里 41 处「别」全当否定，报出 7 条「误判」——7 条全是假的）。
+    negated = _negated_values(msg_low)
+    if negated:
+        hints["avoid"] = negated
         # 同词同时命中「偏好」与「避开」时以避开为准（评审 L2）：
         # 如「不要燃油车」→ avoid=[ICE]，不得同时写入 energy_preference=[ICE]。
         # 过滤后为空则删除键：空列表会让 structured=bool(hints) 误判为
         # 「本轮有车型信息」，把纯闲聊（含「不要」字样）错推进追问链路（评审 M-R2）
-        avoided = set(hints.get("avoid", []))
         for key in ("energy_preference", "body_type"):
             if key in hints:
-                kept = [e for e in hints[key] if e not in avoided]
+                kept = [e for e in hints[key] if e not in negated]
                 if kept:
                     hints[key] = kept
                 else:
@@ -704,7 +775,6 @@ def _source_citations(
     source_ids: list[int],
     *,
     label_suffix: str,
-    limit: int | None = CITATION_LIMIT,
 ) -> list[Citation]:
     """把来源 id 列表变成带来源名的引用列表（label 形如「<来源名> <后缀>」）。
 
@@ -719,23 +789,22 @@ def _source_citations(
       | _brand_overview_reply         | source_ids[:3]      | 车型数据     |
       | _tool_loop_reply              | sorted(...)[:3]     | 数据         |
 
-    统一后差异以参数暴露（`limit` / `label_suffix`），**行为逐字保持不变**——
-    盘点回答至今不下限、其余三条限 3，是既有行为，不是本轮引入的。
-    是否该统一属产品口径决策，留给评审拍板（见 docs/refactoring-roadmap.md）。
+    2026-10-03 产品口径拍板：统一限 `CITATION_LIMIT`。**同时删掉了 `limit` 参数**——
+    留着「可不传上限」的口子，正是当初那条分歧得以存在的原因；不留口子，
+    `CITATION_LIMIT` 就是唯一真值点。
     """
     if not source_ids:
         return []
     names = {
         s.id: s.name for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
     }
-    ordered = source_ids if limit is None else source_ids[:limit]
     return [
         Citation(
             source_id=sid,
             source_name=names.get(sid),
             label=f"{names.get(sid) or '来源'} {label_suffix}",
         )
-        for sid in ordered
+        for sid in source_ids[:CITATION_LIMIT]
     ]
 
 
@@ -958,6 +1027,11 @@ class AgentEngine:
         profile = await _load_profile(self._store, session_id)
         hints = extract_hints(message)
         profile = merge_profile(profile, hints)
+        # L1 软偏好抽取（sales-agent-proposal §3 L1）。默认 AGENT_SOFT_PREF_MODE=off，
+        # 此时下面只多一次 env 读取、**不发起任何 LLM 调用**，行为与接入前逐位相同——
+        # 提案 §6 第 2 步要求「先只输出结构化、不接入回答」，先离线评测抽取质量。
+        # 闸门与回退全在 soft_prefs.run_if_enabled 内部，本行不承载任何逻辑。
+        await soft_prefs.run_if_enabled(profile, message)
         # 已补齐的字段从 unknowns 中移除（评审 M1）：unknowns 语义 = 「最近一次追问未答」，
         # 而非永久未知——否则用户后补的字段永远不会再次校验/追问
         for answered in ("budget", "usage", "passengers"):
@@ -1425,10 +1499,10 @@ class AgentEngine:
             )
         citations: list[Citation] = []
         source_ids = overview.get("source_ids") or []
-        # 盘点回答盼不下限（与其余三条的 [:3] 不同）——
-        # 属既有行为，本轮保持不变，差异已记入 roadmap。
+        # 引用条数与其余三条回答统一走 CITATION_LIMIT（2026-10-03 产品口径拍板）。
+        # 此前盘点回答**不限条**（limit=None），同一页面上出现两套引用密度。
         citations.extend(
-            _source_citations(db, source_ids, label_suffix="车型数据", limit=None)
+            _source_citations(db, source_ids, label_suffix="车型数据")
         )
         out = AgentMessageOut(
             session_id=session_id,

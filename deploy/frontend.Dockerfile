@@ -13,6 +13,11 @@ ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
 ARG BACKEND_URL=http://api:8000
 ENV BACKEND_URL=${BACKEND_URL}
 COPY web/package.json web/pnpm-lock.yaml ./
+# 2026-10-03：corepack 现在按 package.json 的 `packageManager` 字段取版本，
+# 不再是「corepack 装到什么算什么」。此前生产未钉版本、CI 钉 9、本机 11，
+# 三处不一致已造成两次真实事故（pnpm 11 生成的 pnpm-workspace.yaml 一旦入库就让
+# CI 直接红；pnpm 9 半途 purge 把本机 node_modules 清空）。
+# corepack enable 仍需要——它负责按该字段下载并激活对应 major。
 RUN corepack enable \
  && printf 'registry=https://registry.npmmirror.com\n' > /root/.npmrc \
  && pnpm install --frozen-lockfile

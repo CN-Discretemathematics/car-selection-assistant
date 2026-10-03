@@ -1,5 +1,11 @@
 /** 后端 API 类型与访问辅助（的响应结构）。 */
 
+// 导入路径**必须带 .ts 扩展名**：lib/ 下的模块要被 Node 测试 runner
+// （`node --experimental-strip-types --test`）直接 import，而 ESM 解析不省略扩展名；
+// 配合 tsconfig 的 `allowImportingTsExtensions: true`，同一行对 tsc 与 Node 都成立。
+// 写成 `@/lib/labels` 或 `./labels` 都会让 api.test.mts 直接 ERR_MODULE_NOT_FOUND。
+import { PRICE_MISSING_LABEL } from "./labels.ts";
+
 export interface PriceRange {
   currency: string;
   type: string;
@@ -273,13 +279,13 @@ export function formatCount(value: number): string {
 }
 
 export function formatPrice(value: number | null): string {
-  if (value === null || value === undefined) return "暂无";
+  if (value === null || value === undefined) return PRICE_MISSING_LABEL;
   const wan = value / 10000;
   return `${wan.toFixed(2).replace(/\.?0+$/, "")} 万元`;
 }
 
 export function formatPriceRange(range: PriceRange): string {
-  if (range.min === null && range.max === null) return "官方指导价：暂无";
+  if (range.min === null && range.max === null) return `官方指导价：${PRICE_MISSING_LABEL}`;
   if (range.min !== null && range.max !== null && range.min !== range.max) {
     return `${formatPrice(range.min)} ~ ${formatPrice(range.max)}`;
   }

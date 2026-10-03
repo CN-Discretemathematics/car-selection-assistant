@@ -1,0 +1,8 @@
+{"id": "sp01", "text": "我最看重后排空间，预算20万内要家用SUV", "prefs": {"usage_scenario": "家庭", "priority_order": ["space"]}, "emphasis_dim": "space", "usage": ["家庭"], "body_type": ["suv"], "budget_cny": [150000, 200000]}
+{"id": "sp02", "text": "一家五口日常通勤，最看重后排", "prefs": {"household_size": "3~5人", "usage_scenario": "通勤", "priority_order": ["space"]}, "emphasis_dim": "space", "usage": ["通勤"], "budget_cny": [120000, 200000], "passengers": 5}
+{"id": "sp03", "text": "我比较看重动力，加速要强，预算20万", "prefs": {"priority_order": ["power"]}, "emphasis_dim": "power", "budget_cny": [150000, 200000]}
+{"id": "sp04", "text": "我最在意油耗，别太费油，预算15万", "prefs": {"pain_points": ["油耗/电耗"], "priority_order": ["energy"]}, "emphasis_dim": "energy", "budget_cny": [100000, 150000]}
+{"id": "sp05", "text": "主要看续航，冬天要跑得远", "prefs": {"pain_points": ["续航"], "priority_order": ["energy"]}, "emphasis_dim": "energy", "budget_cny": [150000, 250000]}
+{"id": "sp06", "text": "我最看重安全，预算20万", "prefs": {}, "emphasis_dim": "space", "budget_cny": [150000, 200000], "note": "「安全」无对应维度 → 偏好向量必须为空 → 注入前后应完全一致（对照组）"}
+{"id": "sp07", "text": "空间优先，动力也要强，预算25万", "prefs": {"priority_order": ["space", "power"]}, "emphasis_dim": "space", "budget_cny": [200000, 250000]}
+{"id": "sp08", "text": "主要通勤用车，要省心，预算15万", "prefs": {"usage_scenario": "通勤", "priority_order": ["maintenance"]}, "emphasis_dim": "maintenance", "usage": ["通勤"], "budget_cny": [100000, 150000]}
