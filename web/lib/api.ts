@@ -178,6 +178,10 @@ export interface AgentMessageOut {
   session_id: string;
   need_clarification: boolean;
   clarification: Clarification | null;
+  /** L4 软缺口追问：随推荐一起给出的补充问题，**不阻塞**本轮结果。
+   *  与 need_clarification/clarification 是「二选一」关系（后者会让前端只渲染
+   *  追问、不渲染推荐卡片），所以另开一个字段。 */
+  followup?: Clarification | null;
   filters: Record<string, unknown>;
   recommended_series_ids: number[];
   recommended_variants: RecommendedVariant[];
