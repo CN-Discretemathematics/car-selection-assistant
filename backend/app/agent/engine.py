@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from app.agent import soft_prefs, soft_probe
 from app.agent.answer_contract import (
     answer_numbers_allowed,
     check_catalog_overview_text,
@@ -70,7 +71,6 @@ from app.agent.series_qa import (
     should_answer,  # noqa: F401  # re-export：保持既有导入面（评审二轮建议 5）
 )
 from app.agent.session import SessionStore, get_session_store
-from app.agent import soft_prefs
 from app.agent.tools import (
     DEFAULT_WEIGHTS,
     TOOL_SCHEMAS,
@@ -1041,6 +1041,14 @@ class AgentEngine:
                 profile.unknowns = [u for u in profile.unknowns if u != "usage"]
             elif answered == "passengers" and profile.passengers is not None:
                 profile.unknowns = [u for u in profile.unknowns if u != "passengers"]
+        # L4：用户在**回答**软缺口追问（「你更看重哪一点」→「空间」）。
+        # 这条路独立于 extract_hints 的强调词路径——后者要求出现「最看重/主要看」
+        # 等词，而用户点完选项通常**只回一个词**（「空间」），没有强调词可匹配。
+        # 权重值取 engine._WEIGHT_RAISE，与正则路径同一个数。
+        #
+        # ⚠️ 必须在 set_profile **之前**：放后面的话权重改了却没落盘，下一轮又变回原样，
+        # 表现为「用户点了没反应」。
+        soft_probe.apply_probe_answer(profile, message)
         await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         structured = bool(hints)
 
@@ -1351,6 +1359,12 @@ class AgentEngine:
             for v in top
         ]
 
+        # L4：软缺口追问**随推荐一起给出**，不阻塞本轮结果。
+        # 记下问过哪两个维度（profile.probed_dims）——真人销售不会把同一个问题问两遍。
+        followup = soft_probe.probe_question(profile)
+        if followup is not None:
+            soft_probe.mark_probed(profile, soft_probe._pick_dims(profile))
+
         out = AgentMessageOut(
             session_id=session_id,
             need_clarification=False,
@@ -1361,7 +1375,11 @@ class AgentEngine:
             tradeoffs=tradeoffs,
             citations=citations,
             explanation=explanation,
+            followup=followup,
         )
+        # 追问状态要落盘，否则下一轮又会问一遍
+        if followup is not None:
+            await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         await self._emit(session_id, explanation or "", out)
         return out
 

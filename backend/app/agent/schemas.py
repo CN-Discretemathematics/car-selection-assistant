@@ -30,6 +30,10 @@ class UserProfile(BaseModel):
     nice_to_have: list[str] = Field(default_factory=list)
     avoid: list[str] = Field(default_factory=list)
     weights: dict[str, float] = Field(default_factory=dict)
+    # L4 软缺口追问：已经问过用户「更看重哪一点」的维度键（space/energy/power…）。
+    # 非空即**别再问**——真人销售不会把同一个问题问两遍。
+    # 存的是**维度键**而不是文案：文案会改，键不会。
+    probed_dims: list[str] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
     # 用户已点名的车系（会话记忆）：开始就确定车型时，推荐只关注这些车系，
     # 直到用户明确表示「看看其他车」才解锁（评审：指定车型优先）
@@ -84,3 +88,8 @@ class AgentMessageOut(BaseModel):
     tradeoffs: list[str] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
     explanation: str | None = None
+    # L4 软缺口追问：**随推荐一起给出**的补充问题（不阻塞本轮结果）。
+    # 刻意不复用 need_clarification/clarification——那对字段在前端是「二选一」：
+    # 设了就不渲染推荐卡片（AgentChat.tsx:430）。软偏好缺失时阻塞推荐属于拖沓，
+    # 真人销售是「先给你看车，再问一句你更看重什么」。
+    followup: Clarification | None = None

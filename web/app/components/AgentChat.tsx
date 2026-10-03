@@ -445,6 +445,13 @@ function AgentExtras({
             .join("、")}
         </p>
       )}
+      {/* L4 软缺口追问：随推荐一起给出，**不阻塞**结果。渲染在推荐卡片下方，
+          点不点都不影响这一轮——真人销售是「先给你看车，再问一句你更看重什么」。
+          ⚠️ 刻意不复用 need_clarification/clarification：那两个字段在上方是
+          「二选一」，设了就不渲染推荐卡片（见本函数开头）。 */}
+      {payload.followup && (
+        <ClarificationChips clarification={payload.followup} onPick={onPick} />
+      )}
     </div>
   );
 }
