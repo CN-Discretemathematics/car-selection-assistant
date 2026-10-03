@@ -704,7 +704,6 @@ def _source_citations(
     source_ids: list[int],
     *,
     label_suffix: str,
-    limit: int | None = CITATION_LIMIT,
 ) -> list[Citation]:
     """把来源 id 列表变成带来源名的引用列表（label 形如「<来源名> <后缀>」）。
 
@@ -719,23 +718,22 @@ def _source_citations(
       | _brand_overview_reply         | source_ids[:3]      | 车型数据     |
       | _tool_loop_reply              | sorted(...)[:3]     | 数据         |
 
-    统一后差异以参数暴露（`limit` / `label_suffix`），**行为逐字保持不变**——
-    盘点回答至今不下限、其余三条限 3，是既有行为，不是本轮引入的。
-    是否该统一属产品口径决策，留给评审拍板（见 docs/refactoring-roadmap.md）。
+    2026-10-03 产品口径拍板：统一限 `CITATION_LIMIT`。**同时删掉了 `limit` 参数**——
+    留着「可不传上限」的口子，正是当初那条分歧得以存在的原因；不留口子，
+    `CITATION_LIMIT` 就是唯一真值点。
     """
     if not source_ids:
         return []
     names = {
         s.id: s.name for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
     }
-    ordered = source_ids if limit is None else source_ids[:limit]
     return [
         Citation(
             source_id=sid,
             source_name=names.get(sid),
             label=f"{names.get(sid) or '来源'} {label_suffix}",
         )
-        for sid in ordered
+        for sid in source_ids[:CITATION_LIMIT]
     ]
 
 
@@ -1425,10 +1423,10 @@ class AgentEngine:
             )
         citations: list[Citation] = []
         source_ids = overview.get("source_ids") or []
-        # 盘点回答盼不下限（与其余三条的 [:3] 不同）——
-        # 属既有行为，本轮保持不变，差异已记入 roadmap。
+        # 引用条数与其余三条回答统一走 CITATION_LIMIT（2026-10-03 产品口径拍板）。
+        # 此前盘点回答**不限条**（limit=None），同一页面上出现两套引用密度。
         citations.extend(
-            _source_citations(db, source_ids, label_suffix="车型数据", limit=None)
+            _source_citations(db, source_ids, label_suffix="车型数据")
         )
         out = AgentMessageOut(
             session_id=session_id,
