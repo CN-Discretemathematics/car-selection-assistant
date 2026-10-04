@@ -14,7 +14,7 @@
 """
 from __future__ import annotations
 
-from app.agent.series_qa import _PROBE_VALUE_MAX, probe_facts
+from app.agent.series_qa import _PROBE_MAX_KEYS, _PROBE_VALUE_MAX, probe_facts
 
 # 星愿式事实：同一键 3 个去重取值，顺序即 DB 返回顺序（310/410/480）
 THREE_VALUES = [
@@ -66,9 +66,24 @@ def test_key_truncation_is_disclosed():
 
 
 def test_key_truncation_disclosure_counts_correctly():
-    """披露的数量必须是真实被藏起来的条数，不能写死。"""
+    """披露的数量必须是**真实被藏起来的条数**。
+
+    ⚠️ 这里曾写成 `expected_hidden = 12 - len(shown)`——从**实际展示行数反推**，
+    于是上限一改，两边同步变化、断言恒成立 → **假绿灯**（审查实测：把
+    `_PROBE_MAX_KEYS` 8→7，本测试仍全绿）。上限必须写成**字面量**，
+    让它成为被钉住的值而不是被反推的结果。
+    """
     facts = [(f"电池相关键{i}", str(i), None, None) for i in range(12)]
     out = probe_facts(facts, "电池")
-    shown = [ln for ln in out if "未列出" not in ln]
-    expected_hidden = 12 - len(shown)
-    assert any(f"{expected_hidden} 个相关参数未列出" in ln for ln in out), out
+    # 12 个命中键，最多展示 8 个 → 必须藏起 4 个
+    assert any("另有 4 个相关参数未列出" in ln for ln in out), out
+
+
+def test_key_cap_is_pinned_to_eight():
+    """把 `_PROBE_MAX_KEYS = 8` 本身钉住——它决定了「藏了几个」这个数字。"""
+    assert _PROBE_MAX_KEYS == 8, "改了截断上限必须同步更新披露数量的期望值与本断言"
+
+
+def test_value_cap_is_pinned_to_two():
+    """`_PROBE_VALUE_MAX = 2` 同理：N6 的披露文案直接依赖它。"""
+    assert _PROBE_VALUE_MAX == 2
