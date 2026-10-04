@@ -122,5 +122,47 @@ def test_subject_type_whitelist_rejects_unknown_type():
     assert not guard.SUBJECT_RE.match("eval: 摘要"), "缺 (scope)"
 
 
+def test_gates_and_eval_scopes_are_registered():
+    """`gates` / `eval` 必须已登记，且覆盖各自真正会碰到的路径。
+
+    2026-10-05 之前这两个 scope 都没登记，于是相关提交只能靠内联
+    `# gate-allow:` trailer 放行——**连着两笔**。例外机制被用成了常态，
+    门禁就退化成「默认拦、记得写 trailer」。
+
+    这里把登记**钉成可测的**：将来若有人误删这两个 key，测试立刻红。
+    """
+    assert "gates" in guard.SCOPE_PATHS, "gates scope 未登记"
+    assert "eval" in guard.SCOPE_PATHS, "eval scope 未登记"
+
+    gates = guard.SCOPE_PATHS["gates"]
+    for path in ("tools/pre-push-guard.py", ".githooks/", "AGENTS.md"):
+        assert any(path in p for p in gates), f"gates 未覆盖 {path}：{gates}"
+
+    ev = guard.SCOPE_PATHS["eval"]
+    for path in ("backend/tools/eval_", "backend/eval/", "backend/tests/test_eval_"):
+        assert any(path in p for p in ev), f"eval 未覆盖 {path}：{ev}"
+
+
+def test_gates_scope_does_not_swallow_the_whole_tools_dir():
+    """`gates` 必须**只**覆盖门禁自身，不能顺手把整个 `tools/` 划进来。
+
+    否则 `gates(scope)` 就成了万能钥匙：改 `tools/eval_rag.py` 也能用
+    `gates` 标签通过，scope↔路径的对应关系失去意义。
+    """
+    gates = guard.SCOPE_PATHS["gates"]
+    assert not any(p == "tools/" for p in gates), (
+        "gates 不得覆盖整个 tools/——那会让 scope 形同虚设"
+    )
+    assert not any(p == "backend/tests/" for p in gates)
+
+
+def test_known_scope_tokens_still_resolve():
+    """回归：新增两个 key 之后，原有 scope 一个都不能少。"""
+    for token in ("web", "ui", "compare", "facts", "vehicles", "agent", "rag",
+                  "data", "security", "ops", "reviewer", "skills", "docs",
+                  "lint", "hygiene", "chore", "test", "tools", "common"):
+        assert token in guard.SCOPE_PATHS, f"{token} scope 丢失"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
