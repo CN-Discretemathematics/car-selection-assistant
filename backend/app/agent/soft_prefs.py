@@ -89,7 +89,8 @@ P90 1019ms / 最大 1656ms，见本文件 `DEFAULT_TIMEOUT_MS` 处注释；
    `soft_prefs LLM 调用失败（回退正则）：<异常类名>` 一行 **info** 日志，
    超时**可**据此归因——但要确认该 logger 真被采集，否则「静默降级」依旧难发现。
 3. **切流前 7 天无 P0/P1 事故**（与 `llm_router` 同一条，刻意对齐）。
-4. **补齐越界观测**（见下一节，这是**当前最大的观测缺口**）。
+4. **越界观测已就位**（见下节，2026-10-04 补齐）。上生产前只需确认
+   `app.agent.soft_prefs` 这个 logger 的 `illegal` 字段真被采集。
 
 ### shadow → llm 的准入（缺一即不切）
 
@@ -113,22 +114,26 @@ P90 1019ms / 最大 1656ms，见本文件 `DEFAULT_TIMEOUT_MS` 处注释；
    `next_clarification()` 的**追问内容与次数都会变**。这不是延迟问题，
    但它直接改变用户可见的话术，须与第 4 条一起回归。
 
-### ⚠️ 越界率：现有信号太弱，切 llm 前必须加强
+### 越界观测：**已补**（2026-10-04，本文件 `_pick_value` / `log_shadow`）
 
-「越界」的真实定义应是「模型在**原始响应**里说出了封闭词表之外的东西」。
-现状：
+「越界」的真实定义是「模型在**原始响应**里说出了封闭词表之外的东西」。
+过去它在运行时**根本测不出来**：
 
-- `extract_soft_prefs` → `sanitize` → `_pick_value` 会把词表外的值直接丢成 `None`；
+- `_pick_value` 把词表外的值直接丢成 `None`——**静默丢弃**；
 - `eval_soft_prefs.py` 统计的 `illegal_values` 取的是 **sanitize 之后**的输出，
-  所以它**必然为 0**——那是构造性的，**不是**「模型没越界」的证据
-  （脚本自己的注释写的是「由 sanitize 保证，此处复查」）；
-- `log_shadow` 落的 `prefs` **也是 sanitize 后的**，同样测不到；
-- 唯一沾边的是 `extract_soft_prefs` 在**全部字段被丢**时会落原始响应**头部 200 字符**。
-  但那是个**弱下界信号**：它只在「模型说了东西但一条都没通过校验」时触发，
-  且分不清是「越界」还是「evidence 不是原话子串」。
+  所以**必然为 0**，那是构造性的、**不是**证据（脚本注释自己写的是
+  「由 sanitize 保证，此处复查」）；
+- `log_shadow` 落的 `prefs` 同样是 sanitize 后的。
 
-**结论：不是从零补，是把这条弱信号加强**——切 `llm` 之前应能在**原始响应**上
-统计模型说出的词表外值，否则这条判据无从判定。
+现在 `_pick_value` 把**因越界**丢掉的原值单独收集（与「引文编造」严格区分——
+后者是防线二在正常工作，不是封闭失效），经 `extract_soft_prefs` →
+`run_if_enabled` → `log_shadow` 落进 shadow 日志的 **`illegal`** 字段，
+条数封顶 `_ILLEGAL_MAX`、单条截断 `_ILLEGAL_ITEM_MAX`（防模型吐整段散文）。
+于是上面第 2 条准入**第一次有了它需要的观测点**。
+
+⚠️ 仍未解决的一半：**离线**的 `eval_soft_prefs.py` 还在统计 sanitize 后的输出，
+那个 `illegal_values` 字段**依然恒为 0**，别拿它当证据。在线观测与离线口径
+是两条路，本提交只补了在线这条。
 
 ### 两条不得当作收益证据的指标（实测得出，务必先读）
 
@@ -211,6 +216,13 @@ HOUSEHOLD_SIZES: dict[str, int] = {
 
 # 只取前两位：再多就成了「什么都重要」，等于没排序
 _PRIORITY_TAKE = 2
+
+# 封闭失效记录落盘的封顶（2026-10-04）。模型可能吐出整段散文，日志必须封顶。
+# 条数封顶防「一条消息刷屏」，单条截断防「一条撑爆日志行」；两者相乘即**总字符
+# 预算上界**。取 6×24=144：约为既有 `message_head`（60 字）的 2.4 倍，够看出
+# 「模型在说哪类词表外的话」，又不至于让一条日志盖过正常内容。
+_ILLEGAL_MAX = 6
+_ILLEGAL_ITEM_MAX = 24
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
@@ -337,49 +349,143 @@ def _evidence_ok(evidence: Any, message: str) -> bool:
     return ev in message
 
 
-def _pick_value(raw: Any, allowed: set[str], message: str) -> str | None:
-    """单值的校验：值在词表内 **且** 证据是原话子串。二者缺一即丢。"""
+def _record_illegal(
+    illegal_out: list[dict[str, Any]] | None,
+    field: str,
+    value: Any,
+    reason: str,
+) -> None:
+    """登记一条「封闭失效」，带**字段归属**与**原因**。
+
+    ## 为什么要带字段名
+
+    提示词点名禁写的正是 `priority_order`（`body_type` / `energy_type` / `budget`），
+    那是最该被看见的越界；若只落一串扁平的值，四字段共用一份配额，
+    某个字段刷屏就能把其它字段的越界**完全遮蔽**（实测 `pain_points` 给 30 个重复
+    值就能吃光配额、让 `priority_order` 的越界不可见）。
+
+    ## 为什么要去重
+
+    配额有限，重复值占满配额毫无信息量。同一 `(field, value, reason)` 只记一次。
+
+    ## 为什么封顶
+
+    模型可能吐出整段散文，日志必须封顶：条数防「一条消息刷屏」，
+    单条截断防「一条撑爆日志行」。两者相加给出总字符预算的上界。
+    """
+    if illegal_out is None or len(illegal_out) >= _ILLEGAL_MAX:
+        return
+    text = value if isinstance(value, str) else repr(value)
+    entry = {"field": field, "reason": reason, "value": text[:_ILLEGAL_ITEM_MAX]}
+    if any(
+        e["field"] == entry["field"]
+        and e["reason"] == entry["reason"]
+        and e["value"] == entry["value"]
+        for e in illegal_out
+    ):
+        return
+    illegal_out.append(entry)
+
+
+def _pick_value(
+    raw: Any,
+    allowed: set[str],
+    message: str,
+    illegal_out: list[dict[str, Any]] | None = None,
+    field: str = "",
+) -> str | None:
+    """单值的校验：值在词表内 **且** 证据是原话子串。二者缺一即丢。
+
+    ## `illegal_out`（2026-10-04 新增）：记录**封闭失效**
+
+    丢字段有三种**完全不同**的原因，混在一起就看不出模型到底在犯什么错：
+
+    | 原因 | 含义 | 记为 illegal？ |
+    | --- | --- | --- |
+    | 值是字符串但不在封闭词表内 | 「输出空间被 schema 封闭」正在失效 | `out_of_enum` |
+    | 值不是字符串（如 `household_size` 给了 `3`） | 同上，类型侧失守 | `bad_type` |
+    | 值合法但 evidence 不是用户原话子串 | 第二道防线在正常工作 | ❌ **不记** |
+
+    过去三者都被静默丢弃，于是**越界率在运行时根本测不出来**
+    （`tools/eval_soft_prefs.py` 统计的是 sanitize 后的输出，恒为 0，是构造性的）。
+    故在这里把它们单独收集，交给 `log_shadow` 落盘。
+
+    `illegal_out` 是可选出参：不传就保持原行为（丢弃，不记录），
+    故既有调用方与既有测试**结果逐位不变**。
+    """
     if not isinstance(raw, dict):
         return None
     value = raw.get("value")
-    if not isinstance(value, str) or value not in allowed:
+    if not isinstance(value, str):
+        # 类型失守也算封闭失效——只看「词表外字符串」会漏掉这类，
+        # 让「越界率恒为 0」在模型狂吐错类型时假绿。
+        _record_illegal(illegal_out, field, value, "bad_type")
+        return None
+    if value not in allowed:
+        _record_illegal(illegal_out, field, value, "out_of_enum")
         return None
     if not _evidence_ok(raw.get("evidence"), message):
         return None
     return value
 
 
-def _pick_list(raw: Any, allowed: set[str], message: str) -> list[str]:
+def _pick_list(
+    raw: Any,
+    allowed: set[str],
+    message: str,
+    illegal_out: list[dict[str, Any]] | None = None,
+    field: str = "",
+) -> list[str]:
     """列表字段的校验：逐项过 _pick_value，去重且保序。"""
     out: list[str] = []
     if not isinstance(raw, list):
         return out
     for item in raw:
-        v = _pick_value(item, allowed, message)
+        v = _pick_value(item, allowed, message, illegal_out, field)
         if v and v not in out:
             out.append(v)
     return out
 
 
-def sanitize(payload: Any, message: str) -> dict[str, Any]:
+def sanitize(
+    payload: Any,
+    message: str,
+    illegal_out: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """把 LLM 原始输出收敛成**只含已验证字段**的结构。
 
     逐字段丢，不整条作废——一个字段编造了不该连累另外三个。
+
+    `illegal_out` 为可选出参，收集被丢弃的**封闭失效**记录
+    （`out_of_enum` / `bad_type`，带字段名），见 `_pick_value`。
+    不传则清洗结果与加此参数前**逐位相同**。
     """
     if not isinstance(payload, dict):
         return {}
 
     out: dict[str, Any] = {}
-    usage = _pick_value(payload.get("usage_scenario"), set(usage_values()), message)
+    usage = _pick_value(
+        payload.get("usage_scenario"), set(usage_values()), message, illegal_out,
+        "usage_scenario",
+    )
     if usage:
         out["usage_scenario"] = usage
-    household = _pick_value(payload.get("household_size"), set(HOUSEHOLD_SIZES), message)
+    household = _pick_value(
+        payload.get("household_size"), set(HOUSEHOLD_SIZES), message, illegal_out,
+        "household_size",
+    )
     if household:
         out["household_size"] = household
-    pains = _pick_list(payload.get("pain_points"), set(pain_point_values()), message)
+    pains = _pick_list(
+        payload.get("pain_points"), set(pain_point_values()), message, illegal_out,
+        "pain_points",
+    )
     if pains:
         out["pain_points"] = pains
-    order = _pick_list(payload.get("priority_order"), set(dimension_keys()), message)
+    order = _pick_list(
+        payload.get("priority_order"), set(dimension_keys()), message, illegal_out,
+        "priority_order",
+    )
     if order:
         out["priority_order"] = order[:_PRIORITY_TAKE]
     return out
@@ -399,15 +505,57 @@ def response_content(resp: Any) -> str:
 
 
 # ── 调用与落画像 ────────────────────────────────────────────────────────────
+# `status` 的合法取值。写成常量而不是散落的字面量，是因为拼错（如 `no-reponse`）
+# 会让那条记录**既不进任何分母、也不报警**——判读时完全看不出有人写错了。
+STATUSES = ("no_response", "all_rejected", "ok", "unknown")
+
+
+def _set_status(status_out: list[str] | None, status: str) -> None:
+    """记录本轮 LLM 到底走到哪一步（可选出参）。
+
+    为什么必须有它：`prefs=None` 同时意味着「LLM 超时/异常/空内容」与
+    「响应了但字段全被校验拦下」。若 shadow 报告拿 `prefs=null` 的记录
+    也算进「没越界」，那么**一次大面积超时就会伪装成「越界率 0」**——
+    不是因为模型守规矩，而是因为它根本没被调用上。这是最典型的假绿灯。
+
+    三态：
+    - `no_response`：没调通（空消息 / 客户端不可用 / 超时 / 异常 / 空内容）
+    - `all_rejected`：调通了，但输出没通过任何字段校验
+    - `ok`：至少有一个字段通过
+    - `unknown`：调用方漏埋点，或埋了不止一次——**都按不可判定处理**
+
+    取值不在 `STATUSES` 内时记 error 日志并落 `unknown`：宁可不可判定，
+    也不要静默产出一个谁都看不懂的状态。
+    """
+    if status_out is None:
+        return
+    if status not in STATUSES:
+        _logger.error(
+            "soft_prefs 非法 status %r（合法值 %s），按 unknown 处理",
+            status, STATUSES,
+        )
+        status_out.append("unknown")
+        return
+    status_out.append(status)
+
+
 async def extract_soft_prefs(
     message: str,
     llm: Any | None = None,
     timeout_ms: int | None = None,
+    illegal_out: list[dict[str, Any]] | None = None,
+    status_out: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """调 LLM 抽取软偏好。**任何失败都返回 None**（调用方继续走纯正则）。"""
+    """调 LLM 抽取软偏好。**任何失败都返回 None**（调用方继续走纯正则）。
+
+    `illegal_out` 为可选出参：收集被丢弃的**封闭失效**记录（见 `_pick_value`）。
+    `status_out` 为可选出参：记录 `no_response` / `all_rejected` / `ok`。
+    不传则清洗结果与行为逐位不变。
+    """
     import asyncio
 
     if not (message or "").strip():
+        _set_status(status_out, "no_response")
         return None
     client = llm
     if client is None:
@@ -415,6 +563,7 @@ async def extract_soft_prefs(
 
         client = LLMClient()
     if not getattr(client, "available", False):
+        _set_status(status_out, "no_response")
         return None
 
     ms = int(timeout_ms) if timeout_ms else get_timeout_ms()
@@ -427,17 +576,43 @@ async def extract_soft_prefs(
         _logger.info(
             "soft_prefs LLM 调用失败（回退正则）：%s: %s", type(err).__name__, str(err)[:160]
         )
+        _set_status(status_out, "no_response")
         return None
 
     content = response_content(resp)
     if not content.strip():
         _logger.info("soft_prefs LLM 返回空内容（回退正则）")
+        _set_status(status_out, "no_response")
         return None
-    cleaned = sanitize(_loads_json_loose(content), message)
+    parsed = _loads_json_loose(content)
+    if not isinstance(parsed, dict):
+        # 响应根本不是 JSON 对象——这是第三类封闭失效（格式侧失守）。
+        # 不记的话，「越界率恒为 0」会在模型持续吐非 JSON 时**假绿**。
+        _record_illegal(illegal_out, "<response>", content, "bad_format")
+        _logger.info(
+            "soft_prefs 输出无任何字段通过校验（丢弃，回退正则）：illegal=%s %.200s",
+            illegal_out or [],
+            content,
+        )
+        _set_status(status_out, "all_rejected")
+        return None
+    cleaned = sanitize(parsed, message, illegal_out)
     if not cleaned:
-        # 落原始输出头部：没有它就只能猜是「模型编造被拦」还是「模型没输出」
-        _logger.info("soft_prefs 输出无任何字段通过校验（丢弃，回退正则）：%.200s", content)
+        # 落原始输出头部：没有它就只能猜是「模型编造被拦」还是「模型没输出」。
+        # illegal 单独列出，因为它区分「越界 / 类型失守」与「引文不是原话子串」
+        # ——两种拦截的含义完全不同，混在一起看不出模型到底在犯什么错。
+        _logger.info(
+            "soft_prefs 输出无任何字段通过校验（丢弃，回退正则）：illegal=%s %.200s",
+            illegal_out or [],
+            content,
+        )
+        _set_status(status_out, "all_rejected")
         return None
+    _set_status(status_out, "ok")
+    if illegal_out:
+        # 部分字段被丢弃、其余仍有效时，上面那行不会触发——补一条，
+        # 否则「部分越界」这个最常见的情形反而没有观测。
+        _logger.info("soft_prefs 丢弃封闭失效值（其余字段有效）：%s", illegal_out)
     return cleaned
 
 
@@ -526,21 +701,63 @@ async def run_if_enabled(profile: Any, message: str, llm: Any | None = None) -> 
     mode = get_mode()
     if mode == "off":
         return False
-    prefs = await extract_soft_prefs(message, llm=llm)
+    illegal: list[dict[str, Any]] = []
+    status: list[str] = []
+    prefs = await extract_soft_prefs(
+        message, llm=llm, illegal_out=illegal, status_out=status
+    )
     applied = False
     if mode == "llm" and prefs:
         applied = apply_soft_prefs(profile, prefs)
-    log_shadow(message, prefs, applied)
+    # 刻意**不做** `or "no_response"` 之类的兜底：那会把「这条路径忘了埋点」
+    # 悄悄变成 no_response，既掩盖漏埋点，又让测试永远绿。漏埋点必须显形。
+    #
+    # 且必须恰好**一条**：0 条 = 漏埋点，>1 条 = 重复埋点（将来有人在 `ok`
+    # 之后又补一次打点，`status[0]` 会静默取首个）。两种都按 unknown 处理。
+    final_status = status[0] if len(status) == 1 else "unknown"
+    log_shadow(message, prefs, applied, illegal, final_status)
     return applied
 
 
-def log_shadow(message: str, prefs: dict[str, Any] | None, applied: bool) -> None:
-    """shadow 模式落一行 JSON，供离线评测统计抽取质量（不落全量原文）。"""
+def log_shadow(
+    message: str,
+    prefs: dict[str, Any] | None,
+    applied: bool,
+    illegal: list[dict[str, Any]] | None = None,
+    status: str | None = None,
+) -> None:
+    """shadow 模式落一行 JSON，供离线评测统计抽取质量（不落全量原文）。
+
+    `illegal`（2026-10-04 新增）是**封闭失效**记录，每项形如
+    `{"field": ..., "reason": "out_of_enum"|"bad_type"|"bad_format", "value": ...}`。
+    它此前在 sanitize 里被静默丢弃，导致切流判据里的「越界率必须恒为 0」
+    在运行时**无从判定**——`eval_soft_prefs.py` 统计的是 sanitize 后的输出，
+    恒为 0，是构造性的。
+
+    `status`（同日新增）是本轮 LLM 走到哪一步：
+    `no_response` / `all_rejected` / `ok`，外加一个显式的 **`unknown`**。
+    **没有它，越界率会假绿**：`prefs=None` 同时意味着「超时」与「全被拦」，
+    若把超时记录也算进「没越界」，一次大面积超时就会让越界率显示为 0——
+    不是因为模型守规矩，而是因为它根本没被调用上。
+
+    `unknown` 表示**这条路径没有埋点**（正常流程不该出现）。它宁可被下游算作
+    「不可判定」也不要猜成 `no_response`——猜对了看不出漏埋点，猜错了直接假绿。
+
+    封顶在 `_ILLEGAL_MAX` / `_ILLEGAL_ITEM_MAX`（见模块常量），防模型吐整段散文。
+
+    注意口径：加此字段后 **shadow 日志行多了字段**，清洗结果与对画像的
+    行为**逐位不变**（`illegal_out` / `status_out` 不传时不收集、不记录）；
+    全仓当前无消费者（`shadow_report.py` 只解析 `app.agent.router.shadow`，
+    不碰这个 logger）。
+    """
     _logger.info(
-        '{"logger": %s, "version": %s, "mode_applied": %s, "prefs": %s, "message_head": %s}',
+        '{"logger": %s, "version": %s, "mode_applied": %s, "status": %s, '
+        '"illegal": %s, "prefs": %s, "message_head": %s}',
         json.dumps(SHADOW_LOGGER, ensure_ascii=False),
         json.dumps(SOFT_PREF_VERSION),
         json.dumps(applied),
+        json.dumps(status or "unknown"),
+        json.dumps(illegal or [], ensure_ascii=False),
         json.dumps(prefs, ensure_ascii=False) if prefs else "null",
         json.dumps((message or "")[:60], ensure_ascii=False),
     )
