@@ -122,6 +122,75 @@ def _portable_anchors(db, questions: list[dict]) -> tuple[list[dict], dict]:
     return questions, stats
 
 
+def _anchor_text_conflicts(
+    db, questions: list[dict], variant_series: dict[int, int]
+) -> list[dict]:
+    """找出「问句里明确写了车系名，但锚点指向**别的**车系」的题——语料自身的矛盾。
+
+    ## 为什么要有这个检查
+
+    `_portable_anchors` 的判据 1 是「id 在本库存在**且其名称出现在问句里**→
+    信任 id」。但像「2024款 2.0T 四驱旗舰版」这种**通用款型名跨车系重名**，
+    于是语料里那条属于**别的车系**的 id 也「看起来对得上」，被原样信任——
+    判据 1 发现不了这类错位。
+
+    实测命中（2026-10-04）：「英菲尼迪QX60 的 2024款 2.0T 四驱旗舰版 和 …」
+    问句明写 QX60，锚点却指向「红旗HQ9 PHEV」。
+
+    ## 为什么要紧
+
+    这类题**同时**污染两个方向：
+    - 指标侧：`pair_coverage` 等按锚点判定的指标被压低；
+    - 修复侧：任何以锚点为准的补召回机制（`_balance_by_series` /
+      `_ensure_anchor_coverage`）都会**插入错误车系的切片**并挤掉正确侧——
+      那正是它们实测让 pair-coverage 0.439 → 0.4146 → 0.3902 的原因。
+
+    ## 只报告，不改判据
+
+    改锚点重解析口径会让**全部历史基线**失效（README 与 EVAL_LOG 的数字），
+    那是人的决定。这里只把它**暴露出来**，让看报告的人先看见问题。
+    """
+    names = [
+        (int(s.id), str(s.name))
+        for s in db.scalars(select(VehicleSeries))
+        if s.name and len(str(s.name)) >= 2
+    ]
+    conflicts: list[dict] = []
+    for q in questions:
+        text = q.get("text") or ""
+        anchors = q.get("anchors") or {}
+        want: set[int] = set()
+        if anchors.get("series_id"):
+            want.add(int(anchors["series_id"]))
+        for vid in anchors.get("variant_ids") or []:
+            sid = variant_series.get(int(vid))
+            if sid:
+                want.add(int(sid))
+        if not want:
+            continue
+        # 问句里**字面出现**的本库车系名。
+        # 只保留**极大**名称：像「岚图 岚图追光 L」「坦克 坦克300L新能源」这种
+        # 品牌+车系的拼接，短名是长名的子串，两个都会命中——不去重就会把
+        # 「问句其实只提了一个车系」误报成矛盾（实测一度报出 38 条，全是这类）。
+        matched = [(sid, name) for sid, name in names if name in text]
+        maximal = [
+            (sid, name)
+            for sid, name in matched
+            if not any(name != other and name in other for _, other in matched)
+        ]
+        in_text = {sid for sid, _ in maximal}
+        if not in_text or in_text == want:
+            continue
+        conflicts.append({
+            "id": q.get("id"),
+            "text": text,
+            "anchor_series": sorted(want),
+            "text_series": sorted(in_text),
+            "partial": bool(in_text & want),
+        })
+    return conflicts
+
+
 def _relevant_ids(q: dict, variant_series: dict[int, int]) -> set[int]:
     """问题的相关车系集合（anchors 即黄金判定）。"""
     anchors = q.get("anchors") or {}
@@ -470,6 +539,22 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"锚点已按车系名重解析：{anchor_stats['remapped']} 处（语料 id 与本库行号不一致，"
                 f"原 id {anchor_stats['sample_old']}→{anchor_stats['sample_new']}）"
+            )
+        conflicts = _anchor_text_conflicts(db, questions, variant_series)
+        if conflicts:
+            print(
+                "\n" + "!" * 72 + "\n"
+                f"警告：{len(conflicts)} 道题的**问句与锚点自相矛盾**——"
+                "问句里明确写了某个车系名，锚点却指向另一个车系。\n"
+                "这类题**不是检索的问题**：`pair_coverage` 等按锚点判定的指标会被压低，"
+                "而任何以锚点为准的补召回机制都会插入错误车系的切片。\n"
+                "样例："
+                + "；".join(
+                    f"[{c['id']}] {c['text'][:28]}…" for c in conflicts[:3]
+                )
+                + "\n处置：本工具**只报告不改判据**（改口径会让全部历史基线失效，"
+                  "须由人决定）。修复请重跑 tools/gen_eval_questions.py 针对本库生成语料。"
+                + "\n" + "!" * 72 + "\n"
             )
         if anchor_stats["stale_ratio"] > 0.5:
             print(
