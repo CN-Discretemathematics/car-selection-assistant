@@ -680,11 +680,27 @@ def recommendation_tool(
     # 2. 差距小于 _TRADEOFF_GAP 一律不说——0.01 的落后不是取舍，是噪声。
     #
     # 文案不含数字：回答契约会校验正文数字必须可溯源，引入分数会把契约搞复杂。
+    #
+    # ⚠️ 对照集只取**用户明确提过的维度**（2026-10-05 用户实测反馈修正）。
+    # 此前是 `if d in weights`，而 `weights` = `{**DEFAULT_WEIGHTS, **profile.weights}`
+    # 含**全部 8 个默认维度**——于是无论用户说什么，取舍叙事都会拿全维度对照：
+    # 用户说「我最看重动力」，推荐里照样出现「注意妥协项：空间不及本批最优候选」。
+    #
+    # 那不是编造（空间数据是真的、差距也是真的），但是**不相关的噪音**：
+    # 把用户没提的维度摆出来，等于替用户决定他该在意什么。实测复现：
+    # `weights={'power': 0.5}` 的画像，eπ007 报出
+    # `['空间不及本批最优候选', '维护便利性不及本批最优候选']`——两个他都没提。
+    #
+    # `profile.weights` 的唯一来源是 `merge_profile` 从 `extract_hints` 累积的
+    # 用户原话（「最看重动力」等），所以它就是「用户明确提过」的可靠来源。
+    # 一个维度都没提 → 整段取舍不出现（而不是列举全部 8 维的差距）。
+    user_dims = {d for d in (profile.weights or {}) if d in weights}
     best_by_dim: dict[str, float] = {}
-    for _score, item in scored:
-        for d in item["_measured"]:
-            if d in weights:
-                best_by_dim[d] = max(best_by_dim.get(d, 0.0), item["_dims"][d])
+    if user_dims:
+        for _score, item in scored:
+            for d in item["_measured"]:
+                if d in user_dims:
+                    best_by_dim[d] = max(best_by_dim.get(d, 0.0), item["_dims"][d])
 
     for _score, item in scored:
         item["tradeoffs"] = _tradeoff_gaps(item["_dims"], item["_measured"], best_by_dim)

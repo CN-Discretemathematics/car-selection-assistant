@@ -65,11 +65,14 @@ def test_agent_clarification_flow(client: TestClient, db_session: Session):
 
     first = _send(client, session_id, "我想买台车")
     assert first["need_clarification"] is True
-    assert "预算" in first["clarification"]["question"]
+    # 断言「问的是哪一项」用结构字段 `missing`，不用措辞：
+    # 2026-10-05 改过追问文案（回执用户已说过的侧重 + 一次性告知还差什么），
+    # 措辞会变、`missing` 不会。后者才是这条用例真正要守的东西。
+    assert first["clarification"]["missing"] == ["budget"]
 
     second = _send(client, session_id, "预算12万")
     assert second["need_clarification"] is True
-    assert "用途" in second["clarification"]["question"]
+    assert second["clarification"]["missing"] == ["usage"]
 
     third = _send(client, session_id, "平时上下班通勤，两个人")
     assert third["need_clarification"] is False
@@ -423,7 +426,9 @@ def test_family_usage_hides_solo_passenger_option(client: TestClient, db_session
     assert _send(client, session_id, "10万以内")["need_clarification"] is True  # 追问用途
     out = _send(client, session_id, "家庭出行")
     assert out["need_clarification"] is True
-    assert "几个人乘坐" in out["clarification"]["question"]
+    # 同上：守「问的是人数」而不是问句措辞（2026-10-05 文案由「平时一般几个人乘坐？」
+    # 改为「平时几个人坐？」）
+    assert out["clarification"]["missing"] == ["passengers"]
     assert "1~2人" not in out["clarification"]["options"]
     assert out["clarification"]["options"] == ["3~5人", "5人以上"]
 

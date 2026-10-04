@@ -72,6 +72,7 @@ from app.agent.series_qa import (
 )
 from app.agent.session import SessionStore, get_session_store
 from app.agent.tools import (
+    _DIM_LABELS,
     DEFAULT_WEIGHTS,
     TOOL_SCHEMAS,
     WEIGHT_CEILING,
@@ -712,23 +713,67 @@ def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
     return profile
 
 
+def _priority_phrase(profile: UserProfile) -> str:
+    """把用户**已经说过**的侧重维度拼成一句自然话，供追问文案回执。
+
+    用户说「我最看重动力」之后，下一句却是「为了帮你挑到合适的车，先问一下：
+    购车预算大概是多少？」——**他刚说的话一个字都没被回应**，
+    看起来就像「说了没用」，于是「生硬」。
+
+    只用 `profile.weights`（来源只有 `merge_profile` 从 `extract_hints` 累积的
+    用户原话），不猜、不补：没说过就返回空串。
+    """
+    labels = [_DIM_LABELS[d] for d in (profile.weights or {}) if d in _DIM_LABELS]
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return f"{labels[0]}优先，"
+    return "、".join(labels) + "优先，"
+
+
+def _pending_phrase(profile: UserProfile, exclude: str = "") -> str:
+    """一次性告知**除当前问题外**还差哪些，避免用户以为要被一轮一轮盘问。
+
+    排除当前项：主问题已经问预算了，待补清单里再列一遍「预算」是笨拙的重复。
+    """
+    pending = []
+    if exclude != "budget" and profile.budget.min is None and profile.budget.max is None:
+        pending.append("预算")
+    if exclude != "usage" and not profile.usage:
+        pending.append("主要用途")
+    if exclude != "passengers" and profile.passengers is None:
+        pending.append("乘坐人数")
+    if len(pending) <= 1:
+        return ""
+    return "（" + "、".join(pending) + "也一起说一下，我一次排完）"
+
+
 def next_clarification(profile: UserProfile) -> Clarification | None:
-    """最小化追问策略：一次只问一个关键问题（12.2/13）。"""
+    """最小化追问策略：一次只问一个关键问题（12.2/13）。
+
+    文案上做两件事（2026-10-05 用户实测反馈「追问太生硬」）：
+    1. **回执已说过的侧重维度**——「动力优先」四个字先说出来，用户才知道
+       自己的话被用上了，而不是被丢在一边；
+    2. **一次性告知还差什么**——否则「先问一下预算 / 再问一下用途」像盘问。
+    """
     if profile.budget.min is None and profile.budget.max is None:
         return Clarification(
-            question="为了帮你挑到合适的车，先问一下：购车预算大概是多少？",
+            question=f"{_priority_phrase(profile)}预算大概多少？"
+            f"{_pending_phrase(profile, 'budget')}",
             options=_budget_options(profile),
             missing=["budget"],
         )
     if not profile.usage:
         return Clarification(
-            question="这辆车的主要用途是什么呢？",
+            question=f"{_priority_phrase(profile)}这辆车主要用来跑什么？"
+            f"{_pending_phrase(profile, 'usage')}",
             options=["上下班通勤", "家庭出行", "长途自驾", "商务接待"],
             missing=["usage"],
         )
     if profile.passengers is None:
         return Clarification(
-            question="平时一般几个人乘坐？",
+            question=f"{_priority_phrase(profile)}平时几个人坐？"
+            f"{_pending_phrase(profile, 'passengers')}",
             options=_passenger_options(profile),
             missing=["passengers"],
         )

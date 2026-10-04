@@ -65,7 +65,10 @@ def _seed(db: Session) -> dict[str, int]:
 @pytest.fixture()
 def tradeoffs(db_session: Session):
     ids = _seed(db_session)
-    profile = UserProfile(budget=Budget(min=100000, max=200000))
+    # ⚠️ 必须显式给出侧重维度：2026-10-05 起取舍**只谈用户提过的维度**
+    # （生产实测「说了动力却报空间」）。不设 weights 的话 tradeoffs 恒为空，
+    # 下面「弱动车的动力劣势必须报出来」与「判据非空转」两条都会**空过**。
+    profile = UserProfile(budget=Budget(min=100000, max=200000), weights={"power": 0.5})
     res = recommendation_tool(db_session, profile, limit=10, include_dims=True)
     by_name = {v["series_name"]: v for v in res["variants"]}
     return by_name, profile, res, ids
