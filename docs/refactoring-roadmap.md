@@ -251,8 +251,8 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 
 | # | 位置 | 问题 | 触发条件 | 影响 |
 | --- | --- | --- | --- | --- |
-| **C1** | `backend/tools/fetch_autohome_sku.py:546` | `stage_sku` **无条件 `return 0`** | `--stage sku` 全部抓取失败 | 退出码报成功，cron 链路绿灯放行。**同一函数 `:532` 的注释刚记录了「抓到 0 款型不得记为完成」的事故教训，退出码却没修** |
-| **C2** | `backend/app/agent/engine.py:777` | `UserProfile(**...)` 无 `try` | 存量 profile 校验失败（类型变更/脏值/半写） | 该 session 后续**每次请求恒 500 且不自愈**，仅 `/reset` 可恢复。**schema 变更 = 部署时批量 500** |
+| **C1** | `backend/tools/fetch_autohome_sku.py` 的 `stage_sku`（`return` 在 `:557`） | `stage_sku` **无条件 `return 0`** | `--stage sku` 全部抓取失败 | ✅ **已修（2026-10-02）**：`return 1 if stage_failures else 0`，且只按**本轮 pending** 统计（`cp["failures"]` 是 series/sku 两阶段共享且 sku 阶段从不清除外来条目，直接用它会让「重试到 0」的收敛循环永远退出 1） |
+| **C2** | `backend/app/agent/engine.py` 的 `_load_profile`（`:738` 起） | `UserProfile(**...)` 无 `try` | 存量 profile 校验失败（类型变更/脏值/半写） | ✅ **已修（2026-10-02）**：捕获 `ValidationError` **与 `TypeError`**（`raw` 根本不是映射时 `**raw` 抛的是后者），丢弃脏画像按空画像重播种，并**回写 store**（否则下一轮还会读到同一份脏数据、每轮都走重建分支），记 error 级日志 |
 
 ### High
 
@@ -267,6 +267,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | H7 | `web/app/compare/page.tsx:49,63,126,160` | 4 请求串行瀑布；后端每次查看执行**两次** `analyze_comparison` |
 | H8 | `web/app/ops/rag/page.tsx:296-311` | ⚠️ **已修，但审计描述的机制是错的**（2026-10-03）：unmount 清理函数**本来就在**，「重复点击留孤儿 interval」也**不可达**（按钮在 `busy` 期间 disabled）。真实泄漏是**竞态**——点 dense 重建后立刻离开页面，清理跑完时 interval 还没被创建（它要等 `runReindex` 的网络往返 resolve），续段随后照样 setInterval，再无人清理，每 2.5s 打一次后端。已加 `mountedRef` 守卫三处（await 之后 / 轮询回调首行 / 创建前清旧） |
 | H9 | `web/app/ops/rag/page.tsx:245,617` | ✅ **已修**（2026-10-03，与审计一致）：3/4 个 tab 失败后永久「加载中…」、无重试入口。已抽 `useAsyncData` + `LoadError`（含重试按钮）统一 4 个 tab；5 例源码级契约测试钉住，并**反向验证过会红** |
+| H10 | `backend/app/rag/pipeline.py` 的 `_hyde_text` | ✅ **已修**（2026-10-04）：「50 字内、只要参数键值、不要解释不要列表」的**窄任务**没关思考链，而端点默认 `enabled + effort=high`；且用 `asyncio.run` **同步阻塞**在检索流水线里。真机对拍延迟中位 5308ms → 798ms |
 
 ### Medium / Low
 
@@ -289,7 +290,20 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `web/lib/auth.ts:5-13` + `favorites/page.tsx:13` | ✅ **已修**（2026-10-03）：`getToken` 只有 SSR 守卫无 try/catch（无痕模式 `getItem` 抛异常，而调用方在 **render 期**调它，一抛整页渲染失败）；且 lazy `useState(() => getToken())` 在首渲执行 → 服务端 null / 客户端真 token 的 **hydration 不一致**，且值被冻结、token 变了本页不知道。改到 effect 读 + `tokenReady` 区分「还没读」与「确实没登录」 |
 | `web/app/components/Pagination.tsx:65,79,90,99` | ✅ **已修一半（2026-10-03）**：3 处裸 `<a href>` 已换 `next/link`（翻页不再整页重载），禁用态改 `<span>`（`Link` 的 `href` 必填，且无 href 的 `<a>` 观感上仍像可点）。⚠️ `<form method="get">` **刻意保留**：原生 GET 不依赖 JS 即可工作（渐进增强），隐藏域已把筛选参数带过去；改成 `router.push` 需加客户端边界并手工重建 query 串，那才是会真丢筛选的地方。理由写在源码里并由测试守住 |
 
-**修复顺序**（先易后难、先安全后性能）：C1 → C2 → H5 → H3 → H1 → H6 → M 项 → H2/H4（性能，需评测兜底）。
+**修复顺序**（先易后难、先安全后性能）：C1 → C2 → H5 → H3 → H1 → H6 → H10 → M 项 → H2/H4（性能，需评测兜底）。
+C1/C2/H10 已于 2026-10-02 / 2026-10-04 完成。
+
+**H10 的两条诚实声明（2026-10-04 实测，务必别当成「性能优化已上线」）**：
+
+1. **对当前生产零影响**。`RETRIEVAL_HYDE` 默认关（`HYDE_ENABLED`），该路径今天**不执行**；
+   且它 2026-09-09 已做过 A/B（E24/E25），六项指标与基线**逐位相同、无增益故被否决**
+   （`eval/EVAL_LOG.md`）——它默认关是**决策**，不是遗漏。
+2. **「thinking 只影响延迟不改输出」这个假设不成立**。本机真机对拍（8 条真实购车问句）：
+   响应带 `reasoning_content` 的比例 **改前 8/8 → 改后 0/8**，延迟中位 **5308ms → 798ms**，
+   但**输出文本逐字一致 0/8**。任何拿「输出不变」当验收条件的做法在本仓库都站不住。
+
+   敢改的依据是：HyDE 的产物是**向量召回的助写文本**，不是给用户看的答案，两边都在编数字
+   （如「本田思域 落地价约15万」自相矛盾），数字准确性本就不是它的职责。
 
 **H3 的一个陷阱（本轮实测得出，务必先读）**：
 「`async def` 内裸调同步 Session」不能按调用点机械替换。AST 扫出 11 处，其中多数是
