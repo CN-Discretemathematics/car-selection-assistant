@@ -349,6 +349,29 @@ def _hyde_text(state: RagState) -> str | None:
 
     在流水线线程（无事件循环）里同步调用；LLM 未配置/任何失败返回 None，
     调用方静默回退原查询——HyDE 失败绝不阻断检索（原则 7）。
+
+    ## 必须关闭思考链（2026-10-04）
+
+    这是一个「50 字内、只要参数键值、明确不要解释不要列表」的**窄任务**，
+    与 `soft_prefs` / `llm_router` 那两个 `json_mode` 抽取调用同类；
+    而端点默认是 `enabled + effort=high`，即一个窄任务在跑深度思考。
+    更糟的是本函数用 `asyncio.run` **同步阻塞**在检索流水线里。
+
+    本机真机对拍（8 条真实购车问句）：
+
+    | | 改前（不传） | 改后（disabled） |
+    | --- | --- | --- |
+    | 响应出现 `reasoning_content` | **8/8** | 0/8 |
+    | 延迟中位 | **5308ms** | **798ms** |
+
+    ⚠️ **输出文本逐字一致 0/8**——「thinking 只影响延迟不改输出」这一假设**不成立**，
+    本仓库不应再拿它当验收条件。
+
+    **为什么敢改**：HyDE 走的是向量召回的助写文本，不是给用户看的答案，
+    两边都在编数字（如「本田思域 落地价约15万」自相矛盾），数字准确性不是它的职责；
+    而 `RETRIEVAL_HYDE` 默认关（见 `HYDE_ENABLED`），本改动对**当前生产零影响**。
+    另：该路径 2026-09-09 已做过 A/B（E24/E25），六项指标与基线逐位相同、
+    **无增益故被否决**——它默认关是决策，不是遗漏。
     """
     try:
         import asyncio
@@ -364,7 +387,11 @@ def _hyde_text(state: RagState) -> str | None:
             f"用户问题：{state.get('query') or ''}"
         )
         reply = asyncio.run(
-            client.chat([{"role": "user", "content": prompt}], temperature=0.1)
+            client.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.1,
+                thinking="disabled",
+            )
         )
         text = ""
         if isinstance(reply, dict):
