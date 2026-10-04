@@ -87,3 +87,18 @@ def test_key_cap_is_pinned_to_eight():
 def test_value_cap_is_pinned_to_two():
     """`_PROBE_VALUE_MAX = 2` 同理：N6 的披露文案直接依赖它。"""
     assert _PROBE_VALUE_MAX == 2
+
+
+def test_no_bare_disclosure_line_when_nothing_rendered():
+    """审查遗留项：渲染行数为 0 时**不得只剩披露行**。
+
+    前 N 个命中键取值全为无信息量值（暂无/-/--/未知）时，渲染循环会全部 continue，
+    只剩披露行，上游拼成「你问到的相关参数：（另有 1 个相关参数未列出）。」
+    ——声称「你问到的参数」却一条都没列。
+    审查实测全库 877 车系 × 8 组提问命中 0 次（非生产可达），
+    但这句话在任何产品口径下都不通，故按决策无关兜底修掉。
+    """
+    facts = [(f"电池相关键{i}", "-", None, None) for i in range(8)]
+    facts.append(("电池真值键", "50", "kWh", None))
+    out = probe_facts(facts, "电池")
+    assert out == [], f"零渲染行时不应只剩披露行：{out}"

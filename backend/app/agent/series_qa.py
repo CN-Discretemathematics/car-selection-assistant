@@ -269,7 +269,12 @@ def probe_facts(
         else:
             suffix = ""
         lines.append(f"{key} = {' / '.join(rendered)}{suffix}")
-    if len(matched_keys) > len(shown_keys):
+    # 2026-10-05（PR #66 审查遗留）：**渲染行数为 0 时不得只留披露行**。
+    # 前 N 个命中键的取值全是无信息量值（暂无/-/--/未知）时，循环会全部 `continue`，
+    # 只剩披露行，上游拼成「你问到的相关参数：（另有 1 个相关参数未列出）。」
+    # ——声称「你问到的参数」却一条都没列。审查实测全库 877 车系 × 8 组提问命中 0 次
+    # （非生产可达），但这句话在任何产品口径下都不通，属**决策无关**的兜底。
+    if lines and len(matched_keys) > len(shown_keys):
         # 同理：命中了但没展示的键也要说，否则用户以为那就是全部相关参数
         lines.append(f"（另有 {len(matched_keys) - len(shown_keys)} 个相关参数未列出）")
     return lines
