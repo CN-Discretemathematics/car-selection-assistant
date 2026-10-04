@@ -283,6 +283,37 @@ def gate_allow_reason(sha: str) -> str | None:
     return m.group(0).strip() if m else None
 
 
+def check_base_freshness() -> tuple[bool, str]:
+    """本分支的基线是否落后 `origin/main`。
+
+    返回 `(stale, detail)`：
+    - `stale=True`  → 有 main 上的提交本分支没有，**必须先 rebase**；
+    - `stale=False` → 基线已是最新（detail 给出双方各领先几笔，便于判断）。
+
+    ## 刻意用「数量」而不是「是否可合并」
+
+    「能不能干净合并」要先跑一次 merge 才知道，又慢又会改工作区；这里只问
+    「main 有我没有的提交吗」——`git rev-list HEAD..origin/main` 一行搞定。
+    落后不一定冲突，但**落后就意味着评审要在冲突 diff 上做**，并行开发下
+    冲突是必然的，所以一律要求先 rebase。
+
+    ## 拿不到 origin/main 时放行
+
+    离线 / 无远端时不该把开发卡死；此时返回 `(False, "无法比较 origin/main，跳过")`。
+    """
+    try:
+        behind = run_git("rev-list", "--count", "HEAD..origin/main").split()
+        ahead = run_git("rev-list", "--count", "origin/main..HEAD").split()
+    except RuntimeError:
+        return False, "无法比较 origin/main（离线或无该远端引用），跳过基线新鲜度检查"
+    if not behind or not ahead:
+        return False, "无法比较 origin/main，跳过"
+    n_behind, n_ahead = behind[0], ahead[0]
+    if n_behind == "0":
+        return False, f"基线最新（本分支领先 main {n_ahead} 笔）"
+    return True, f"origin/main 领先 {n_behind} 笔，本分支领先 {n_ahead} 笔"
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -373,6 +404,26 @@ def main() -> int:
     print("\n".join(rows))
     for w in warnings:
         print(f"[pre-push-guard][WARN] {w}")
+
+    # R5 基线新鲜度（2026-10-05 用户定规，见 AGENTS.md「推送前必须确认 base 是最新的
+    # origin/main」）。**范围级**检查，不按提交豁免——它跟某笔提交写得好不好无关。
+    #
+    # 为什么必须机械拦：并行会话下「我以为我 rebase 了」是不可靠的。实测两次踩坑：
+    #  - #60 未 rebase 就推 → GitHub 报 mergeable_state=dirty，评审打开就是冲突；
+    #  - #56/#57 的 base 设成别的分支 → 显示 merged 但内容压根没进 main。
+    # 光在文档里写「记得先 rebase」，每晚都靠人脑记，迟早再犯。
+    stale, stale_detail = check_base_freshness()
+    if stale:
+        print(
+            "[pre-push-guard] R5 本分支落后 origin/main，先 rebase 再推：\n"
+            "   " + stale_detail + "\n"
+            "   git rebase origin/main\n"
+            "   （rebase 后 README 等共享文件若冲突，取 main 侧，"
+            "再用 python skills/doc_sync_check.py --fix 重算计数，**不要沿用旧数字**）"
+        )
+        return 1
+    if stale_detail:
+        print(f"[pre-push-guard] 基线新鲜度：{stale_detail}")
 
     # 逐提交判定：有失败的提交，**各自**决定是被自己的 trailer 豁免、还是拦截。
     # 关键：一笔的豁免**不再**顺带放行其它提交的越界。
