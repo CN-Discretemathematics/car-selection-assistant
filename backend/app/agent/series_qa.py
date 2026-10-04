@@ -70,6 +70,9 @@ _PARAM_PROBES: tuple[tuple[str, str], ...] = (
 _PROBE_SKIP_KEYS = {"优惠信息"}
 _PROBE_SKIP_VALUES = {"暂无", "-", "--", "未知"}
 _PROBE_MAX_KEYS = 8
+# 同一事实键跨款型的去重取值最多展示几个（2026-10-05 由魔法数 2 提为具名常量：
+# N6 正是「只列前 2 个」把头条那个值切掉了，截断披露也依赖这个数）。
+_PROBE_VALUE_MAX = 2
 
 # 探针维度 → 用户可读名（v3 不可回答题诚实性标注：问了但 DB 完全没有的维度，
 # 必须显式回答「官方资料未披露」——评测 v3 拒答判定 0/60 通过暴露的缺失）
@@ -239,19 +242,36 @@ def probe_facts(
             entries.append(entry)
 
     lines: list[str] = []
-    for key in matched_keys[: _PROBE_MAX_KEYS]:
+    shown_keys = matched_keys[: _PROBE_MAX_KEYS]
+    for key in shown_keys:
         entries = values_by_key.get(key) or []
         if not entries:
             continue
         rendered: list[str] = []
-        for value, unit, cycle in entries[:2]:
+        for value, unit, cycle in entries[:_PROBE_VALUE_MAX]:
             value = _FEATURE_VALUE_LABEL.get(value, value)  # ● → 有（标配）、○ → 选装
             unit = unit or unit_from_key(key) or ""
             if unit and value.lower().endswith(unit.lower()):
                 unit = ""
             rendered.append(f"{value}{f' {unit}' if unit else ''}{f'（{cycle}）' if cycle else ''}")
-        suffix = "（不同款型存在差异）" if len(entries) > 1 else ""
+        # 2026-10-05（N6-A）：截断**必须披露**。
+        # 实拍原样（星愿，问「续航和电池容量分别是多少」）：
+        #   核心参数：… 续航 480 km（CLTC）；电池 47.14 kWh
+        #   你问到的相关参数：CLTC纯电续航里程(km) = 310 km（CLTC） / 410 km（CLTC）（不同款型存在差异）
+        # 库内实有 3 个续航档（310/410/480），`entries[:2]` 恰好把**头条那个 480** 切掉，
+        # 而旧文案只说「不同款型存在差异」——用户以为看到的就是全部。
+        # 这与本轮 P1-3（佐证被 `text[:60]` 腰斩成「级别 = 紧…」）是同一类缺陷：
+        # **截断了但没说截断**。这里补足「共几个、只列了几个」。
+        if len(entries) > _PROBE_VALUE_MAX:
+            suffix = f"（共 {len(entries)} 个取值，此处只列前 {_PROBE_VALUE_MAX} 个）"
+        elif len(entries) > 1:
+            suffix = "（不同款型存在差异）"
+        else:
+            suffix = ""
         lines.append(f"{key} = {' / '.join(rendered)}{suffix}")
+    if len(matched_keys) > len(shown_keys):
+        # 同理：命中了但没展示的键也要说，否则用户以为那就是全部相关参数
+        lines.append(f"（另有 {len(matched_keys) - len(shown_keys)} 个相关参数未列出）")
     return lines
 
 
