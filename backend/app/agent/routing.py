@@ -55,12 +55,36 @@ _CAR_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 _CAR_BUY_RE = re.compile(r"(?:买|购|选|提|试)[^。！？!?]{0,6}车")
-# 用户表达了偏好/强调（与 engine._EMPHASIS_RE 同一份词表，两处需同步）：
-# 「我最看重后排」「空间优先」「主要看油耗」——这是「你帮我挑」的信号，不是「怎么选」。
-_EMPHASIS_RE = re.compile(
-    r"(优先|最看重|比较看重|更看重|特别看重|最在意|比较在意|更在意|主要看|重点|"
-    r"看重|在乎|重视|希望)"
-)
+
+
+def _ranking_intent_skips_consultation(
+    hints: dict, resolved: list, profile: UserProfile
+) -> bool:
+    """用户表达了**可执行**的排序偏好，且没点名具体车系 → 咨询分支是错的去向。
+
+    ## 为什么用「hints 里有没有 weights」而不是「句子里有没有强调词」（2026-10-04）
+
+    第一、二版都用一份**自建**的强调词表做否决，出了两个问题：
+
+    - 词表与 `engine._EMPHASIS_RE` 是两份，靠注释约束同步 → 会漂移；
+    - 「我最看重**安全**」这类**算不出权重**的说法也会命中否决，于是被推去推荐链，
+      而 8 维里根本没有安全——用户首要诉求被**静默丢弃**。
+
+    `extract_hints` 已经算好了 `hints["weights"]`（= 强调词 ∧ 命中 `_WEIGHT_DIM_KEYWORDS`），
+    即「**这一轮真的产生了可执行的偏好**」。直接用它：
+
+    - 零第二份词表，也不需要词表包含关系断言；
+    - 算不出权重的强调（安全）自动不否决 → 回到正常咨询，诉求不被吞。
+
+    ## 为什么点名车系时不否决
+
+    已锁定/已点名的两款车，用户问「对比一下」时**对比才是对的**。第一版没看这个，
+    把「已锁定 2 车系 + 我最看重动力，对比一下这两款」从差异分析改成了全库重排，
+    等于丢掉了用户明确点名的对象（第二版 subagent 审查评为高危）。
+    """
+    if not hints.get("weights"):
+        return False
+    return not (resolved or profile.locked_series_ids)
 # 通用购车咨询（无画像时也给出有据可查的回答，而不是硬推“没预算的推荐”）
 _GENERAL_ADVICE_RE = re.compile(
     r"(哪个好|怎么选|如何选|怎么挑|区别|优缺点|值得买|推荐吗|怎么样|好不好|适合我|"
@@ -367,7 +391,16 @@ def decide_route(
         or bool(profile.usage)
         or profile.passengers is not None
     )
-    if asks_tool_assist(message) and car_context and not core_hint_keys and not profile_core:
+    if (
+        asks_tool_assist(message)
+        and car_context
+        and not core_hint_keys
+        and not profile_core
+        # 2026-10-04：用户表达了**可执行**的排序偏好时，本分支是错的去向。
+        # 「有哪些车推荐」问的是**一批车**，但既然说了看重什么，就该走推荐链按其加权，
+        # 而不是丢进工具循环给一段聊天回答。与规则 2 的 general_advice 否决同源。
+        and not _ranking_intent_skips_consultation(hints, resolved, profile)
+    ):
         return RouteDecision(
             intent="tool_loop",
             matched_rule="0.75:asks_tool_assist+car_context+no_core_constraints",
@@ -385,19 +418,24 @@ def decide_route(
     # 2) 通用购车咨询但还没有核心画像（「电动车和油车哪个好」）→ 有据可查的回答，
     #    不硬推「没有预算的推荐」
     #
-    # 2026-10-04 修：用户**表达了偏好/强调**时不得走 general_advice。
-    # 实测缺陷：「我比较看重动力，预算15万」「我比较看重空间，预算15万」首轮被判成
-    # general_advice —— 用户拿到一段聊天的回答，**一张推荐卡片都没有**。
-    # 根因是 `_GENERAL_ADVICE_RE` 里的裸 `比较` 命中了「比**较**看重」，
-    # 而本条的判据只看**已持久化的画像**（首轮必然为空），不看本条消息里的强调词。
+    # 2026-10-04 修：用户**表达了排序意图**时不得走 general_advice / tool_loop。
+    # 实测缺陷（生产口径，复刻 engine.respond 的顺序：先 merge_profile 再 decide_route）：
+    #   「我最看重动力，有哪些车推荐」 → tool_loop   → 0 张卡片
+    #   「我最看重动力，怎么选」       → general_advice → 0 张卡片
+    # 两者都表达「按这个来排」，却被两个「咨询类」分支分别抢走。
     #
-    # 「最看重/优先/主要看」这类词是「你帮我挑」的最强信号，与「怎么选？」正相反，
-    # 因此它应当**否决** general_advice。这里不 import engine（避免成环），
-    # 与 `engine._EMPHASIS_RE` 保持同一份词表。
+    # 根因：`比较/对比/有哪些/怎么样` 这些词是**问法**，没有区分「要对比」与
+    # 「要你替我挑」。而 `profile_core`（0.75 分支）刻意不含 body_type，
+    # `profile_has_core_constraints`（规则 2）虽含 body_type，但「我最看重动力」
+    # 这类句子根本不提车型——两边都判不出他在表达偏好。
+    #
+    # 修法：`_ranking_intent_skips_consultation`（本文件内定义，**零第二份词表**）
+    # 一处否决**两个**咨询分支；判据是「本轮真算出了可执行权重」而不是「句子里
+    # 出现了强调词」，因此「我最看重安全」这种算不出权重的说法**不会**被误推去推荐。
     if (
         asks_general_advice(message)
         and not profile_has_core_constraints(profile)
-        and not _EMPHASIS_RE.search(message)
+        and not _ranking_intent_skips_consultation(hints, resolved, profile)
     ):
         return RouteDecision(
             intent="general_advice",
@@ -466,6 +504,10 @@ def llm_intent_executable(
     if intent == "catalog_count":
         return not core_constraints and not resolved and not profile.brand_ids
     if intent == "tool_loop":
+        # 同 decide_route 的 0.75 分支：带排序意图时 tool_loop 是错的执行分支。
+        # （原先把否决写在这个 return **之后**，是死代码——LLM 改写照样能从这扇门进来。）
+        if _ranking_intent_skips_consultation(hints, resolved, profile):
+            return False
         car_context = bool(
             resolved
             or profile.brand_ids
@@ -478,12 +520,12 @@ def llm_intent_executable(
     if intent == "chitchat":
         return not has_car_intent(message) and not structured
     if intent == "general_advice":
-        # 与 decide_route 规则 2 保持**同一份**判据（含强调词否决），
+        # 与 decide_route 规则 2 保持**同一份**判据（含排序意图否决），
         # 否则一致性校验会和真实决策打架，出现「日志说通过、实际走了别的分支」。
         return (
             asks_general_advice(message)
             and not profile_has_core_constraints(profile)
-            and not _EMPHASIS_RE.search(message)
+            and not _ranking_intent_skips_consultation(hints, resolved, profile)
         )
     if intent == "recommendation":
         return True
