@@ -162,6 +162,26 @@ SCOPE_PATHS: dict[str, list[str]] = {
         "backend/app/common/",
         "backend/tests/test_database",
     ],
+    # 2026-10-05：以下两个 scope 此前未登记，导致相关提交只能靠内联
+    # `# gate-allow:` trailer 放行（连着两笔如此），把「例外机制」用成了常态。
+    # 登记它们的**前提**是不能在「改门禁的那笔提交里」顺手登记自己——
+    # 那正是「让被审判者改写评判自己的规则」（AGENTS.md 规则 6）。
+    # 故本登记单独成笔，由 R5 保证它落在最新 main 上。
+    #
+    # `gates`：门禁与提交纪律本身（含 AGENTS.md 的规则正文）。
+    "gates": [
+        "tools/pre-push-guard.py",
+        ".githooks/",
+        "backend/tests/test_pre_push_guard",
+        "AGENTS.md",
+    ],
+    # `eval`：评测工具与其用例（`tools/tools` 已覆盖 backend/tools/ 整体，
+    # 这里收窄到 eval_* 以便与抓取/导入脚本区分职责）。
+    "eval": [
+        "backend/tools/eval_",
+        "backend/eval/",
+        "backend/tests/test_eval_",
+    ],
 }
 
 # 中性路径：任何 scope 都允许触碰（跨切面的测试 / 文档 / CI / 根级工具）。
