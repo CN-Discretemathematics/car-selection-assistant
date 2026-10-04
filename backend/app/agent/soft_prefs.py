@@ -95,8 +95,9 @@ P90 1019ms / 最大 1656ms，见本文件 `DEFAULT_TIMEOUT_MS` 处注释；
 ### shadow → llm 的准入（缺一即不切）
 
 1. **整条记录完全一致率**不低于本节末尾记录的基线（注意：`eval_soft_prefs.py` 的
-   `exact` 判的是 `got == exp`，即**整条样本记录相等**，不是逐字段相等；
-   工具输出把它标成「逐字段完全一致」是误称，读数时别被误导）。
+   `exact` 判的是 `got == exp`，即**整条样本记录相等**，不是逐字段相等。
+   工具输出与 `sales-agent-proposal.md` 的表头曾写作「逐字段完全一致」，那是误称，
+   已一并订正——读数时按整条记录理解）。
    LLM 有采样波动，须**重复多轮**观察稳定性，不看单次值。
 2. **空偏好不编造率 = 100%**：regex 抽不到、LLM 也抽不到的那部分不得被模型编出来。
 3. **硬约束候选集逐位不变**（`tools/eval_softpref_ab.py` + `tests/soft_prefs_ab.jsonl`）。
@@ -183,7 +184,13 @@ _logger = logging.getLogger("app.agent.soft_prefs")
 
 # 偏好向量版本：随 shadow 记录落盘。改提示词或词表来源时必须递增——跨版本对拍数据
 # 靠它切分（同 llm_router.ROUTER_VERSION 的理由：换版本不复用旧缓存/旧数据）。
-SOFT_PREF_VERSION = "soft-pref-v1"
+#
+# **记录格式变更同样要递增**（2026-10-04：v1 → v2）。
+# v1 之后 shadow 行新增了 `illegal`（封闭失效）与 `status`（LLM 走到哪一步）两个字段。
+# 不递增的话，新旧记录**同版本号却缺字段**，`soft_prefs_report` 的跨版本切分形同虚设，
+# 旧记录会以「`illegal` 为空 = 没越界」的身份混进分母——那正是本仓反复强调要避免的
+# 「构造性的 0」。
+SOFT_PREF_VERSION = "soft-pref-v2"
 
 MODE_ENV = "AGENT_SOFT_PREF_MODE"
 TIMEOUT_ENV = "AGENT_SOFT_PREF_TIMEOUT_MS"
@@ -421,13 +428,14 @@ def _pick_value(
     | --- | --- | --- |
     | 值是字符串但不在封闭词表内 | 「输出空间被 schema 封闭」正在失效 | `out_of_enum` |
     | 值存在但不是字符串（如 `household_size` 给了 `3`） | 同上，类型侧失守 | `bad_type` |
-    | 条目/字段**形状**不对（该给数组给了标量等） | 同上，格式侧失守 | `bad_shape` |
-    | 顶层冒出 `body_type`/`energy_type`/`budget` | **风险最高**：SQL 硬约束，猜错会砍掉整个候选集 | `forbidden_field` |
-    | 顶层冒出其它表外键 | 模型说了 schema 之外的话 | `unknown_field`（**最后才记**，只填剩余配额） |
-    | 值是 `None` / 空串 | 模型「没答上来」 | ❌ **不记** |
+    | **值是 `None`（缺键或 JSON null）** | **模型「没答上来」，不是幻觉** | ❌ **不记** |
     | 值合法但 evidence 不是用户原话子串 | 第二道防线在正常工作 | ❌ **不记** |
 
-    过去七者都被静默丢弃，于是**越界率在运行时根本测不出来**
+    ⚠️ 第三行是踩出来的：金标 25 条实测一度报「越界率 132%」，**全部是 `None`**。
+    把「没填」算成「说出了词表外的东西」，会造出一个纯粹由度量 bug 产生的假警报——
+    比假绿更坏，因为它会让判据**永远不通过**，直到有人去查为止。
+
+    过去四者都被静默丢弃，于是**越界率在运行时根本测不出来**
     （`tools/eval_soft_prefs.py` 统计的是 sanitize 后的输出，恒为 0，是构造性的）。
     故在这里把它们单独收集，交给 `log_shadow` 落盘。
 
@@ -456,8 +464,7 @@ def _pick_value(
         # 但不该记。把它们混在一起会造出纯粹由度量 bug 产生的假警报：
         # 它比假绿更坏，因为会让判据**永远不通过**，直到有人去查为止。
         #
-        # 实测踩过两次（这里与 #58 各一次）：金标 25 条一度报出「越界率 132%」、
-        # 随后又报出「40 条 bad_shape」，**全部是 None**。
+        # 实测踩过：金标 25 条一度报「越界率 132%（33 条）」，**全部是 None**。
         return None
     if not isinstance(value, str):
         # 类型侧失守才算封闭失效（如 household_size 给了数字 3）。
