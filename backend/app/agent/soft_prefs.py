@@ -224,6 +224,14 @@ HOUSEHOLD_SIZES: dict[str, int] = {
 # 只取前两位：再多就成了「什么都重要」，等于没排序
 _PRIORITY_TAKE = 2
 
+#: L1 抽取的**全部**合法顶层字段。出现表外的键即封闭失效（见 `sanitize`）。
+FIELDS = ("usage_scenario", "household_size", "pain_points", "priority_order")
+
+#: 提示词**点名禁写**的硬约束键：它们直接下推 SQL `WHERE`，模型猜错会砍掉整个
+#: 候选集（见模块 docstring「刻意不做的事」第 1 条）。它们出现 = 模型在替用户
+#: 编造硬约束，是本模块**风险最高**的一类失效，此前却完全不可观测。
+FORBIDDEN_FIELDS = ("body_type", "energy_type", "budget")
+
 # 封闭失效记录落盘的封顶（2026-10-04）。模型可能吐出整段散文，日志必须封顶。
 # 条数封顶防「一条消息刷屏」，单条截断防「一条撑爆日志行」；两者相乘即**总字符
 # 预算上界**。取 6×24=144：约为既有 `message_head`（60 字）的 2.4 倍，够看出
@@ -382,6 +390,15 @@ def _record_illegal(
     """
     if illegal_out is None or len(illegal_out) >= _ILLEGAL_MAX:
         return
+    # 「没答上来」**不是**封闭失效——与 `_pick_value` / `_pick_list` 同一口径，
+    # 收在这里是因为本函数是所有登记路径的唯一入口。
+    #
+    # 这一条被漏掉过**四次**（每次都在不同位置）：值是 None、整个字段是 None、
+    # 列表字段是 None、顶层禁写键是 None。最后一次尤其荒唐：提示词明写
+    # 「不该抽的东西（**务必输出 null**）」，模型**照做**却被记成 `forbidden_field`
+    # ——判据里风险最高的一类，反而奖励了违规、惩罚了守法。
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return
     text = value if isinstance(value, str) else repr(value)
     entry = {"field": field, "reason": reason, "value": text[:_ILLEGAL_ITEM_MAX]}
     if any(
@@ -422,10 +439,23 @@ def _pick_value(
     （`tools/eval_soft_prefs.py` 统计的是 sanitize 后的输出，恒为 0，是构造性的）。
     故在这里把它们单独收集，交给 `log_shadow` 落盘。
 
+    > ⚠️ 「`None` 不算失效」这条被漏掉过**四次**，每次位置都不同。最荒唐的一次是
+    > 顶层 `body_type: null` 被记成 `forbidden_field`——而提示词明写
+    > 「不该抽的东西（**务必输出 null**）」：模型**照做**反被判成最高风险失效。
+    > 该豁免现统一收在 `_record_illegal` 入口，所有登记路径共用一条规则。
+
     `illegal_out` 是可选出参：不传就保持原行为（丢弃，不记录），
     故既有调用方与既有测试**结果逐位不变**。
     """
+    if raw is None:
+        # 「这个字段没填」**不是**形状失守。模型对多数句子只会答一两个字段，
+        # 其余给 `null` 是正常的「没答上来」。金标 25 条实测：40 条记录里
+        # 若把 null 记成 bad_shape，会凭空造出 40 条假警报——与 #57 那次同源。
+        return None
     if not isinstance(raw, dict):
+        # 整个条目不是 `{value, evidence}` 结构 = **形状失守**。
+        # 与「值不在词表」是两回事：前者是模型没按 schema 输出，后者是它编了个值。
+        _record_illegal(illegal_out, field, raw, "bad_shape")
         return None
     value = raw.get("value")
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -458,7 +488,12 @@ def _pick_list(
 ) -> list[str]:
     """列表字段的校验：逐项过 _pick_value，去重且保序。"""
     out: list[str] = []
+    if raw is None:
+        return out          # 「没填」，与 `_pick_value` 同一口径
     if not isinstance(raw, list):
+        # 该给数组却给了标量/对象（如 `pain_points: "续航"`）= 形状失守。
+        # 过去静默返回空列表，于是「模型把数组写成字符串」完全不可观测。
+        _record_illegal(illegal_out, field, raw, "bad_shape")
         return out
     for item in raw:
         v = _pick_value(item, allowed, message, illegal_out, field)
@@ -482,6 +517,22 @@ def sanitize(
     """
     if not isinstance(payload, dict):
         return {}
+
+    # 顶层多出来的键：禁写的硬约束键单独记（`forbidden_field`），
+    # 其余记 `unknown_field`。二者都是「模型说了 schema 之外的话」。
+    #
+    # 为什么单列：模块 docstring 判据第 2 条点名的正是
+    # 「不得凭空产出 body_type / energy_type / budget」——它们直接下推 SQL `WHERE`，
+    # 模型猜错会**砍掉整个候选集**。这是风险最高的一类失效，此前却因为
+    # `sanitize` 只「挑认识的字段」而完全不可观测。
+    #
+    # **顺序即优先级**：先记 forbidden，再走四个字段的校验，最后才让
+    # `unknown_field` 填剩余空位。否则模型多吐几个无关键就能把
+    # `forbidden_field` 与 `out_of_enum` 挤掉——最高风险的类别优先级最低，
+    # 是一条实打实的假绿（subagent 审查实测：6 个 unknown 键即可做到）。
+    for key in payload:
+        if key not in FIELDS and key in FORBIDDEN_FIELDS:
+            _record_illegal(illegal_out, str(key), payload[key], "forbidden_field")
 
     out: dict[str, Any] = {}
     usage = _pick_value(
@@ -508,6 +559,13 @@ def sanitize(
     )
     if order:
         out["priority_order"] = order[:_PRIORITY_TAKE]
+
+    # `unknown_field` 最后才记，且**只填剩余空位**：它信息量最低
+    # （模型多说一个无关键），却最容易把上面两类挤掉。
+    for key in payload:
+        if key in FIELDS or key in FORBIDDEN_FIELDS:
+            continue
+        _record_illegal(illegal_out, str(key), payload[key], "unknown_field")
     return out
 
 
@@ -749,7 +807,9 @@ def log_shadow(
     """shadow 模式落一行 JSON，供离线评测统计抽取质量（不落全量原文）。
 
     `illegal`（2026-10-04 新增）是**封闭失效**记录，每项形如
-    `{"field": ..., "reason": "out_of_enum"|"bad_type"|"bad_format", "value": ...}`。
+    `{"field": ..., "reason": ..., "value": ...}`，其中 `reason` ∈
+    `out_of_enum` / `bad_type` / `bad_shape` / `forbidden_field` / `unknown_field`
+    （`bad_format` 由 `extract_soft_prefs` 在解析阶段产出）。
     它此前在 sanitize 里被静默丢弃，导致切流判据里的「越界率必须恒为 0」
     在运行时**无从判定**——`eval_soft_prefs.py` 统计的是 sanitize 后的输出，
     恒为 0，是构造性的。

@@ -161,12 +161,130 @@ def test_sanitize_without_out_param_is_unchanged():
     assert sp.sanitize({"usage_scenario": _item("商务舱")}, "我平时通勤") == {}
 
 
-def test_structurally_broken_items_are_not_illegal():
-    """raw 不是 dict（如直接给了个 list）属另一类结构问题，不算「模型说了词表外的话」。"""
+def test_forbidden_key_with_null_value_is_not_recorded():
+    """`{"body_type": null}` **不得**记成 `forbidden_field`。
+
+    subagent 审查抓出：提示词明写「不该抽的东西（**务必输出 null**）」——
+    模型**照做**却因顶层循环没有 null 豁免而被记成「风险最高的失效」。
+    那是方向反了：判据惩罚守法、奖励违规。
+
+    真正要抓的是 `body_type: "SUV"`（模型凭空编造硬约束），见
+    `test_forbidden_hard_constraint_keys_are_recorded`。
+    """
+    illegal: list[dict] = []
+    out = sp.sanitize(
+        {"body_type": None, "energy_type": None, "budget": None, "color": ""},
+        "我平时通勤",
+        illegal,
+    )
+
+    assert out == {}
+    assert illegal == [], f"「照提示词输出 null」被误记为失效：{illegal}"
+
+
+def test_unknown_fields_cannot_crowd_out_high_risk_reasons():
+    """`unknown_field`（信息量最低）不得挤掉 `forbidden_field` / `out_of_enum`。
+
+    subagent 审查实测：6 个无关键即可把配额占满，导致禁写硬约束键与越界值
+    **一条都没记下**——最高风险的类别优先级最低，是一条实打实的假绿。
+    """
+    payload: dict = {f"k{i}": i for i in range(8)}
+    payload["body_type"] = "SUV"
+    payload["usage_scenario"] = {"value": "商务舱", "evidence": "我平时通勤"}
+
+    illegal: list[dict] = []
+    sp.sanitize(payload, "我平时通勤", illegal)
+
+    reasons = {(e["field"], e["reason"]) for e in illegal}
+    assert ("body_type", "forbidden_field") in reasons, illegal
+    assert ("usage_scenario", "out_of_enum") in reasons, illegal
+    assert len(illegal) <= 6, "封顶仍然生效"
+
+
+def test_structurally_broken_items_are_recorded_as_bad_shape():
+    """raw 不是 dict / 列表字段给了标量 → 记 `bad_shape`。
+
+    **本用例的口径在 2026-10-04 翻转过**：原断言是「结构错误不算封闭失效」，
+    理由是它没说「词表外的话」。现在改为**要记**，因为：
+
+    - 「没按 schema 输出」本身就是封闭失效的一种；
+    - 判据第 2 条要能回答「模型有没有乱吐字段」，而结构错误正是乱吐的一种；
+    - 过去这类输入静默变成空列表，「`pain_points` 被写成字符串」**完全不可观测**。
+
+    与「值是 `None`」的界线仍然清晰：`null` = 没答上来（不记），
+    `["通勤"]` / `"续航"` = 答了但没按格式（记）。
+    """
     illegal: list[dict] = []
     sp.sanitize({"usage_scenario": ["通勤"]}, "我平时通勤", illegal)
 
-    assert illegal == [], f"结构错误被误记为封闭失效：{illegal}"
+    assert [e["reason"] for e in illegal] == ["bad_shape"], illegal
+    assert illegal[0]["field"] == "usage_scenario"
+
+
+def test_list_field_given_a_scalar_is_bad_shape():
+    """该给数组的字段给了标量 —— 同样记 `bad_shape`。"""
+    illegal: list[dict] = []
+    out = sp.sanitize({"pain_points": "续航"}, "我平时通勤", illegal)
+
+    assert out == {}, "标量不得被当成单元素数组接受"
+    assert [e["reason"] for e in illegal] == ["bad_shape"], illegal
+
+
+def test_none_valued_field_is_still_not_recorded():
+    """`null` = 没答上来 —— **不记**（与形状失守的界线）。
+
+    实测踩坑：金标 25 条一度报出「40 条 bad_shape」，**全部是 None**。
+    模型只会答一两个字段、其余给 null 是正常的；把它记成失效会让判据永远红灯。
+    """
+    illegal: list[dict] = []
+    out = sp.sanitize(
+        {
+            "usage_scenario": None,
+            "pain_points": None,
+            "household_size": {"value": None, "evidence": "我平时通勤"},
+            "priority_order": [{"value": None, "evidence": "我平时通勤"}],
+        },
+        "我平时通勤",
+        illegal,
+    )
+
+    assert out == {}
+    assert illegal == [], f"「没填」被误记为封闭失效：{illegal}"
+
+
+def test_forbidden_hard_constraint_keys_are_recorded():
+    """模型凭空吐出 `body_type` / `energy_type` / `budget` → 记 `forbidden_field`。
+
+    这是本模块**风险最高**的一类失效：它们是 SQL 硬约束，直接下推 `WHERE`，
+    模型猜错会**砍掉整个候选集**。而模块 docstring 判据第 2 条点名的正是这三个键
+    ——此前它们完全不可观测。
+    """
+    illegal: list[dict] = []
+    out = sp.sanitize(
+        {
+            "usage_scenario": _item("通勤"),
+            "body_type": "SUV",
+            "energy_type": "BEV",
+            "budget": "20万",
+        },
+        "我平时通勤",
+        illegal,
+    )
+
+    # 照常丢弃，绝不进画像
+    assert out == {"usage_scenario": "通勤"}, out
+
+    forbidden = [e for e in illegal if e["reason"] == "forbidden_field"]
+    assert {e["field"] for e in forbidden} == {"body_type", "energy_type", "budget"}, illegal
+
+
+def test_unknown_top_level_keys_are_recorded():
+    """非禁写、也不在字段表里的键 → 记 `unknown_field`（与禁写键分开）。"""
+    illegal: list[dict] = []
+    sp.sanitize({"usage_scenario": _item("通勤"), "color": "红色"}, "我平时通勤", illegal)
+
+    reasons = {e["field"]: e["reason"] for e in illegal}
+    assert reasons == {"color": "unknown_field"}, illegal
 
 
 # ── shadow 日志：判据需要的观测点必须真的落在日志里 ──────────────────────────
