@@ -29,6 +29,33 @@
 6. **scope 登记**：新功能分支的 scope token 要登记进 `tools/pre-push-guard.py` 的
    `SCOPE_PATHS`，否则门禁只 WARN 不拦截。
 
+## 推送前必须确认 base 是最新的 `origin/main`（2026-10-05 用户定规）
+
+**规则**：任何分支在 `git push` 之前，必须确认它的基线是最新的 `origin/main`。
+落后就先 `git rebase origin/main`（或 `git merge origin/main`）再推。
+
+**为什么**（两次实测踩坑，不是假想）：
+- #59 与 #60 各自改了 README 的用例计数，#60 未 rebase 直接推 → GitHub 报
+  `mergeable_state=dirty`，评审打开就是冲突，必须回头 rebase + 重算计数。
+- 规则本身比「推之前看一眼」更强：并行会话下**冲突是必然的，不是意外**。
+
+**怎么确认**（推送前跑这一条）：
+
+```powershell
+git fetch origin
+git log --oneline origin/main..HEAD   # 本分支领先 main 什么
+git log --oneline HEAD..origin/main   # main 领先本分支什么 ← 这个非空就是落后了
+```
+
+第二条**非空即必须先 rebase**。rebase 后 README 等共享文件可能冲突——
+**取 main 侧**，再用 `python skills/doc_sync_check.py --fix` 按新 base 重算计数，
+**不要沿用 rebase 前的数字**。
+
+**叠放 PR 的坑**（同源问题，务必一起看）：
+PR 的 base 可以是 `main`，**不要**为了「避开同文件冲突」把 base 设成另一个分支——
+那样合并只会推进那个中间分支，`main` 拿不到内容，而 GitHub 上显示 `merged`，
+极易误判为「已进主干」（#56/#57 就这样丢过一次内容）。
+
 ## 验证基线（提交前实跑，不沿用旧数字）
 
 - backend：`backend\.venv\Scripts\python.exe -m pytest -q`（在 `backend/` 下）
