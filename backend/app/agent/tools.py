@@ -640,6 +640,11 @@ def recommendation_tool(
             matched.append("用途匹配")
         if profile.energy_preference and dims["energy"] == 1.0:
             matched.append("能源偏好匹配")
+        # 座位这条是**唯一可能被静默跳过**的硬约束：`seats is None`（库里查不到
+        # 座位数）时既不满足也不筛掉——按「缺数据 ≠ 不满足」保留候选是对的，但
+        # **对用户不披露就是假装校验过**。生产实测：用户明说「5 人以上」，
+        # 70.2% 的在售款型查不到座位数，它们照样进列表且只字不提这条没校验。
+        # 所以把「有没有真的校验过」作为数据带出（见 seat_verified / seat_check）。
         if profile.passengers is not None and seats is not None and seats >= profile.passengers:
             matched.append(f"座位满足（≥{profile.passengers} 座）")
 
@@ -656,6 +661,9 @@ def recommendation_tool(
                     "price_cny": price,
                     "score": round(score, 4),
                     "matched": matched,
+                    # 用户点名了乘坐人数、但这台查不到座位数 → 座位这条**没校验**。
+                    # 用户没提人数时本就没有座位约束可言，故为 True（无需披露）。
+                    "seat_verified": profile.passengers is None or seats is not None,
                     # 占位：取舍必须等全部候选打完分才能算（要跟本批最优比），
                     # 由下方第二遍统一填。循环内无法计算。
                     "tradeoffs": [],
@@ -710,6 +718,19 @@ def recommendation_tool(
             item.pop("_measured", None)
 
     top = scored[:limit]
+    # 座位约束的**校验覆盖率**：分母是本批候选数，分子是真查到了座位数的。
+    # 只在用户点名了人数、且确实存在未核实项时才输出——用户没提人数时硬报覆盖率
+    # 只会制造噪音（他根本没要求按座位筛）。engine 拿它生成一句顶部说明。
+    seat_check = None
+    if profile.passengers is not None:
+        verified = sum(1 for _s, item in scored if item["seat_verified"])
+        if verified < len(scored):
+            seat_check = {
+                "required": profile.passengers,
+                "verified": verified,
+                "unverified": len(scored) - verified,
+                "total": len(scored),
+            }
     return {
         # candidates_scanned = SQL 命中的候选数（= 实际参与评分的款型数）；
         # count = 通过全部硬约束与 Python 侧过滤后真正打分的条数。
@@ -718,6 +739,7 @@ def recommendation_tool(
         "candidates_scanned": candidates_scanned,
         "variants": [item[1] for item in top],
         "weights_used": weights,
+        "seat_check": seat_check,
     }
 
 

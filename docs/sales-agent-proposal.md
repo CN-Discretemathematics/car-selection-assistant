@@ -95,8 +95,10 @@
 
 **两条等价性契约**（守住「同一句话、两种路径必须是同一个结果」）：
 
-- 家庭档位映射与正则路径**逐位一致**：`「3~5人」` → 正则 `PASSENGERS_RE` 得 5，L1 也得 5
-  （`test_household_band_value_equals_regex_path`，三档全参数化）。
+- 家庭档位映射与正则路径**逐位一致**：`「3~5人」` → 正则 `series_constraints.parse_passengers`
+  得 5，L1 也得 5（`test_household_band_value_equals_regex_path`，三档全参数化）。
+  （2026-10-05：座位解析已从裸正则 `PASSENGERS_RE` 收敛为 `parse_passengers()` 单一实现——
+  两个调用点各自取组号的结构，正是「5 人以上」被当成 5 座的口径漂移来源。）
 - 权重数值与正则路径一致：`「我最看重空间」` → 两条路径都得
   `DEFAULT_WEIGHTS["space"] + _WEIGHT_RAISE`。增量直接取 `engine._WEIGHT_RAISE`，
   本地不留常量——手写版曾给 0.20 而正则给 0.30，同一句话两种排序。

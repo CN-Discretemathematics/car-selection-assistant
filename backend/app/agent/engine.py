@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from app.agent import soft_prefs, soft_probe
+from app.agent import known_facts, soft_prefs, soft_probe
 from app.agent.answer_contract import (
     answer_numbers_allowed,
     check_catalog_overview_text,
@@ -92,11 +92,13 @@ from app.common.llm import LLMClient, LLMError, get_llm_client
 from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, VehicleVariant
 from app.comparison.analysis import analyze_comparison, render_analysis_text
 
-# 预算/座位正则唯一定义在 series_constraints（评审 C2：流水线约束解析复用同一实现），
+# 预算正则唯一定义在 series_constraints（评审 C2：流水线约束解析复用同一实现），
 # 此处按原内部名导入，行为不变。
 # 注（评审 R4#11 观察项）：extract_hints 的解析链与 series_constraints.parse_budget_and_seats
-# 语义仍有差异（本函数无裸「N万」预算语境门控、_parse_count 不支持「十二」组合数）——
-# 推荐引擎的历史行为保持不变，后续回合可统一收敛到共享解析器。
+# 语义仍有差异（本函数无裸「N万」预算语境门控）——推荐引擎的历史行为保持不变。
+# 座位/人数解析已于 2026-10-05 收敛为 `parse_passengers` 单一实现：此前本文件自带一份
+# `_parse_count` + 组号取数，等于允许存在「只取数字、丢掉开区间后缀」的第二个实现，
+# 「5人以上」因此被当成 5 座。规则必须只有一个归属，否则口径必然漂移。
 from app.catalog.series_constraints import (  # noqa: E402
     BUDGET_BARE_RE as _BUDGET_BARE_RE,
     BUDGET_MAX_RE as _BUDGET_MAX_RE,
@@ -104,9 +106,8 @@ from app.catalog.series_constraints import (  # noqa: E402
     BUDGET_MIN_RE as _BUDGET_MIN_RE,
     BUDGET_RANGE_BOTH_RE as _BUDGET_RANGE_BOTH_RE,
     BUDGET_RANGE_RE as _BUDGET_RANGE_RE,
-    PASSENGERS_RE as _PASSENGERS_RE,
+    parse_passengers as _parse_passengers,
 )
-_CN_DIGITS = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
 # ── 意图路由（P0 解耦）──────────────────────────────────────────────────────
 # 路由正则与判定谓词（is_chatty / has_car_intent / asks_* / mentions_known_brand /
@@ -345,16 +346,6 @@ def _retrieve_chat_evidence(
                 evidence = retrieval_search(db, query, None, 3)
             return evidence
     return retrieval_search(db, message, None, 3)
-
-
-def _parse_count(text: str) -> int | None:
-    if text.isdigit():
-        return int(text)
-    if text == "十":
-        return 10
-    if text in _CN_DIGITS:
-        return _CN_DIGITS[text]
-    return None
 # 两条匹配路径（偏好 `body` / avoid 排除项）现已**统一用小写化的 msg_low**，
 # 因此这张表**只需要小写键**。此前偏好路径用 msg_low、avoid 路径用原始 message，
 # 于是不得不同时留「MPV」与「mpv」两个键——当时功能没坏，但看起来像冗余，
@@ -544,11 +535,9 @@ def extract_hints(message: str) -> dict:
                         if m:
                             hints["budget"] = {"max": float(m.group(1)) * 10000}  # 单独数字按「不超过」理解
 
-    m = _PASSENGERS_RE.search(message)
-    if m:
-        count = _parse_count(m.group(1) or m.group(2) or "")
-        if count is not None:
-            hints["passengers"] = count
+    seats = _parse_passengers(message)
+    if seats is not None:
+        hints["passengers"] = seats
 
     body = [value for key, value in _BODY_HINTS.items() if key in msg_low]
     if body:
@@ -765,7 +754,11 @@ def next_clarification(profile: UserProfile) -> Clarification | None:
         )
     if not profile.usage:
         return Clarification(
-            question=f"{_priority_phrase(profile)}这辆车主要用来跑什么？"
+            # 「这辆车」预设了一辆还不存在的车（2026-10-05 生产实测）：用户只说了
+            # 「20 万预算」，从没提过任何车，却被问「**这辆车**的主要用途是什么呢」。
+            # 追问必须对**还没选定的车**成立，所以只问用途本身。
+            # （#64 给这一问加了「先回执已说过的侧重 + 一次性告知还差什么」，那部分保留。）
+            question=f"{_priority_phrase(profile)}主要用来跑什么？"
             f"{_pending_phrase(profile, 'usage')}",
             options=["上下班通勤", "家庭出行", "长途自驾", "商务接待"],
             missing=["usage"],
@@ -1379,6 +1372,12 @@ class AgentEngine:
         if unlock_note:
             # 口径变化必须对用户可见：先说明「已不再限定在某车系」，再给推荐理由
             reasons.insert(0, unlock_note)
+        # 座位约束的校验覆盖率（2026-10-05）。库里查不到座位数的款型不会被筛掉
+        # （缺数据 ≠ 不满足），但那不等于这条约束生效了——必须在**用户看得见的地方**
+        # 说出来，否则用户会把「预算匹配、用途匹配」误读成「全部硬条件都校验过了」。
+        seat_note = self._seat_coverage_note(result.get("seat_check"))
+        if seat_note:
+            reasons.insert(0, seat_note)
         # 内部说明类「妥协项」（未参与评分/暂无数据源等）不呈现给用户（评审：不应出现）
         tradeoffs = collect_tradeoffs(top, limit=4)
 
@@ -1398,6 +1397,7 @@ class AgentEngine:
                 price_cny=v["price_cny"],
                 score=v["score"],
                 matched=v["matched"],
+                seat_verified=v.get("seat_verified", True),
                 tradeoffs=[t for t in (v["tradeoffs"] or [])
                            if not any(n in t for n in INTERNAL_NOTE_MARKERS)],
             )
@@ -1409,6 +1409,14 @@ class AgentEngine:
         followup = soft_probe.probe_question(profile)
         if followup is not None:
             soft_probe.mark_probed(profile, soft_probe._pick_dims(profile))
+
+        # 记下本轮推荐了哪些款型：用户看完卡片多半会追问「动力/空间怎么样」，
+        # 那些消息里他从不会点名车系，靠 `locked_series_ids` 取不到这些车的参数，
+        # 于是模型会答「我手头没有这几款车的动力参数」（2026-10-05 生产实测）。
+        # 记款型 id 是让下一轮能把它们的库内事实直接摆进上下文的唯一途径。
+        new_ids = [v["variant_id"] for v in top]
+        ids_changed = new_ids != profile.last_recommended_variant_ids
+        profile.last_recommended_variant_ids = new_ids
 
         out = AgentMessageOut(
             session_id=session_id,
@@ -1422,8 +1430,8 @@ class AgentEngine:
             explanation=explanation,
             followup=followup,
         )
-        # 追问状态要落盘，否则下一轮又会问一遍
-        if followup is not None:
+        # 画像变更必须落盘，否则下一轮又会读到旧的（追问状态 / 已推荐款型）。
+        if followup is not None or ids_changed:
             await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         await self._emit(session_id, explanation or "", out)
         return out
@@ -2051,6 +2059,21 @@ class AgentEngine:
             except Exception:  # noqa: BLE001 - 检索不可用不影响闲聊
                 evidence = []
             context = "\n".join(f"- {e['text'][:120]}" for e in evidence[:3])
+            # 证据前置（2026-10-05）：上一轮推荐款型的**库内参数**直接摆进上下文。
+            # 用户追问「动力」时他从没点名过车系，检索没有 series 过滤、召不回这些车，
+            # 模型只能答「我手头没有动力参数」——而参数就在库里。这条块是权威事实，
+            # 也顺带给出 `have_dims`：守卫只对**确实有数据**的维度判假否定。
+            have_dims: set[str] = set()
+            known_block = ""
+            try:
+                prof = await _load_profile(self._store, session_id)
+                known_block, have_dims = await run_in_threadpool(
+                    known_facts.build_known_facts, db, prof.last_recommended_variant_ids
+                )
+            except Exception:  # noqa: BLE001 - 事实前置失败不该让闲聊整体失败
+                known_block, have_dims = "", set()
+            if known_block:
+                context = f"{known_block}\n{context}".strip()
             # 解析到具体车系时，追加确定性「车系档案」（直接来自 DB 事实，不依赖检索排序）：
             # 否则闲聊路径 top-3 证据可能只是基础信息（定位/长宽），LLM 会说「价格/配置无可靠数据」
             if resolved:
@@ -2085,7 +2108,10 @@ class AgentEngine:
                     "3) 只依据「数据佐证」和真实数据回答，绝不编造价格、销量或配置；没有数据就如实说不知道；\n"
                     "   涉及具体车型的续航/动力/空间等数字时，只引用「数据佐证」中出现的，一个数字都不能虚构；\n"
                     "4) 用户已给出预算/用途/人数中的任何一项时：先确认收到，再只追问缺失的一项；不要重复问已给的；\n"
-                    "5) 不谈论优惠、库存、成交价、贷款，不提供任何购买链接。\n"
+                    "5) **不要在回答末尾自己抛问题**（例如「您更倾向插电混动还是纯电呢？」）："
+                    "这一条路径不渲染选项按钮，用户只能手打。前端只会展示带选项的"
+                    "固定追问，需要用户做选择时在这里只做陈述，把提问交给系统；\n"
+                    "6) 不谈论优惠、库存、成交价、贷款，不提供任何购买链接。\n"
                     + (f"数据佐证：\n{context}" if context else "数据佐证：（暂无，聊到具体车型时会检索真实数据）")
                 )
             try:
@@ -2095,6 +2121,29 @@ class AgentEngine:
                 msgs.append({"role": "user", "content": message})
                 resp = await self._llm.chat(msgs, temperature=0.6)
                 text = (resp["choices"][0]["message"]["content"] or "").strip()
+                # 有据禁否认（2026-10-05）：上下文里**已经给了**这些款的真实参数，
+                # 模型再说「没有动力参数」就是把检索空结果当成了事实缺失。
+                # 第一次：带上面具体哪几条数据改写一次。
+                denial = known_facts.false_denial_hits(text, have_dims)
+                if denial:
+                    dims_cn = "、".join(known_facts.DIMENSION_WORDS.get(d, (d,))[0] for d in denial)
+                    msgs = msgs + [
+                        {"role": "assistant", "content": text},
+                        {"role": "user", "content": (
+                            f"你刚才说{dims_cn}没有数据，这是错的：上面「已推荐车型的库内参数」"
+                            "里就有这些款的真实参数。请**只依据那块内容**重新回答，"
+                            "直接引用里面的数值，不要再说未披露。"
+                        )},
+                    ]
+                    resp = await self._llm.chat(msgs, temperature=0.2)
+                    retry = (resp["choices"][0]["message"]["content"] or "").strip()
+                    if retry and not known_facts.false_denial_hits(retry, have_dims):
+                        text = retry
+                    elif retry and known_block:
+                        # 改写后仍在否认：宁可用确定性事实直给，也不把假否定放出去。
+                        # 这是「宁可话糙，不编数据」的同一条原则——只是方向反过来：
+                        # 既不编数字，也不编「没有数字」。
+                        text = retry.split("\n")[0] + "\n" + known_block
                 ok, _ = safety_guard(text)
                 if ok and text:
                     return text
@@ -2159,11 +2208,43 @@ class AgentEngine:
                 hits = retrieval_search(db, series_query, filters={"series_id": sid}, top_k=1)
             except Exception:  # noqa: BLE001 - 检索不可用不影响推荐（原则 7）
                 continue
-            for hit in hits:
-                evidence.append(
-                    {"text": hit["text"], "kind": hit["kind"], "source_url": hit["source_url"]}
-                )
+            # ⚠️ 2026-10-05：按 `series_id` 过滤只能保证**同车系**，管不到**同款型**。
+            # 实测原样：首推「2026款 PLUS 211km XWD 征服 5座（19.79 万）」，佐证却引用
+            # 了同车系的「2026款 129km 畅行版 5座（指导价 20.99 万）」——不是同一台车，
+            # 而且 20.99 万还**超出了用户给的 20 万预算**，与同一段话里的
+            # 「均在 20 万元预算内」当场打架。
+            # 佐证讲的是「这台车」，不是「这个车系」，所以片段必须点名**这一款**。
+            hit = next((h for h in hits if _mentions_variant(h.get("text", ""), v)), None)
+            if hit is None:
+                # 该车系里没有属于这一款的片段 → 不拿别的款型充数，宁可不写佐证。
+                continue
+            evidence.append(
+                {"text": hit["text"], "kind": hit["kind"], "source_url": hit["source_url"]}
+            )
         return evidence[:2]
+
+    @staticmethod
+    def _seat_coverage_note(seat_check: dict | None) -> str:
+        """把座位约束的校验覆盖率讲成一句人话（2026-10-05）。
+
+        为什么必须有这句：`recommendation_tool` 对查不到座位数的款型**既不筛也不标**
+        （缺数据 ≠ 不满足，这是筛选语义，没错），可用户看到的是一张和已验证车长得
+        一模一样的卡片——他无从知道座位那条根本没查。生产实测正是这个形态：用户点
+        「5 人以上」，5 款候选里有 2 款查不到座位数，卡片只写「预算匹配、用途匹配」。
+
+        口径：无覆盖率数据（用户没提人数，或全部校验过）→ 不出声，不制造噪音。
+        """
+        if not seat_check:
+            return ""
+        unverified = int(seat_check.get("unverified") or 0)
+        total = int(seat_check.get("total") or 0)
+        required = seat_check.get("required")
+        if unverified <= 0 or total <= 0:
+            return ""
+        return (
+            f"座位≥{required}座这条：{total} 款候选里只有 {total - unverified} 款查到座位数，"
+            f"另 {unverified} 款资料未披露座位，卡片已标「座位未核实」，请自行确认。"
+        )
 
     def _build_reasons(self, profile: UserProfile, result: dict) -> list[str]:
         reasons: list[str] = []
@@ -2222,46 +2303,119 @@ class AgentEngine:
 
     @staticmethod
     def _template_explanation(
-        profile: UserProfile,
-        result: dict,
-        source_names: list[str],
-        evidence: list[dict] | None = None,
+            profile: UserProfile,
+            result: dict,
+            source_names: list[str],
+            evidence: list[dict] | None = None,
     ) -> str:
-        top = result["variants"]
-        if not top:
-            brand_desc = f"「{'、'.join(profile.brand_labels)}」" if profile.brand_labels else ""
+            top = result["variants"]
+            if not top:
+                brand_desc = f"「{'、'.join(profile.brand_labels)}」" if profile.brand_labels else ""
+                budget_desc = ""
+                if profile.budget.max is not None:
+                    budget_desc = f"、预算不超过 {profile.budget.max / 10000:g} 万元"
+                energy_desc = ""
+                if profile.energy_preference:
+                    label_map = {"BEV": "纯电", "PHEV": "插混", "EREV": "增程", "HEV": "油混",
+                                 "ICE": "燃油", "new_energy": "新能源", "fuel": "燃油"}
+                    energy_desc = "、能源 " + "/".join(
+                        label_map.get(t, t) for t in profile.energy_preference
+                    )
+                return (
+                    f"没有找到同时满足条件（{brand_desc.strip('「」') or '当前条件'}"
+                    f"{budget_desc}{energy_desc}）的在售款型，"
+                    "建议放宽预算、能源或车身类型后重试；我们不会编造不存在的数据。"
+                )
+            first = top[0]
+            names = "、".join(_variant_label(v) for v in top[:3])
             budget_desc = ""
             if profile.budget.max is not None:
-                budget_desc = f"、预算不超过 {profile.budget.max / 10000:g} 万元"
-            energy_desc = ""
-            if profile.energy_preference:
-                label_map = {"BEV": "纯电", "PHEV": "插混", "EREV": "增程", "HEV": "油混",
-                             "ICE": "燃油", "new_energy": "新能源", "fuel": "燃油"}
-                energy_desc = "、能源 " + "/".join(
-                    label_map.get(t, t) for t in profile.energy_preference
-                )
+                budget_desc = f"，均在 {profile.budget.max / 10000:g} 万元预算内"
+            source_desc = f"（数据来源：{'、'.join(source_names)}）" if source_names else ""
+            evidence_desc = ""
+            if evidence:
+                snippets = "；".join(f"{_clip_evidence(e['text'])}" for e in evidence[:2])
+                evidence_desc = f"官方资料佐证：{snippets}。"
             return (
-                f"没有找到同时满足条件（{brand_desc.strip('「」') or '当前条件'}"
-                f"{budget_desc}{energy_desc}）的在售款型，"
-                "建议放宽预算、能源或车身类型后重试；我们不会编造不存在的数据。"
+                f"为你推荐 {names} 等 {len(top)} 款在售款型{budget_desc}。"
+                f"首选 {_brand_series(first)}（官方指导价 {first['price_cny'] / 10000:g} 万元，"
+                f"匹配项：{'、'.join(first['matched']) or '综合评分领先'}）。"
+                f"注意妥协项：{'；'.join(first['tradeoffs'][:2]) or '无明显妥协'}。"
+                f"{evidence_desc}{source_desc}"
             )
-        first = top[0]
-        names = "、".join(f"{v['brand_name']} {v['series_name']} {v['display_name']}" for v in top[:3])
-        budget_desc = ""
-        if profile.budget.max is not None:
-            budget_desc = f"，均在 {profile.budget.max / 10000:g} 万元预算内"
-        source_desc = f"（数据来源：{'、'.join(source_names)}）" if source_names else ""
-        evidence_desc = ""
-        if evidence:
-            snippets = "；".join(f"{e['text'][:60]}…" for e in evidence[:2])
-            evidence_desc = f"官方资料佐证：{snippets}。"
-        return (
-            f"为你推荐 {names} 等 {len(top)} 款在售款型{budget_desc}。"
-            f"首选 {first['brand_name']} {first['series_name']}（官方指导价 {first['price_cny'] / 10000:g} 万元，"
-            f"匹配项：{'、'.join(first['matched']) or '综合评分领先'}）。"
-            f"注意妥协项：{'；'.join(first['tradeoffs'][:2]) or '无明显妥协'}。"
-            f"{evidence_desc}{source_desc}"
-        )
+
+
+def _mentions_variant(text: str, variant: dict) -> bool:
+    """佐证片段是否**点名了推荐的这个款型**。
+
+    判定用款型名里最具区分度的后半段（年份之后那截，如「PLUS 211km XWD 征服 5座」），
+    因为切片里通常不带品牌前缀，而完整款型名常带（`display_name` 可能以品牌开头）。
+    匹配不到就当作「不是这一款」——宁可没有佐证，也不要拿兄弟款型的参数冒充。
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    display = (variant.get("display_name") or "").strip()
+    if display and display in body:
+        return True
+    parts = display.split()
+    # display_name 形如「品牌 车系 2026款 PLUS 211km XWD 征服 5座」：取最后 3 段做指纹
+    for size in (3, 2):
+        if len(parts) > size:
+            fingerprint = " ".join(parts[-size:])
+            if len(fingerprint) >= 4 and fingerprint in body:
+                return True
+    return False
+
+
+def _brand_series(v: dict) -> str:
+    """「品牌 + 车系」，车系名里已含品牌前缀时不重复拼接。
+
+    2026-10-05 生产实测原样：「捷途 捷途旅行者C-DM」——车系名本身就叫
+    「捷途旅行者C-DM」，再前面拼一个品牌就成了叠词。数据层的车系名带品牌前缀是
+    汽车之家的命名习惯，不是脏数据，所以只能在展示层去重，不能去改库里的名字。
+    """
+    brand = (v.get("brand_name") or "").strip()
+    series = (v.get("series_name") or "").strip()
+    if not brand or series.startswith(brand):
+        return series or brand
+    return f"{brand} {series}"
+
+
+def _variant_label(v: dict) -> str:
+    """推荐列表里的一项：品牌车系名 + 款型名，**但不出现叠词、也不丢掉款型名**。
+
+    `display_name` 通常已经是「捷途旅行者C-DM 2026款 PLUS 211km XWD 征服 5座」，
+    本身带车系名；这时直接用它即可，既不会拼出「捷途 捷途旅行者C-DM …」的叠词，
+    也不会因为「前缀相同」就误判成已经拼过而把款型名整段丢掉。
+    """
+    display = (v.get("display_name") or "").strip()
+    if not display:
+        return _brand_series(v)
+    series = (v.get("series_name") or "").strip()
+    if series and series in display:
+        return display
+    return f"{_brand_series(v)} {display}".strip()
+
+
+def _clip_evidence(text: str, limit: int = 60) -> str:
+    """佐证片段截断到**标点边界**，不得半句腰斩。
+
+    2026-10-05 生产实测原样：「…核心参数与配置：级别 = 紧…」。`text[:60]` 砍在
+    「级别 = 紧凑型 SUV」的中间，扔给用户一个读不通的半句话——比不给佐证更糟，
+    它看起来像是数据本身就这么残缺。
+    """
+    body = (text or "").strip()
+    if len(body) <= limit:
+        return body
+    head = body[:limit]
+    for sep in ("。", "；", "，", " ", "："):
+        cut = head.rfind(sep)
+        if cut >= limit // 2:
+            return head[:cut].rstrip("，、；： ") + "…"
+    return head.rstrip() + "…"
+
+
 
 
 _agent_engine: AgentEngine | None = None
