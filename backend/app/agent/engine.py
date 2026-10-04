@@ -2143,7 +2143,12 @@ class AgentEngine:
                         # 改写后仍在否认：宁可用确定性事实直给，也不把假否定放出去。
                         # 这是「宁可话糙，不编数据」的同一条原则——只是方向反过来：
                         # 既不编数字，也不编「没有数字」。
-                        text = retry.split("\n")[0] + "\n" + known_block
+                        #
+                        # ⚠️ 只能拼 `known_block` 的**事实行**，绝不能拼整个块：
+                        # 块头含「只能依据这里作答 / 不得回答未披露」这类**系统指令**
+                        # （审查 H2 实测：直接拼整个块会把指令原文暴露给用户，而
+                        # safety_guard 只拦优惠/库存/成交，拦不住它）。
+                        text = retry.split("\n")[0] + "\n" + known_facts.render_facts_only(known_block)
                 ok, _ = safety_guard(text)
                 if ok and text:
                     return text
@@ -2242,8 +2247,8 @@ class AgentEngine:
         if unverified <= 0 or total <= 0:
             return ""
         return (
-            f"座位≥{required}座这条：{total} 款候选里只有 {total - unverified} 款查到座位数，"
-            f"另 {unverified} 款资料未披露座位，卡片已标「座位未核实」，请自行确认。"
+            f"座位≥{required}座这条：展示的 {total} 款里有 {total - unverified} 款查到座位数，"
+            f"另 {unverified} 款资料未披露座位，卡片上已标「座位未核实」，请自行确认。"
         )
 
     def _build_reasons(self, profile: UserProfile, result: dict) -> list[str]:
@@ -2351,6 +2356,11 @@ def _mentions_variant(text: str, variant: dict) -> bool:
     判定用款型名里最具区分度的后半段（年份之后那截，如「PLUS 211km XWD 征服 5座」），
     因为切片里通常不带品牌前缀，而完整款型名常带（`display_name` 可能以品牌开头）。
     匹配不到就当作「不是这一款」——宁可没有佐证，也不要拿兄弟款型的参数冒充。
+
+    ⚠️ 年款必须也对上（审查 M3 实测）：配置段会跨年款重复（「2.0TD 旗舰型」在
+    2024/2025/2026 款里都存在）。只看配置段会把 2025 款的参数当成 2024 款的佐证
+    ——而**价格恰恰随年款变**，那正是原缺陷（20.99 万超出 20 万预算）的同类场景。
+    片段若压根没提年款，则不因缺年款而否决（切片可能只列配置）。
     """
     body = (text or "").strip()
     if not body:
@@ -2358,6 +2368,8 @@ def _mentions_variant(text: str, variant: dict) -> bool:
     display = (variant.get("display_name") or "").strip()
     if display and display in body:
         return True
+    if not _year_matches(display, body):
+        return False
     parts = display.split()
     # display_name 形如「品牌 车系 2026款 PLUS 211km XWD 征服 5座」：取最后 3 段做指纹
     for size in (3, 2):
@@ -2366,6 +2378,21 @@ def _mentions_variant(text: str, variant: dict) -> bool:
             if len(fingerprint) >= 4 and fingerprint in body:
                 return True
     return False
+
+
+#: display_name 里的年款，形如「2026款」
+_YEAR_RE = re.compile(r"(19|20)\d{2}\s*款?")
+
+
+def _year_matches(display: str, body: str) -> bool:
+    """片段提到的年款是否与推荐款型一致（片段没提年款则放行）。"""
+    m = _YEAR_RE.search(display or "")
+    if not m:
+        return True
+    years = {mm.group(0).replace(" ", "") for mm in _YEAR_RE.finditer(body or "")}
+    if not years:
+        return True
+    return m.group(0).replace(" ", "") in years
 
 
 def _brand_series(v: dict) -> str:
@@ -2399,11 +2426,14 @@ def _variant_label(v: dict) -> str:
 
 
 def _clip_evidence(text: str, limit: int = 60) -> str:
-    """佐证片段截断到**标点边界**，不得半句腰斩。
+    """佐证片段截断到**标点边界**，不得半句腰斩，且长度**不得超过 limit**。
 
     2026-10-05 生产实测原样：「…核心参数与配置：级别 = 紧…」。`text[:60]` 砍在
     「级别 = 紧凑型 SUV」的中间，扔给用户一个读不通的半句话——比不给佐证更糟，
     它看起来像是数据本身就这么残缺。
+
+    ⚠️ 补上省略号后不得超限（审查 L3 实测：`head + "…"` 是 limit+1；我第一版测试
+    写的是 `<= 62`，等于把这个 off-by-one **固化进测试**而不是拦住它）。
     """
     body = (text or "").strip()
     if len(body) <= limit:
@@ -2413,7 +2443,7 @@ def _clip_evidence(text: str, limit: int = 60) -> str:
         cut = head.rfind(sep)
         if cut >= limit // 2:
             return head[:cut].rstrip("，、；： ") + "…"
-    return head.rstrip() + "…"
+    return head.rstrip()[: limit - 1].rstrip() + "…"
 
 
 

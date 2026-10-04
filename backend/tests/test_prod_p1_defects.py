@@ -79,6 +79,34 @@ def test_mentions_variant_rejects_series_level_text():
     assert not _mentions_variant("捷途旅行者C-DM 是一款插电混动紧凑型 SUV。", v)
 
 
+def test_mentions_variant_rejects_other_model_year():
+    """审查 M3 实测：配置段会**跨年款重复**（「2.0TD 旗舰型」2024/2025/2026 都有）。
+
+    只看配置段会把 2025 款的参数当成 2024 款的佐证——而价格恰恰随年款变，
+    那正是原缺陷（20.99 万超出 20 万预算）的同类场景。
+    """
+    v = {"display_name": "吉利 星越L 2024款 2.0TD 旗舰型"}
+    assert not _mentions_variant("星越L 2025款 2.0TD 旗舰型，指导价 17.28 万。", v)
+    assert not _mentions_variant("星越L 2026款 2.0TD 旗舰型，指导价 17.28 万。", v)
+    assert _mentions_variant("星越L 2024款 2.0TD 旗舰型，指导价 16.98 万。", v)
+
+
+def test_mentions_variant_allows_text_without_year():
+    """片段没提年款时不因缺年款而否决（切片可能只列配置）。"""
+    v = {"display_name": "吉利 星越L 2024款 2.0TD 旗舰型"}
+    assert _mentions_variant("星越L 2.0TD 旗舰型，插混，指导价 16.98 万。", v)
+
+
+# ── P1-2 截断不得超限（审查 L3：我的第一版测试把 off-by-one 写成了断言）─────
+def test_clip_evidence_never_exceeds_limit():
+    """审查 L3 实测：无标点长文本会产出 limit+1（省略号也算长度）。
+
+    我第一版测试写的是 `len(clipped) <= 62`，等于把这个 bug **固化进测试**。
+    """
+    assert len(_clip_evidence("无标点长文本" * 40)) <= 60
+    assert len(_clip_evidence("：" + "abcdefghij" * 30)) <= 60
+
+
 # ── P1-4 追问不得预设一辆还不存在的车 ────────────────────────────────────────
 def test_usage_clarification_does_not_presuppose_a_car():
     """实拍：用户只说「20万预算」，从没提车，却被问「**这辆车**的主要用途是什么呢？」。"""

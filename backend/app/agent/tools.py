@@ -718,18 +718,22 @@ def recommendation_tool(
             item.pop("_measured", None)
 
     top = scored[:limit]
-    # 座位约束的**校验覆盖率**：分母是本批候选数，分子是真查到了座位数的。
-    # 只在用户点名了人数、且确实存在未核实项时才输出——用户没提人数时硬报覆盖率
-    # 只会制造噪音（他根本没要求按座位筛）。engine 拿它生成一句顶部说明。
+    # 座位约束的**校验覆盖率**：分母是**本次展示的候选数**（top），不是全部候选。
+    #
+    # ⚠️ 这里曾经用 `len(scored)` 当分母（审查 M2 实测）：12 款候选里 7 款未核实、
+    # 只展示 5 张，顶部却说「12 款候选里只有 5 款查到座位数，卡片已标『座位未核实』」
+    # ——而那 5 张上**一个标记都没有**，用户去找一个不存在的标记。
+    # 用户只看得见展示出来的卡片，所以覆盖率必须按展示口径算；被筛掉的候选
+    # 对他不存在，拿它们说事只会让文案与屏幕自相矛盾。
     seat_check = None
     if profile.passengers is not None:
-        verified = sum(1 for _s, item in scored if item["seat_verified"])
-        if verified < len(scored):
+        unverified = sum(1 for _score, item in top if not item["seat_verified"])
+        if unverified > 0:
             seat_check = {
                 "required": profile.passengers,
-                "verified": verified,
-                "unverified": len(scored) - verified,
-                "total": len(scored),
+                "verified": len(top) - unverified,
+                "unverified": unverified,
+                "total": len(top),
             }
     return {
         # candidates_scanned = SQL 命中的候选数（= 实际参与评分的款型数）；

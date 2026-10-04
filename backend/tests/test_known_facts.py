@@ -111,10 +111,66 @@ def test_false_denial_attributes_to_nearest_dimension_only():
     assert false_denial_hits(text, {"power", "range"}) == ["range"]
 
 
-def test_false_denial_catches_denial_far_from_dimension_word():
-    """否认词与维度词之间可以隔着一整串车系名——守卫不能靠固定字符窗口。"""
+def test_false_denial_catches_bare_negation():
+    """审查 M1 实测：裸否定（宾语被修饰词隔开）此前**全部漏判**。
+
+    「我这边没有这几款车的动力参数」是离生产原句最近的说法，定长短语表抓不到它。
+    """
+    assert "power" in false_denial_hits("我这边没有这几款车的动力参数。", {"power"})
+    assert "power" in false_denial_hits("抱歉，我没有这些车的动力数据。", {"power"})
+
+
+# ── 守卫：不误伤（审查 H2 实测的三例，必须钉住）────────────────────────────
+def test_false_denial_allows_denial_about_other_topic():
+    """「没有披露辅助驾驶配置」否定的不是动力，power 只是顺带被提到 → 不得拦。"""
+    text = "这台车没有披露辅助驾驶配置，动力参数倒是齐全。"
+    assert false_denial_hits(text, {"power"}) == []
+
+
+def test_false_denial_allows_denial_then_affirms_other_dimension():
+    text = "官方页面缺少详细资料，空间表现我不好评价。"
+    assert false_denial_hits(text, {"space"}) == []
+
+
+def test_false_denial_allows_contrastive_denial():
+    """审查 H2 第 3 例：此前用「没有比亚迪的数据」侥幸没命中（marker 被品牌名打断），
+    换成「暂时没有该数据」立刻翻车。必须按语义拦，而不是靠字面巧合。"""
+    text = "比亚迪那边暂时没有该数据，但捷途这台动力参数很扎实。"
+    assert false_denial_hits(text, {"power"}) == []
+
+
+def test_false_denial_still_catches_production_sentence_across_ideographic_comma():
+    """切分只按「，」不按「、」：顿号分隔的是宾语并列项，切了就会漏掉生产原句。"""
     text = (
-        "很抱歉，我手头暂时没有捷途旅行者C-DM、方程豹钛7这两款20万内车型的动力参数，"
+        "不过很抱歉，我手头暂时没有捷途旅行者C-DM、方程豹钛7这两款20万内车型的动力参数，"
         "不能凭空给您说。"
     )
     assert "power" in false_denial_hits(text, {"power"})
+
+
+# ── 兜底不得泄露系统指令（审查 H2）────────────────────────────────────────
+def test_render_facts_only_drops_system_instructions():
+    """兜底把事实直给用户时，绝不能把块头（给模型看的指令）拼出去。
+
+    块头含「只能依据这里作答 / 不得回答未披露」——那是**系统指令**，泄露给用户
+    既荒唐又暴露内部实现，而 safety_guard 只拦优惠/库存/成交，拦不住它。
+    """
+    from app.agent.known_facts import render_facts_only
+
+    block = (
+        "【已推荐车型的库内参数（直接来自数据库，权威，可直接引用）】\n"
+        "下列参数确实存在于库中；被问到这些参数时**只能依据这里作答**，不得回答「未披露」。\n"
+        "- 捷途旅行者C-DM 2026款：最大功率(kW)=280；最大扭矩(N·m)=610"
+    )
+    out = render_facts_only(block)
+    assert "最大功率" in out and "280" in out
+    assert "只能依据这里作答" not in out
+    assert "不得回答" not in out
+    assert "权威" not in out
+
+
+def test_render_facts_only_on_empty_block():
+    from app.agent.known_facts import render_facts_only
+
+    assert render_facts_only("") == ""
+    assert render_facts_only("没有事实行") == ""

@@ -61,17 +61,28 @@ DIMENSION_WORDS: dict[str, tuple[str, ...]] = {
     "consumption": ("油耗", "电耗", "能耗", "费油", "省电"),
 }
 
-#: 「这条数据我没有」的措辞。窄集合是刻意的：守卫要拦的是**数据可得性否认**，
-#: 不是一切否定句。
+#: 「这条数据我没有」的措辞。分两类：
+#: 1. 定长短语——否认词与宾语固定相邻（「未披露」「查不到」「手头没有」…）。
+#: 2. `_BARE_DENIAL_RE`——裸否定，宾语被修饰词隔开（「没有这几款车的动力参数」）。
+#:    审查 M1 实测：只靠定长短语会漏判绝大多数**最贴近生产原句**的说法。
 _DENIAL_MARKERS = (
     "未披露", "没有披露", "查不到", "拿不到", "无法获取", "获取不到",
-    "暂时没有", "暂时无", "暂无数据", "没有数据", "没有参数", "没有资料", "没有信息",
-    "手头没有", "手上没有", "没有该", "缺少", "缺失",
+    "暂时没有", "暂时无", "暂无数据", "暂无", "没有数据", "没有参数",
+    "没有资料", "没有信息", "手头没有", "手上没有", "我这边没有", "这边没有",
+    "没有该", "缺乏", "缺失", "不便提供", "不太方便给",
+)
+#: 裸否定：否认词与「数据类宾语」之间允许夹修饰词，但不许跨小句。
+_BARE_DENIAL_RE = re.compile(
+    r"(?:没有|无|未有|找不到|查不到|拿不到|拿不出|无法提供|不能提供)"
+    r"[^。！？!?；;\n]{0,14}?(?:参数|数据|资料|信息|披露|记录)"
 )
 #: 数据可得性线索：只有同时出现它，才认定这句在讲「数据有没有」而不是别的否定。
 _DATA_CUES = ("数据", "参数", "资料", "信息", "披露", "记录", "数值")
-#: 句子切分符
-_SENTENCE_SPLIT = re.compile(r"[。！？!?；;\n]")
+#: 小句切分符。
+#: ⚠️ **不切「、」**：中文里「我手头暂时没有捷途旅行者C-DM、方程豹钛7这两款车型的
+#: 动力参数」里的顿号分隔的是**宾语的并列项**，切了就把生产原句拆散、漏判。
+#: 切「，」则正好把「否认 A，……（顺带说 B）」这类误伤挡掉（审查 H2 实测三例）。
+_SENTENCE_SPLIT = re.compile(r"[。！？!?；;，,\n]")
 
 #: 前置给模型的块标题。它必须写明**这是权威事实**，否则模型仍会按「检索片段」对待它。
 _KNOWN_FACTS_HEADER = (
@@ -125,42 +136,49 @@ def build_known_facts(db: Session, variant_ids: list[int], limit: int = 4) -> tu
     return _KNOWN_FACTS_HEADER + "\n" + "\n".join(lines), have_dims
 
 
+def _has_denial(clause: str) -> bool:
+    """小句里是否出现「数据可得性否认」（定长短语或裸否定任一）。"""
+    if any(d in clause for d in _DENIAL_MARKERS):
+        return True
+    return _BARE_DENIAL_RE.search(clause) is not None
+
+
 def false_denial_hits(text: str, have_dims: set[str]) -> list[str]:
     """回答里「在确实有数据的维度上说没有」→ 返回命中的维度键列表。
 
-    判据按**句**聚合，而不是「维度词附近的固定字符窗口」。窗口法在这里是脆的：
-    生产原句里「暂时没有」到「动力参数」隔了 29 个字（中间塞着车系名
-    「捷途旅行者C-DM、方程豹钛7这几款20万内车型的」），任何调得准的窗口都会
-    随文案变脆；调宽则开始误伤。中文里「某数据我没有」必然发生在**同一句**里，
-    句才是稳定的判定单位。
+    判定单位是**小句**（按「，；。！？」切，**不切顿号**），不是固定字符窗口：
 
-    一句命中三个信号才算违规：
-    1. 出现 `_DENIAL_MARKERS` 之一（否认数据可得性）；
-    2. 出现 `_DATA_CUES` 之一（确实在讲数据，不是在讲别的否定）；
-    3. 句中出现某个**有据**维度的词（`have_dims` 里有）。
+    - 窗口法在生产原句上必然失效：「我手头暂时没有捷途旅行者C-DM、方程豹钛7这两款
+      20 万内车型的动力参数」里，否认词到维度词隔了 29 个字——调准就脆、调宽就误伤。
+    - 整句聚合又会误伤（审查 H2 实测三例）：「这台车没有披露辅助驾驶配置，动力参数
+      倒是齐全」里 denying 的是辅助驾驶，power 只是顺带被提到。小句切分正好分开。
 
-    一句里出现多个维度词时归给**离否认词最近**的那个：「动力参数都披露了，但续航
-    没有数据」要判 range，不能连坐 power。守卫宁可漏杀不可错杀——错杀会改写一条
-    本来正确的回答，那比放过一次假否定的伤害更大。
+    一个小句命中三个信号才算违规：
+    1. _has_denial —— 否认数据可得性（定长短语或裸否定）；
+    2. 出现 _DATA_CUES 之一 —— 确实在讲数据，不是在讲别的否定；
+    3. 出现某个**有据**维度的词（have_dims 里有）。
+
+    小句内出现多个维度词时归给**离否认词最近**的那个：「动力参数都披露了但续航我没有
+    数据」要判 range。守卫宁可漏杀不可错杀——错杀会把一条本来正确的回答改掉，
+    伤害比放过一次假否定更大。
     """
     if not text or not have_dims:
         return []
     hits: list[str] = []
-    for sentence in _SENTENCE_SPLIT.split(text):
-        if not sentence:
+    for clause in _SENTENCE_SPLIT.split(text):
+        if not clause or not _has_denial(clause):
             continue
-        if not any(d in sentence for d in _DENIAL_MARKERS):
+        if not any(c in clause for c in _DATA_CUES):
             continue
-        if not any(c in sentence for c in _DATA_CUES):
-            continue
-        marker_positions = [i for d in _DENIAL_MARKERS for i in _find_all(sentence, d)]
+        marker_positions = [i for d in _DENIAL_MARKERS for i in _find_all(clause, d)]
+        marker_positions += [m.start() for m in _BARE_DENIAL_RE.finditer(clause)]
         if not marker_positions:
             continue
-        # (维度, 该维度词到最近否认词的距离)
+        # (维度 → 该维度词到最近否认词的距离)
         best: dict[str, int] = {}
         for dim in have_dims:
             for word in DIMENSION_WORDS.get(dim, ()):
-                for wpos in _find_all(sentence, word):
+                for wpos in _find_all(clause, word):
                     dist = min(abs(wpos - m) for m in marker_positions)
                     if dim not in best or dist < best[dim]:
                         best[dim] = dist
@@ -170,6 +188,19 @@ def false_denial_hits(text: str, have_dims: set[str]) -> list[str]:
         if nearest not in hits:
             hits.append(nearest)
     return hits
+
+
+def render_facts_only(block: str) -> str:
+    """从上下文块里剥出**纯事实行**，丢掉块头（块头是给模型看的系统指令）。
+
+    兜底路径要把事实直给用户时必须走这里：直接拼整个块会把
+    「只能依据这里作答 / 不得回答未披露」这类指令原文暴露给用户，
+    而 `safety_guard` 只拦优惠/库存/成交，拦不住（审查 H2 实测）。
+    """
+    facts = [ln.strip() for ln in (block or "").splitlines() if ln.strip().startswith("- ")]
+    if not facts:
+        return ""
+    return "以下参数直接来自数据库：\n" + "\n".join(facts)
 
 
 def _find_all(haystack: str, needle: str) -> list[int]:
