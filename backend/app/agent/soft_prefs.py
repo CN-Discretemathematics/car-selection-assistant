@@ -183,7 +183,13 @@ _logger = logging.getLogger("app.agent.soft_prefs")
 
 # 偏好向量版本：随 shadow 记录落盘。改提示词或词表来源时必须递增——跨版本对拍数据
 # 靠它切分（同 llm_router.ROUTER_VERSION 的理由：换版本不复用旧缓存/旧数据）。
-SOFT_PREF_VERSION = "soft-pref-v1"
+#
+# **记录格式变更同样要递增**（2026-10-04：v1 → v2）。
+# v1 之后 shadow 行新增了 `illegal`（封闭失效）与 `status`（LLM 走到哪一步）两个字段。
+# 不递增的话，新旧记录**同版本号却缺字段**，`soft_prefs_report` 的跨版本切分形同虚设，
+# 旧记录会以「`illegal` 为空 = 没越界」的身份混进分母——那正是本仓反复强调要避免的
+# 「构造性的 0」。
+SOFT_PREF_VERSION = "soft-pref-v2"
 
 MODE_ENV = "AGENT_SOFT_PREF_MODE"
 TIMEOUT_ENV = "AGENT_SOFT_PREF_TIMEOUT_MS"

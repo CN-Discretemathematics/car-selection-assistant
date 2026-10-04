@@ -369,6 +369,31 @@ def test_status_is_unknown_when_not_recorded(monkeypatch, caplog):
     assert _shadow_payload(caplog)["status"] == "unknown"
 
 
+def test_shadow_record_carries_version_and_new_observability_fields(caplog):
+    """shadow 行必须同时带上版本号与两个观测字段。
+
+    版本号的存在意义是**跨版本切分**。`illegal` / `status` 是 v2 才加的字段，
+    若加字段时不递增版本，新旧记录会同版本号却字段不同——聚合器的跨版本切分
+    形同虚设，旧记录会以「`illegal` 为空 = 没越界」混进分母。
+    故这里把「版本 + 字段」绑在一起断言，改一个必须改另一个。
+    """
+    with caplog.at_level(logging.INFO, logger=sp.SHADOW_LOGGER):
+        sp.log_shadow(
+            "我平时通勤", {"pain_points": ["续航"]}, False,
+            [{"field": "usage_scenario", "reason": "out_of_enum", "value": "商务舱"}], "ok",
+        )
+
+    data = json.loads(
+        [r for r in caplog.records if sp.SHADOW_LOGGER in r.getMessage()][0].getMessage()
+    )
+    assert data["version"] == sp.SOFT_PREF_VERSION
+    assert sp.SOFT_PREF_VERSION == "soft-pref-v2", (
+        f"新增 illegal / status 字段后必须递增版本号，当前仍是 "
+        f"{sp.SOFT_PREF_VERSION}——旧记录会混进分母"
+    )
+    assert "illegal" in data and "status" in data
+
+
 def test_run_if_enabled_threads_illegal_to_log(monkeypatch, caplog):
     """端到端：封闭失效从 `extract_soft_prefs` 一路走到 shadow 日志的 `illegal`。
 
