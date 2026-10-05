@@ -16,12 +16,18 @@ set -uo pipefail
 
 REPO="CN-Discretemathematics/car-selection-assistant"
 BRANCH="main"
-APP_DIR="/srv/carsel"
-STATE_DIR="/var/lib/carsel"
+# 2026-10-05：路径改为**可用环境变量覆盖**（默认值与生产完全一致，行为不变）。
+# 动机：这个脚本此前**无法被测试**——`/var/lib/carsel`、`/var/log/...` 写死，
+# 本机跑 `--check` 会在 `mkdir /var` 处直接 Permission denied，于是
+# 「三 SHA 比对」「不一致告警」这两段新逻辑只能靠人读代码判断对错。
+# 现在可以在临时目录里打桩 curl 与状态文件，真跑一遍三个分支（见
+# `.tools/verify_deploy_check.sh`，Git Bash 下实测通过）。
+APP_DIR="${CARSEL_APP_DIR:-/srv/carsel}"
+STATE_DIR="${CARSEL_STATE_DIR:-/var/lib/carsel}"
 STATE_FILE="${STATE_DIR}/deployed-${BRANCH}.sha"
 PREV_FILE="${STATE_DIR}/previous-${BRANCH}.sha"
 LOCK_FILE="${STATE_DIR}/deploy.lock"
-DEPLOY_LOG="/var/log/carsel-deploy.log"
+DEPLOY_LOG="${CARSEL_DEPLOY_LOG:-/var/log/carsel-deploy.log}"
 HEALTH_URL="http://127.0.0.1:8000/api/v1/ready"
 SITE_URL="http://127.0.0.1/"
 
