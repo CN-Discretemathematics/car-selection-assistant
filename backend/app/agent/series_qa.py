@@ -22,10 +22,13 @@ from app.catalog.series_index import (
     HEADLINE_ORDER,
     HEADLINE_PREFIX as _HEADLINE_PREFIX,
     normalize_name,
-    unit_from_key,
+    split_key_unit,
     display_name,
     rank_headlines,
+    head_with_size,
     series_fact_rows,
+    size_line,
+    size_lines,
     series_headline,
 )
 from app.common.enums import MISSING_VALUE_LABEL
@@ -101,12 +104,9 @@ _PARAM_DIM_LABELS: dict[str, str] = {
 # 汽车之家配置表的特征标记值 → 用户可读表述（●=标配、○=选装；- 已在跳过表内）
 _FEATURE_VALUE_LABEL = {"●": "有（标配）", "○": "选装"}
 
-#: 键尾括号（仅用户可见文案用；匹配逻辑仍用原键）
-_KEY_TAIL_PAREN_RE = re.compile(r"[（(]([^（）()]*)[)）]\s*$")
-#: 括号内容看起来是单位的样子（km / kWh / L/100km / s / mm / Ps / % …）
-_ASCII_UNIT_RE = re.compile(r"^[A-Za-z0-9%·²³/°]+$")
-#: 中文单位词——`unit_from_key` 只认 ASCII（「电池快充时间(小时)」它认不出「小时」）
-_CN_UNIT_WORDS = frozenset({"小时", "分钟", "秒", "英寸", "吋", "匹", "千瓦", "牛米", "个"})
+#: 键尾括号的判定**不在本模块**——统一走 `series_index.split_key_unit`，
+#: 与 `probe_facts` 给值补单位用的是同一个函数（2026-10-05 审查 P1-1：
+#: 两个独立识别器会让「电池快充时间(小时)」与「(分钟)」剥成同名且都无单位）。
 
 
 def display_fact_key(key: str) -> str:
@@ -116,18 +116,18 @@ def display_fact_key(key: str) -> str:
     值上各写了一遍。实测 877 车系 × 10 组提问共 32347 条渲染行，**15503 条（47.9%）**
     是这个形态（用户 2026-10-05 拍板「只剥确实是单位的尾部括号」）。
 
-    **只剥单位，不剥名字**。库里同时存在括号里是中文名字的键：
-    `540°全景影像系统(带透明底盘)`、`M碳陶瓷高性能卡钳（金色卡钳）`、
-    `L2级组合驾驶辅助包（限时免费）`——剥掉就丢了真实信息。
-    判据：括号内容要么是 ASCII 单位形态，要么落在中文单位词表里，否则原样返回。
+    **判据来自 `series_index.split_key_unit`——与值侧补单位用的是同一个函数**。
+    2026-10-05 审查实锤：此前这里和 `unit_from_key` 是两个各自独立的识别器
+    （本函数认全角括号 + 中文单位词表，`unit_from_key` 只认半角 + ASCII），
+    于是 `电池快充时间(小时)` 与 `电池快充时间(分钟)` 都被剥成「电池快充时间」，
+    而值侧又都补不出单位——同一回答里两个**量纲差 60 倍**的东西同名且都无单位
+    （实测 719 行；另有「排量(L)」vs「排量(mL)」同病）。
+
+    判据只在**末尾**括号上生效：中部括号是名字的一部分
+    （`540°全景影像系统(带透明底盘)`、`M碳陶瓷高性能卡钳（金色卡钳）`、
+    `L2级组合驾驶辅助包（限时免费）`、`AI空气投影（限时1500）`），剥掉就丢真实信息。
     """
-    matched = _KEY_TAIL_PAREN_RE.search(key)
-    if not matched:
-        return key
-    inner = matched.group(1).strip()
-    if inner and (inner in _CN_UNIT_WORDS or _ASCII_UNIT_RE.match(inner)):
-        return key[: matched.start()].strip()
-    return key
+    return split_key_unit(key)[0]
 
 # 否定语境（评审 P2）：「我不买汉兰达」——被否定的车系不做问答、不加会话锁定
 NEGATION_WORDS = ("不买", "不想买", "不想要", "不喜欢", "不考虑", "排除", "不要")
@@ -282,6 +282,13 @@ def probe_facts(
 
     lines: list[str] = []
     shown_keys = matched_keys[: _PROBE_MAX_KEYS]
+    # 剥括号会把**不同量纲**的键压成同一个名字：全库实测 3 组——
+    #   电池快充时间(小时) / 电池快充时间(分钟)   -> 都叫「电池快充时间」
+    #   排量(L) / 排量(mL)                        -> 都叫「排量」
+    #   全地形轮胎 / 全地形轮胎（AT）              -> 都叫「全地形轮胎」
+    # 值上会各自带单位（`0.35 小时` vs `21 分钟`）所以不丢信息，但两行同名仍容易误读。
+    # 因此：**同一个展示名被 >1 个键占用时，这些键一律保留原样**。
+    name_hits = Counter(display_fact_key(k) for k in shown_keys)
     for key in shown_keys:
         entries = values_by_key.get(key) or []
         if not entries:
@@ -296,7 +303,10 @@ def probe_facts(
         entries_all = entries if len(entries) <= _PROBE_VALUE_COERCE else entries[:_PROBE_VALUE_COERCE]
         for value, unit, cycle in entries_all:
             value = _FEATURE_VALUE_LABEL.get(value, value)  # ● → 有（标配）、○ → 选装
-            unit = unit or unit_from_key(key) or ""
+            # 2026-10-05（审查 P1-1）：此处必须与 `display_fact_key` 用**同一个**
+            # 键尾解析（`split_key_unit`），否则标签剥了「(小时)」而值侧补不出单位，
+            # 单位就彻底消失——`电池快充时间(小时)` 与 `(分钟)` 还会剥成同名。
+            unit = unit or split_key_unit(key)[1] or ""
             if unit and value.lower().endswith(unit.lower()):
                 unit = ""
             rendered.append(f"{value}{f' {unit}' if unit else ''}{f'（{cycle}）' if cycle else ''}")
@@ -314,7 +324,10 @@ def probe_facts(
             suffix = "（不同款型存在差异）"
         else:
             suffix = ""
-        lines.append(f"{display_fact_key(key)} = {' / '.join(rendered)}{suffix}")
+        name = display_fact_key(key)
+        if name_hits[name] > 1:
+            name = key  # 同名歧义 → 保留原键，让量纲在标签上就分得开
+        lines.append(f"{name} = {' / '.join(rendered)}{suffix}")
     # 2026-10-05（PR #66 审查遗留）：**渲染行数为 0 时不得只留披露行**。
     # 前 N 个命中键的取值全是无信息量值（暂无/-/--/未知）时，循环会全部 `continue`，
     # 只剩披露行，上游拼成「你问到的相关参数：（另有 1 个相关参数未列出）。」
@@ -518,73 +531,10 @@ def _series_header(db: Session, series: VehicleSeries, brand: Brand | None) -> s
     )
 
 
-def size_line(db: Session, series: VehicleSeries) -> str | None:
-    """「尺寸」这一行的展示文本：单档照旧；多档取**在售款型里的众数**并标覆盖率。
-
-    为什么单独查、不并进 `rank_headlines`：
-      1. 覆盖率必须**按款型**去重——`SpecFact` 对 `(variant_id, fact_key)` 无唯一约束
-         （全库 36241 组重复），按事实行累加会虚高。N1 已经吃过一次这个亏。
-         而 `rank_headlines` 拿到的行里没有 `variant_id`。
-      2. 尺寸是 text 模式「取首值」，那个首值取决于数据库返回顺序，本质是**任取**。
-         实测 312/877（35.6%）的车系尺寸多档，其中 113 个（36.2%）众数与首值不同——
-         改完这 113 个会真的换一个更有代表性的值。
-
-    并列第一时（实测 79 个车系）取**事实表里出现得最早**的那个：并列本就无从分优劣，
-    保持与改动前一致比换个任意排序更稳。覆盖率标注会把「N 款中 M 款」如实说清楚。
-
-    `rank_headlines` 侧的尺寸行为**不动**（仍取首值、不参与区间），
-    本函数只在渲染时覆盖它，所以离线索引与既有单测都不受影响。
-    """
-    rows = db.execute(
-        select(VehicleVariant.id, SpecFact.fact_value, SpecFact.unit)
-        .join(SpecFact, SpecFact.variant_id == VehicleVariant.id)
-        .where(
-            VehicleVariant.series_id == series.id,
-            VehicleVariant.status == "on_sale",
-            SpecFact.fact_key == _SIZE_FACT_KEY,
-        )
-    ).all()
-    if not rows:
-        return None
-
-    first_by_variant: dict[int, str] = {}
-    for variant_id, value, row_unit in rows:
-        if not value:
-            continue
-        # 行上的 unit 优先（与 `rank_headlines` 同口径），没有才从键名推
-        unit = (row_unit or "").strip() or (unit_from_key(_SIZE_FACT_KEY) or "")
-        text = str(value).strip()
-        if unit and text.lower().endswith(unit.lower()):
-            text = text[: -len(unit)].strip()  # 值自带单位，别再拼一遍
-        first_by_variant.setdefault(int(variant_id), f"{text} {unit}".strip())
-    if not first_by_variant:
-        return None
-
-    counter = Counter(first_by_variant.values())
-    # Counter 保插入序，most_common 在同票时保留「先出现」的那个（见 docstring）
-    top_text, top_count = counter.most_common(1)[0]
-    total = len(first_by_variant)
-    if len(counter) < 2:
-        return top_text  # 单档：top_text 已含单位，不要再拼一遍（否则「mm mm」）
-    return f"{top_text}（在售 {total} 款中 {top_count} 款为此尺寸）"
-
-
-def _head_with_size(
-    db: Session, series: VehicleSeries, head: dict[str, str]
-) -> dict[str, str]:
-    """把 `rank_headlines` 的尺寸项换成 `size_line` 的口径（众数 + 覆盖率）。
-
-    三个展示点（单车系块、对比块、逐项对比行）都必须过这一道——
-    少一个就会在同一条回答里出现两个互相矛盾的尺寸。
-    """
-    size = size_line(db, series)
-    return {**head, "尺寸": size} if size else head
-
-
 def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
     name = display_name(series, brand)
     parts = [f"「{name}」：{_series_header(db, series, brand)}"]
-    head = _head_with_size(db, series, series_headline(db, series))
+    head = head_with_size(size_line(db, series), series_headline(db, series))
     if head:
         order = [label for label in HEADLINE_ORDER if label in head]
         parts.append(
@@ -635,11 +585,14 @@ def build_series_qa_answer(
     facts_by_series = series_fact_rows(db, [s.id for s, _ in resolved])
     heads_map = rank_headlines(facts_by_series)
 
+    # 尺寸**一次批量算完**再分发给各展示点：逐个查会让 N 车系对比多打 2N 条 SQL
+    # （审查 P2），而且卡片与逐项对比行必须拿到**同一份**结果。
+    size_map = size_lines(db, [series for series, _ in resolved])
     blocks: list[str] = [f"你说的{_count_phrase(len(resolved))}我先放在一起看："]
     for series, brand in resolved:
         name = display_name(series, brand)
         blocks.append(f"\n【{name}】{_series_header(db, series, brand)}")
-        head = _head_with_size(db, series, heads_map.get(series.id, {}))
+        head = head_with_size(size_map.get(series.id), heads_map.get(series.id, {}))
         if head:
             order = [label for label in HEADLINE_ORDER if label in head]
             blocks.append(
@@ -669,8 +622,10 @@ def build_series_qa_answer(
     # 尺寸必须走 `size_line`（众数+覆盖率）而不是 `heads_map` 的首值，否则
     # 上面那一块写「5050*1960*1505 mm（在售 6 款中 4 款为此尺寸）」、
     # 下面这行写「4995*1910*1495 mm」——**同一条回答里自相矛盾**。
-    heads = [_head_with_size(db, series, heads_map.get(series.id, {}))
-             for series, _ in resolved]
+    heads = [
+        head_with_size(size_map.get(series.id), heads_map.get(series.id, {}))
+        for series, _ in resolved
+    ]
     diff: list[str] = []
     for label in HEADLINE_ORDER:
         values = [h.get(label) for h in heads]

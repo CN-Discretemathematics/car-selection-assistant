@@ -72,6 +72,44 @@ def test_probe_output_has_no_duplicated_unit():
     assert any("70 L" in line for line in lines), lines
 
 
+def test_value_side_gets_the_unit_the_label_stripped():
+    """**标签剥掉的单位，值上必须补回来**（审查 P1-1）。
+
+    此前标签侧认全角括号 + 中文单位词、值侧 `unit_from_key` 只认半角 + ASCII，
+    于是 `电池快充时间(小时)` 与 `(分钟)` 都被剥成「电池快充时间」、值上又都没有单位——
+    同一回答里两个**量纲差 60 倍**的东西同名且都无单位（实测 719 行）。
+    现在两处共用 `split_key_unit`。
+    """
+    lines = probe_facts(
+        [("电池快充时间(小时)", "0.35", None, None)], "电池快充多久"
+    )
+    assert lines == ["电池快充时间 = 0.35 小时"], lines
+
+
+def test_same_display_name_keeps_raw_keys():
+    """两个不同量纲的键剥成同名时，**保留原键**——歧义要在标签上就分得开。
+
+    全库实测 3 组：`电池快充时间(小时)`/`(分钟)`、`排量(L)`/`(mL)`、
+    `全地形轮胎`/`全地形轮胎（AT）`。
+    """
+    lines = probe_facts(
+        [
+            ("电池快充时间(小时)", "0.35", None, None),
+            ("电池快充时间(分钟)", "21", None, None),
+        ],
+        "电池快充多久",
+    )
+    assert any(line.startswith("电池快充时间(小时) = ") for line in lines), lines
+    assert any(line.startswith("电池快充时间(分钟) = ") for line in lines), lines
+    assert not any(line.startswith("电池快充时间 = ") for line in lines), lines
+
+
+def test_distinct_display_names_are_still_stripped():
+    """无同名冲突时照常剥——歧义保护不能反过来让所有键都不剥。"""
+    lines = probe_facts([("电池慢充时间(小时)", "1.5", None, None)], "电池快充多久")
+    assert lines == ["电池慢充时间 = 1.5 小时"], lines
+
+
 # ── 2. 尺寸众数 + 覆盖率 ─────────────────────────────────────────────────
 def _seed_sizes(db: Session, name: str, sizes: list[str]):
     brand = make_brand(db, f"尺寸品牌{name}")
@@ -199,3 +237,28 @@ def test_rag_series_slice_keeps_headline_labels(db_session: Session):
     assert core.startswith(HEADLINE_PREFIX), core
 
 
+def test_size_normalizes_fullwidth_multiplication_sign(db_session: Session):
+    """`×` 与 `*` 混写必须归一——否则同一尺寸被当成两档，覆盖率随之失真。
+
+    审查 P2 实测：真实库 7 个车系同一尺寸有两种写法，五菱之光因此报
+    「在售 5 款中 **2** 款为此尺寸」，实际 4 款是同一尺寸
+    （2 款 `3797*1510*1820` + 2 款 `3797×1510×1820`）。归一后 4 款合并成一档。
+    """
+    star, times = "3797*1510*1820", "3797×1510*1820"
+    brand = make_brand(db_session, "乘号品牌")
+    series = make_series(db_session, brand, "乘号车")
+    year = make_year(db_session, series)
+    source = make_source(db_session)
+    for index, size in enumerate(
+        [star, times, star, times, "4000*1700*1900"]
+    ):
+        make_variant(
+            db_session, series, year, config_version=f"款{index}",
+            price_cny=50000 + index * 1000,
+            facts=[("尺寸", F_SIZE, size, "mm", None)], source=source,
+        )
+    text = size_line(db_session, series)
+    assert text is not None
+    # 4 款同一尺寸 -> 覆盖率必须记 4，而不是被拆成 2+2 后的 2
+    assert "在售 5 款中 4 款为此尺寸" in text, text
+    assert "3797" in text, text

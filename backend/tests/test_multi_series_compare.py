@@ -19,6 +19,8 @@ from sqlalchemy.orm import Session
 from app.agent.series_qa import _count_phrase, build_series_qa_answer
 from tests.seed import make_brand, make_series, make_source, make_variant, make_year
 
+F_SIZE = "长*宽*高(mm)"
+
 FACTS = {
     "A": [("尺寸", "长*宽*高(mm)", "4800*1900*1500", "mm", None),
           ("动力", "电动机总功率(kW)", "200", "kW", None)],
@@ -216,6 +218,85 @@ def test_summary_never_mentions_两款_for_three(db_session: Session):
     """反向断言：任何三车系回答里都不得出现「两款车」。"""
     text = _text(db_session, ["甲车", "乙车", "丙车"], ["100000", "200000", "300000"])
     assert not re.search(r"两款车", text), text
+
+
+# ── 审查 P1-3：尺寸口径必须**逐字一致** ──────────────────────────────────
+def _seed_size_tier(db: Session, name: str, brand_name: str, sizes: list[str]):
+    """造一个尺寸**多档、且众数 ≠ 首值**的车系——正是两种实现会分道扬镳的形状。
+
+    品牌名**不能**包含车系名，否则 `display_name` 会拼成「品牌车系车系」而测试取不到块头。
+    """
+    brand = make_brand(db, brand_name)
+    series = make_series(db, brand, name)
+    series.positioning = "中大型车"
+    year = make_year(db, series)
+    source = make_source(db)
+    for index, size in enumerate(sizes):
+        make_variant(
+            db, series, year, config_version=f"款{index}",
+            price_cny=200000 + index * 10000,
+            # 首条故意是**非众数**的那个，`rank_headlines` 的 text 模式会取它
+            facts=[("尺寸", F_SIZE, size, "mm", None),
+                   ("动力", "电动机总功率(kW)", "200", "kW", None)],
+            source=source,
+        )
+    return series, brand
+
+
+def _size_in_block(text: str, name: str) -> str:
+    """取某车系块里「核心参数」那一行的「尺寸」项。
+
+    块头（【X】…）与核心参数行是**两行**，所以要把块头和下一行拼起来再切。
+    """
+    lines = text.splitlines()
+    idx = next(i for i, ln in enumerate(lines) if ln.startswith(f"【{name}】"))
+    joined = lines[idx] + "\n" + lines[idx + 1]
+    core = joined.split("核心参数（全系极值）：")[1]
+    return next(p for p in core.split("；") if p.startswith("尺寸 ")).removeprefix("尺寸 ")
+
+
+def _size_in_diff(text: str) -> str:
+    seg = next(s for s in _diff_line(text).split("；") if "尺寸：" in s)
+    return seg.split("尺寸：")[1].split(" vs ")[0]
+
+
+def test_comparison_line_size_matches_block_exactly(db_session: Session):
+    """**逐字相等**，不是「包含某个数字」。
+
+    审查 P1-3 实锤：此前的种子每个车系只造 1 个款型 1 条尺寸（单档、无覆盖率后缀），
+    于是「走 `size_lines`」与「走 `heads_map` 首值」两种实现**输出完全相同**——
+    变异体退回首值时全量测试 0 红，本轮声称修好的「三展示点同口径」**没有任何测试保护**。
+    后果可复现：小米SU7 会变成「块里 1445 mm（在售 3 款中 2 款为此尺寸）、对比行 1460 mm」。
+    """
+    a, ba = _seed_size_tier(db_session, "甲车", "甲厂",
+                             ["4997*1963*1460", "4997*1963*1445", "4997*1963*1445"])
+    b, bb = _seed_size_tier(db_session, "乙车", "乙厂",
+                             ["4900*1950*1520", "4900*1950*1500", "4900*1950*1500"])
+    c, bc = _seed_size_tier(db_session, "丙车", "丙厂",
+                             ["5050*1970*1540", "5050*1970*1520", "5050*1970*1520"])
+    text = build_series_qa_answer(db_session, [(a, ba), (b, bb), (c, bc)], "甲车乙车丙车怎么选")
+
+    for name, block_name in (("甲车", "甲厂甲车"), ("乙车", "乙厂乙车"), ("丙车", "丙厂丙车")):
+        block = _size_in_block(text, block_name)
+        assert "在售 3 款中 2 款为此尺寸" in block, f"{name} 未取众数：{block}"
+    # 逐项对比行里的三个尺寸，必须与各自车系块**逐字相同**
+    diff_sizes = [s.strip() for s in _diff_line_full(text)]
+    blocks = [
+        _size_in_block(text, "甲厂甲车"),
+        _size_in_block(text, "乙厂乙车"),
+        _size_in_block(text, "丙厂丙车"),
+    ]
+    assert diff_sizes == blocks, f"对比行 {diff_sizes} != 车系块 {blocks}"
+
+
+def _diff_line(text: str) -> str:
+    return next(ln for ln in text.splitlines() if ln.startswith("同量纲参数对比"))
+
+
+def _diff_line_full(text: str) -> list[str]:
+    """返回「尺寸」那一项按 vs 切开的各车系取值（保持原样，不 strip）。"""
+    seg = next(s for s in _diff_line(text).split("；") if "尺寸：" in s)
+    return seg.split("尺寸：")[1].split(" vs ")
 
 
 

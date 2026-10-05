@@ -24,7 +24,9 @@ from app.catalog.series_index import (
     HEADLINE_PREFIX,
     HEADLINE_SPECS,
     display_name,
+    head_with_size,
     rank_headlines,
+    size_lines,
 )
 from app.common.models import (
     Brand,
@@ -457,6 +459,11 @@ def _chunk(state: IngestState) -> IngestState:
 
     # 3) 车系级摘要切片
     headlines = rank_headlines(materials["facts_by_series"])
+    # 尺寸口径必须与**问答卡片**同源（2026-10-05 审查 P1-2）：卡片走
+    # `size_lines`（众数 + 覆盖率），切片此前仍走 `rank_headlines` 的首值，
+    # 于是同一条回答里两个尺寸、LLM 必然挑一个说——实测 **113 个车系**打架。
+    # `size_lines` 是批量的（一次查询覆盖全部车系），不会把 N+1 带进索引构建。
+    size_map = size_lines(db, [series for series, _ in materials["series_rows"]])
     for series, brand in materials["series_rows"]:
         energy = " / ".join(series.energy_types or [])
         body_energy = "、".join(
@@ -468,7 +475,9 @@ def _chunk(state: IngestState) -> IngestState:
                 text=_summary_chunk_text(
                     series,
                     brand,
-                    headlines.get(series.id, {}),
+                    head_with_size(
+                        size_map.get(series.id), headlines.get(series.id, {})
+                    ),
                     materials["price_by_series"].get(series.id),
                     materials["count_by_series"].get(series.id, 0),
                     materials["sales_by_series"].get(series.id),
@@ -606,3 +615,4 @@ def run_ingest(
         "stages": state.get("stages", []),
         "warnings": state.get("warnings", []),
     }
+

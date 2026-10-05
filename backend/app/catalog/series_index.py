@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import Counter
 from typing import NamedTuple
 
 from sqlalchemy import func, select
@@ -277,6 +278,38 @@ def _numeric(text: str) -> float | None:
 
 _KEY_UNIT_RE = re.compile(r"\(([^()]*)\)[^()]*$")
 _UNIT_CHARS = re.compile(r"^[A-Za-z0-9%·²³/°]+$")
+#: 键尾括号（半角或全角，且必须在末尾）——「轴距(mm)」「电池快充时间（小时）」
+_KEY_TAIL_PAREN_RE = re.compile(r"[（(]([^（）()]*)[)）]\s*$")
+#: 中文单位词：`_UNIT_CHARS` 只认 ASCII，「小时/分钟/英寸/匹」这些认不出来
+CN_UNIT_WORDS = frozenset(
+    {"小时", "分钟", "秒", "英寸", "吋", "匹", "千瓦", "牛米", "个"}
+)
+
+
+def split_key_unit(key: str) -> tuple[str, str | None]:
+    """键 → (去掉尾部单位括号后的名字, 单位)；不是单位括号则单位为 None。
+
+    **唯一一处**的「键尾括号是不是单位」判定。2026-10-05 审查实锤：此前
+    `unit_from_key`（半角+ASCII）与 `series_qa.display_fact_key`（全角+中文词表）
+    是两个**各自独立**的识别器，于是：
+
+        电池快充时间(小时)   标签剥掉 (小时)，但值侧 unit_from_key 认不出「小时」
+        电池快充时间(分钟)   标签同样剥成「电池快充时间」
+
+    同一回答里两个**量纲差 60 倍**的东西同名，且两边都没有单位可区分
+    （实测 877 车系 × 10 组提问 32347 行里有 **719 行**如此）。
+    两个识别器必须共用同一个判据，否则改一边就会漂。
+
+    只认**末尾**的括号：中部括号是名字的一部分
+    （`540°全景影像系统(带透明底盘)`、`L2级组合驾驶辅助包（限时免费）`）。
+    """
+    matched = _KEY_TAIL_PAREN_RE.search(key)
+    if not matched:
+        return key, None
+    inner = matched.group(1).strip()
+    if inner and (inner in CN_UNIT_WORDS or _UNIT_CHARS.match(inner)):
+        return key[: matched.start()].strip(), inner
+    return key, None
 
 
 def unit_from_key(key: str) -> str | None:
@@ -438,6 +471,102 @@ def rank_headlines(
             out[label] = _range_text(best, same_unit) or best.text
         out_map[sid] = out
     return out_map
+
+
+#: 尺寸的事实键（text 模式，见 `HEADLINE_SPECS`）
+_SIZE_FACT_KEY = "长*宽*高(mm)"
+
+
+def size_lines(
+    db: Session, series_list: list[VehicleSeries]
+) -> dict[int, str]:
+    """批量算「尺寸」展示文本：{series_id: 文本}。单档照旧；多档取**在售款型里的众数**并标覆盖率。
+
+    为什么单独查、不并进 `rank_headlines`：
+      1. 覆盖率必须**按款型**去重——`SpecFact` 对 `(variant_id, fact_key)` 无唯一约束
+         （全库 36241 组重复），按事实行累加会虚高。N1 已经吃过一次这个亏。
+         而 `rank_headlines` 拿到的行里没有 `variant_id`。
+      2. 尺寸是 text 模式「取首值」，那个首值取决于数据库返回顺序，本质是**任取**。
+         实测 312/877（35.6%）的车系尺寸多档，其中 113 个（36.2%）众数与首值不同——
+         改完这 113 个会真的换一个更有代表性的值。
+
+    **批量而非逐车系查**（2026-10-05 审查 P2）：逐个查会让 3 车系对比多打 6 条 SQL，
+    与「批量核心参数（此前逐车系单查，N 次查询）」的既有评审结论相悖。
+    卡片与 RAG 切片都走这里——**两处口径必须同源**，否则切片（LLM 直接读）与卡片
+    会为同一个车系报两个尺寸（实测 113 个车系打架，审查 P1-2）。
+
+    并列第一时（实测 79 个车系）取 `(variant_id, fact_id)` 最小者——**SQL 必须显式
+    `ORDER BY`**，SQLite 靠 rowid 恰好稳定，PostgreSQL 无此保证（审查 P2）。
+
+    `rank_headlines` 侧的尺寸行为**不动**（仍取首值、不参与区间），
+    本函数只在渲染时覆盖它。
+    """
+    if not series_list:
+        return {}
+    key_unit = unit_from_key(_SIZE_FACT_KEY) or ""
+    rows = db.execute(
+        select(
+            VehicleVariant.series_id, VehicleVariant.id, SpecFact.fact_value,
+            SpecFact.unit, SpecFact.id,
+        )
+        .join(SpecFact, SpecFact.variant_id == VehicleVariant.id)
+        .where(
+            VehicleVariant.series_id.in_([s.id for s in series_list]),
+            VehicleVariant.status == "on_sale",
+            SpecFact.fact_key == _SIZE_FACT_KEY,
+        )
+        # 并列取「最早」需要确定性：没有 ORDER BY 时 SQLite 靠 rowid 稳定，
+        # PostgreSQL 不保证（审查 P2）。
+        .order_by(VehicleVariant.series_id, VehicleVariant.id, SpecFact.id)
+    ).all()
+
+    # 同一车系内：{series_id: {variant_id: 首个尺寸文本}}
+    by_series: dict[int, dict[int, str]] = {}
+    for series_id, variant_id, value, row_unit, _fact_id in rows:
+        if not value:
+            continue
+        # 行上的 unit 优先（与 `rank_headlines` 同口径），没有才从键名推
+        unit = (row_unit or "").strip() or key_unit
+        text = str(value).strip()
+        if unit and text.lower().endswith(unit.lower()):
+            text = text[: -len(unit)].strip()  # 值自带单位，别再拼一遍
+        # 乘号写法混用（真实库 7 个车系同尺寸有 `*` 与 `×` 两种写法）会被当成两档，
+        # 覆盖率随之失真（审查 P2）——归一后再入桶。
+        text = text.replace("×", "*").replace("＊", "*")
+        by_series.setdefault(int(series_id), {}).setdefault(
+            int(variant_id), f"{text} {unit}".strip()
+        )
+
+    out: dict[int, str] = {}
+    for series_id, per_variant in by_series.items():
+        if not per_variant:
+            continue
+        counter = Counter(per_variant.values())
+        # Counter 保插入序，most_common 在同票时保留「先出现」的那个（见 docstring）
+        top_text, top_count = counter.most_common(1)[0]
+        total = len(per_variant)
+        # 单档：top_text 已含单位，不要再拼一遍（否则「mm mm」）
+        out[series_id] = (
+            top_text if len(counter) < 2
+            else f"{top_text}（在售 {total} 款中 {top_count} 款为此尺寸）"
+        )
+    return out
+
+
+def size_line(db: Session, series: VehicleSeries) -> str | None:
+    """`size_lines` 的单车系版本（卡片路径用）。"""
+    return size_lines(db, [series]).get(series.id)
+
+
+def head_with_size(size: str | None, head: dict[str, str]) -> dict[str, str]:
+    """把 `rank_headlines` 的尺寸项换成 `size_line` 的口径（众数 + 覆盖率）。
+
+    四个展示点（单车系块、对比块、逐项对比行、RAG 车系摘要切片）都必须过这一道——
+    少一个就会在同一条回答里出现两个互相矛盾的尺寸，或让 LLM 读到与卡片不同的数
+    （2026-10-05 审查 P1-2：卡片走众数、切片仍走首值，实测 113 个车系打架）。
+    `size` 由调用方从 `size_lines` 的**批量**结果里取，避免 N+1 查询（审查 P2）。
+    """
+    return {**head, "尺寸": size} if size else head
 
 
 def series_headline(db: Session, series: VehicleSeries) -> dict[str, str]:

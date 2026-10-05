@@ -219,6 +219,41 @@ def test_build_chunks_kinds_and_search_flow(db_session: Session):
     assert rag.search(db_session, "空间", filters={"series_id": 999999}) == []
 
 
+def test_series_summary_slice_size_matches_card(db_session: Session):
+    """RAG 车系摘要切片的尺寸必须与**问答卡片**同口径（2026-10-05 审查 P1-2）。
+
+    切片文本按其自身注释是「数据佐证，直接进 LLM 上下文」。此前卡片走
+    `size_lines`（众数 + 覆盖率）、切片仍走 `rank_headlines` 的**首值**，
+    于是同一条回答里两个尺寸、LLM 必然挑一个说——实测 **113 个车系**打架。
+    """
+    from app.agent.series_qa import size_line
+
+    source = make_source(db_session, name="尺寸口径来源")
+    brand = make_brand(db_session, name="尺寸口径品牌", source=source)
+    series = make_series(db_session, brand, name="尺寸口径车", source=source)
+    year = make_year(db_session, series)
+    # 首条**故意**是非众数的那个：text 模式会取它，正是两种实现分道扬镳的地方
+    for index, size in enumerate(["4997*1963*1460", "4997*1963*1445", "4997*1963*1445"]):
+        make_variant(
+            db_session, series, year, config_version=f"款{index}",
+            price_cny=200000 + index * 10000,
+            facts=[("尺寸", "长*宽*高(mm)", size, "mm", None)], source=source,
+        )
+
+    card = size_line(db_session, series)
+    assert card is not None and "在售 3 款中 2 款为此尺寸" in card, card
+
+    # `build_chunks` 的 load / chunk 两节点之间会 `_end_readonly_tx`（expunge_all + rollback），
+    # 夹具数据若还在未提交事务里会被**丢掉**，切片就会退回 `rank_headlines` 的首值——
+    # 那是测试环境假象，不是生产缺陷（生产读的是已提交数据）。先提交。
+    db_session.commit()
+
+    chunks = build_chunks(db_session)
+    summary = next(c for c in chunks if c.kind == "series_summary" and c.series_id == series.id)
+    # 切片里的尺寸串必须与卡片**逐字相同**
+    assert card in summary.text, f"切片未用 size_lines 口径：{summary.text}"
+
+
 def test_build_chunks_samples_per_variant(db_session: Session):
     """优化②：事实按款型取样合并——每个车系都有覆盖，且单款型不超过配额。"""
     from app.retrieval.config import FACTS_PER_VARIANT
