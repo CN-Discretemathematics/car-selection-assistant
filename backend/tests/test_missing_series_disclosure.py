@@ -136,7 +136,7 @@ def test_partial_multi_car_query_must_disclose_the_missing_one(db_session: Sessi
         "原先「哪个更好」不在触发词表，会去追问用户已经给过的信息"
     )
     text = build_series_qa_answer(db_session, resolved, msg)
-    assert "没有收录" in text or "库里没有" in text, (
+    assert "没能在库里找到" in text, (
         f"应当披露「明锐我们库里没有」。实际：{text[:240]}"
     )
     assert "朗逸" in text, "查得到的那台仍要正常回答，不能因为漏了一台就什么都不答"
@@ -267,7 +267,7 @@ def test_real_comparison_still_discloses_missing_car(db_session: Session):
     msg = "大众朗逸和明锐哪个更好"
     resolved = resolve_series(db_session, msg)
     text = _build(db_session, resolved, msg)
-    assert "没有收录" in text or "库里没有" in text, (
+    assert "没能在库里找到" in text, (
         f"明锐确实不在库里，应当披露。实际：{text[:200]}"
     )
     assert "朗逸" in text, "查得到的那台仍要正常回答"

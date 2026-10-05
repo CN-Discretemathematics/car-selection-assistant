@@ -577,10 +577,7 @@ def _absent_series_note(
     第二条：点名多台只查到一部分时也要说。「大众朗逸和明锐哪个更好」——明锐不在
     库里，不能只答朗逸就让用户以为看全了。
     """
-    from app.catalog.brands import (
-        brand_names_in_message,
-        brand_names_used_as_vehicle_in_message,
-    )
+    from app.catalog.brands import brand_names_in_message
 
     if not resolved:
         return None
@@ -614,25 +611,28 @@ def _absent_series_note(
     #     **一个参数都不给**。中文里「和」绝大多数时候连的是属性，不是车。
     if not _has_comparison_signal(message):
         return None
-    # ⚠️ 「你提到的 X 库里没有收录」这句话**只对「库���确实没有这个车系」成立**。
-    # 若候选里出现的是一个**在库品牌**（大众 29 款、五菱 47 款…），说它「没有收录」
-    # 是假话——它不是一个车系名。此处不披露，让下游按已解析到的车系正常回答
-    # （与本轮改动前的行为一致）。品牌级对比消歧（「大众和汉哪个好」该回
-    # 「大众是品牌不是一款车，想比哪款？」）是独立的一层，尚未实现，见台账。
-    if mentioned:
-        return None
-    # 「这个候选其实是个品牌」也是「库里没有收录」这句话不成立的理由：
-    # 「大众和汉哪个好」里大众**不是没收录**，它是个有 29 款车的品牌。
-    # 这里用 require_model_suffix=False 取「消息里出现过的全部库内品牌」。
-    if brand_names_used_as_vehicle_in_message(db, message, resolved):
+    # ⚠️ 2026-10-06 第三轮审查后定下的**单向默认**：宁可多披露，绝不静默漏答。
+    #
+    # 这里原先还有一个守卫——「若候选里出现的是品牌，就别披露」，用来避免把
+    # 「五菱和五菱缤果」说成缺车。但它制造了**更糟的错误**：库里 59.6% 的车系名
+    # 本身就以品牌名开头（541/908），于是「五菱之光**和**五菱祥运」这类句式被
+    # 静默吞掉——用户问两台、系统只答一台还一声不吭。**已删。**
+    #
+    # 代价是「五菱和五菱缤果」会多一句提示。但那是**多一句话**，
+    # 而静默漏答是**骗人**——这个项目最该避免的失败模式。
+    # 文案因此只陈述**我做了什么**（永远为真），不断言目录里没有：
+    #   旧：…其余**库里没有收录**        ← 对目录的断言，可能为假
+    #   新：…你提到的另外 1 台我没找到     ← 对我自己的行为陈述，必然为真
+    if not _has_comparison_signal(message):
         return None
     implied = _implied_candidate_count(message)
     if implied > len(resolved):
         got_names = "、".join(display_names)
+        missing = implied - len(resolved)
         return (
-            f"你问的「{implied} 台」里，我们只查到 {len(resolved)} 台"
-            f"（{got_names}），其余**库里没有收录**，"
-            "所以下面只列查得到的那部分——不是全部对比结果。"
+            f"你一共提到 {implied} 台，我只查到 {len(resolved)} 台（{got_names}）；"
+            f"另外 {missing} 台我没能在库里找到，所以下面只列查得到的这部分"
+            "——不是全部对比结果。"
         )
     return None
 

@@ -168,7 +168,7 @@ def resolve_brand_mentions(
 
 
 #: 品牌词后面若紧跟这些字符，说明它是**独立**出现的候选（后面接着另一台车），
-#: 而不是一个车系名的前缀。用于 `brand_names_used_as_vehicle_in_message`。
+#: 而不是一个车系名的前缀。
 _CANDIDATE_CONNECTOR_CHARS = "和与跟、，,或还是？? 　"
 
 
@@ -262,7 +262,6 @@ def brand_names_used_as_vehicle_in_message(
                 # 品牌词独立出现（后面是并列连接词，或到此为止）→ 被当成一辆车
                 used.add(label)
     return used
-
 
 def catalog_overview(
     db: Session,
