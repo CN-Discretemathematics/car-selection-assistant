@@ -167,13 +167,17 @@ def resolve_brand_mentions(
     return result
 
 
+#: 品牌词后面若紧跟这些字符，说明它是**独立**出现的候选（后面接着另一台车），
+#: 而不是一个车系名的前缀。用于 `brand_names_used_as_vehicle_in_message`。
+_CANDIDATE_CONNECTOR_CHARS = "和与跟、，,或还是？? 　"
+
+
 def brand_names_in_message(
     db: Session,
     message: str,
     series_names: list[str] | None = None,
     *,
     require_model_suffix: bool = True,
-    exclude_owned: bool = True,
 ) -> set[str]:
     """消息里出现的**库内品牌名**（只判「出现」，不判是否构成约束）。
 
@@ -203,7 +207,7 @@ def brand_names_in_message(
     for name, _brand_id, label in _load_entries(db):
         if name not in normalized:
             continue
-        if exclude_owned and any(name in s for s in owned):
+        if any(name in s for s in owned):
             continue  # 该品牌词属于被点名的车系名本身
         # 2026-10-06（独立审查 P0-1）：只在品牌词**紧跟**一个字母/数字串时才算
         # 「点名了某品牌下的某台车」。
@@ -227,21 +231,24 @@ def brand_names_used_as_vehicle_in_message(
     message: str,
     resolved: list[tuple[Any, Any]],
 ) -> set[str]:
-    """消息里被**当成一辆车**点名的品牌词（`exclude_owned` 的精确版）。
+    """消息里被**当成一辆车**点名的品牌词。
 
-    与 `brand_names_in_message(..., exclude_owned=False)` 的区别在于**按位置判断**：
+    判据是**品牌词后面跟的是不是并列连接词**（或消息到此为止），而不是
+    「后面跟的是不是某个已解析车系名」——后者会误伤 59.6% 的车系
+    （`series.name` 本身以品牌名开头）：
 
-        「大众**朗逸**和明锐哪个更好」→ 大众后面直接跟着已解析的「朗逸」
-            → 大众是这台车的**前缀**，不算「又点名了一辆车」→ 应当照常披露明锐缺失
-        「五菱**和**缤果Pro哪个好」  → 五菱后面是连接词，不跟任何已解析车系名
-            → 五菱确实被当成一辆车点名了，而它是品牌（47 款）→ 不可说「库里没有收录」
+        「五菱**和**五菱缤果哪个好」  → 五菱后面是连接词 → 被当成一辆车点名了
+            它是品牌（47 款）→ 不可说「库里没有收录」
+        「五菱之光**和**五菱祥运哪个好」→ 五菱后面是「之光」「祥运」，都不是连接词
+            → 五菱祥运才是那辆缺失的车（五菱祥运库里没有）→ **必须披露**
 
-    这是 2026-10-06 独立审查 P1-2 的实测结论：子串排除会「把正要被检测的品牌藏起来」。
+    2026-10-06 独立审查 P0-1 实测：用「是否跟着已解析车系名」判，会把后者
+    这类**合法的缺失披露静默吞掉**，而用户问了两台车、系统只答一台还一声不吭——
+    正是本模块 docstring 自己说的「比崩溃更坏」的那一类。
     """
     normalized = normalize_name(message)
     if not normalized:
         return set()
-    resolved_names = [normalize_name(series.name) for series, _b in resolved]
     used: set[str] = set()
     for name, _brand_id, label in _load_entries(db):
         start = 0
@@ -251,9 +258,9 @@ def brand_names_used_as_vehicle_in_message(
                 break
             start = pos + 1
             tail = normalized[pos + len(name):]
-            if any(tail.startswith(rn) for rn in resolved_names if rn):
-                continue  # 品牌是某个已解析车系名的前缀（大众朗逸）→ 不是另一辆车
-            used.add(label)
+            if not tail or tail[0] in _CANDIDATE_CONNECTOR_CHARS:
+                # 品牌词独立出现（后面是并列连接词，或到此为止）→ 被当成一辆车
+                used.add(label)
     return used
 
 

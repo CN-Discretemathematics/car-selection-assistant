@@ -390,15 +390,16 @@ def test_same_brand_self_comparison_is_not_declared_missing(db_session: Session)
 
     src = make_source(db_session, name="汽车之家")
     brand = make_brand(db_session, name="五菱", source=src)
-    s = make_series(db_session, brand, name="五菱缤果", body_type="hatchback",
-                    energy_types=("BEV",), source=src)
-    year = make_year(db_session, s)
-    make_variant(db_session, s, year, config_version="旗舰", energy_type="BEV",
-                 price_cny="60000", source=src,
-                 facts=[("参数信息", "CLTC纯电续航里程(km)", "410", "km", "CLTC")])
+    for nm in ("五菱缤果", "五菱宏光"):
+        s = make_series(db_session, brand, name=nm, body_type="hatchback",
+                        energy_types=("BEV",), source=src)
+        year = make_year(db_session, s)
+        make_variant(db_session, s, year, config_version="旗舰", energy_type="BEV",
+                     price_cny="60000", source=src,
+                     facts=[("参数信息", "CLTC纯电续航里程(km)", "410", "km", "CLTC")])
     db_session.commit()
 
-    for msg in ("五菱和五菱缤果哪个好", "大众和五菱缤果哪个好"):
+    for msg in ("五菱和五菱缤果哪个好", "五菱缤果和五菱宏光哪个好"):
         resolved = resolve_series(db_session, msg)
         text = build_series_qa_answer(db_session, resolved, msg)
         assert "库里没有收录" not in text and "没有**对应的车系资料" not in text, (
