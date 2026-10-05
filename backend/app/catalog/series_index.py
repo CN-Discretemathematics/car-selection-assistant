@@ -102,6 +102,11 @@ _resolve_cache: dict = {"fingerprint": None, "entries": ()}
 _MIN_VARIANT_NAME_LEN = 6
 
 
+#: 允许进对话解析索引的**单汉字**车系名。逐字裁决，理由见 `_load_name_entries` 注释。
+#: 已知接受的误伤：放开「炮」后，「大炮」「炮灰」这类句子会命中长城炮（实测语料里罕见）。
+_SINGLE_CHAR_SERIES_ALLOWED = frozenset({"汉", "炮"})
+
+
 def _load_name_entries(db: Session) -> tuple[tuple[str, int], ...]:
     rows = db.execute(
         select(VehicleSeries, Brand)
@@ -131,7 +136,24 @@ def _load_name_entries(db: Session) -> tuple[tuple[str, int], ...]:
             # 砍掉纯数字短名不会伤到任何真实用法，却能消掉整类误伤。
             # ⚠️ 只改对话解析（_load_name_entries）；目录搜索 keyword_score 走另一条
             # 路径、保留裸数字命中——那是用户主动搜「20」，语义与预算无关。
-            if len(norm) >= 2 and norm not in seen and not norm.isdigit():
+            #
+            # 2026-10-05：`len(norm) >= 2` 是**为纯数字短名设的门槛**，却把
+            # **单汉字车系名**也一起砍了。实测全库只有 3 个单字车系名
+            # （比亚迪汉 20 款 / 比亚迪夏 4 款 / 长城炮 62 款），它们**全部**
+            # 进不了索引，用户点名完全解析不出来：
+            #   「汉怎么样」/「汉的续航多少」/「炮怎么样」 → 0 个车系
+            # 中文没有词边界，单字命中必然带误伤，所以**逐字裁决**而不是一律放开：
+            #   放开 汉：用户口语就说「汉」，且该字几乎不作独立常用词，误伤≈0。
+            #        炮：长城炮 62 款，购车语境里「炮」基本只指它。
+            #   挡住 夏：「夏天买车合适吗」实测会误判为比亚迪夏（现有重叠判定
+            #        拦不住——「夏天」不是候选名），而比亚迪夏只有 4 款。
+            # 新增单字车系名时**必须**在这里逐字裁决：先拿真实购车语料跑一遍
+            # 「<该字><常见构词>」的句子（夏天 / 大炮 / 炮灰…），确认不误伤再加入。
+            if (
+                norm not in seen
+                and not norm.isdigit()
+                and (len(norm) >= 2 or norm in _SINGLE_CHAR_SERIES_ALLOWED)
+            ):
                 seen.add(norm)
                 entries.append((norm, series.id))
     # 在售款型显示名 → 车系（v6.1）：对比/参数题常以款型名表述（「2023款 470km
@@ -186,6 +208,21 @@ def _series_fingerprint(db: Session) -> tuple:
     return tuple(row) + tuple(variant_row)
 
 
+def _first_free_span(
+    msg: str, norm: str, chosen: list[tuple[int, int, int, str]]
+) -> tuple[int, int] | None:
+    """`norm` 在 `msg` 里**第一个不与已选跨度重叠**的出现位置；找不到返回 None。"""
+    start = 0
+    while True:
+        pos = msg.find(norm, start)
+        if pos < 0:
+            return None
+        end = pos + len(norm)
+        if not any(pos < oend and end > ostart for ostart, oend, _, _ in chosen):
+            return pos, end
+        start = pos + 1
+
+
 def resolve_series(db: Session, message: str) -> list[tuple[VehicleSeries, Brand | None]]:
     """从消息中解析用户提及的真实车系（按出现顺序，最多 4 个）。
 
@@ -207,10 +244,14 @@ def resolve_series(db: Session, message: str) -> list[tuple[VehicleSeries, Brand
     candidates: list[tuple[str, int]] = [(norm, sid) for norm, sid in entries if norm in msg]
     chosen: list[tuple[int, int, int, str]] = []  # (start, end, series_id, norm)
     for norm, sid in sorted(candidates, key=lambda c: (-len(c[0]), c[1])):
-        start = msg.find(norm)
-        end = start + len(norm)
-        if any(start < oend and end > ostart for ostart, oend, _, _ in chosen):
-            continue  # 与已选更长名字重叠（腾势Z9 ⊂ 腾势Z9GT）
+        # 2026-10-05：此前是 `start = msg.find(norm)`——**只看首次出现**。
+        # 短名出现在**后面**时会被误杀：「汉L和汉怎么选」里「汉」在位置 4，
+        # 但 find 返回 0（落在「汉l」的跨度 [0,2) 内），重叠判定把它当重叠跳过了，
+        # 于是用户点名的「汉」被静默丢掉。改为**找第一个不被已选跨度覆盖的位置**。
+        span = _first_free_span(msg, norm, chosen)
+        if span is None:
+            continue  # 全部出现位置都被更长的名字覆盖（腾势Z9 ⊂ 腾势Z9GT）
+        start, end = span
         chosen.append((start, end, sid, norm))
     chosen.sort(key=lambda c: c[0])
     # 去重保序：车系名与其款型名同句出现（「比亚迪e2 的 2023款 出行版」）解析出同一
