@@ -218,8 +218,46 @@ def resolve_series(db: Session, message: str) -> list[tuple[VehicleSeries, Brand
     return [by_id[sid] for sid in ids if sid in by_id]
 
 
+#: 品牌名里可省略的通用后缀——「小米汽车」对用户就是「小米」，拼到车系名前会重复。
+_GENERIC_BRAND_SUFFIXES = ("汽车", "集团", "公司", "科技", "控股")
+
+
+def _brand_leads_series(brand_name: str, series_name: str) -> bool:
+    """车系名是否**已经**带上了品牌标识，再拼一遍只会重复。
+
+    原来的 `series_name.startswith(brand_name)` 只挡**完全**前缀，于是
+    品牌「小米汽车」+ 车系「小米SU7」会拼出「**小米汽车小米SU7**」——真实库上
+    有 9 个这样的车系（江淮 4 / 小米 3 / 吉利 2），其中小米SU7、SU7 Ultra、YU7
+    是高曝光车系，用户第一眼就能看见这个重复。
+
+    这里按「品牌名去掉通用后缀与纯英文词后，剩下的中文词是否已在车系名里」判断，
+    于是「小米汽车」的核心词「小米」能认出「小米SU7」，而「特斯拉」认不出「Model Y」
+    （仍拼成「特斯拉Model Y」）。
+
+    判据是「**包含**」而不是「前缀」：品牌词未必在开头——「几何」+「吉利几何A」、
+    「启源」+「长安启源A06」、「大众」+「一汽-大众CC」、「本田」+「东风本田S7」、
+    「大通」+「上汽大通MAXUS H90房车」这 24 个车系，重复的词在中间。
+    最初只按前缀判，漏掉了这 24 个——是反向验证的变异体把它逼出来的。
+
+    全库实测：908 个车系里 **33 个**会因此改变（9 个重复在开头 + 24 个重复在中间），
+    其余 875 个逐字不变。
+    """
+    if series_name.startswith(brand_name):
+        return True
+    stem = brand_name
+    for suffix in _GENERIC_BRAND_SUFFIXES:
+        if stem.endswith(suffix) and len(stem) - len(suffix) >= 2:
+            stem = stem[: -len(suffix)]
+    return any(
+        # len>=2：单字词当判据太弱（真实库 92 个品牌里没有单字中文品牌，
+        # 这条是防御性的，**没有测试覆盖**，改它时别当成有依据的行为）
+        len(token) >= 2 and not token.isascii() and token in series_name
+        for token in stem.split()
+    )
+
+
 def display_name(series: VehicleSeries, brand: Brand | None) -> str:
-    if brand and brand.name and not series.name.startswith(brand.name):
+    if brand and brand.name and not _brand_leads_series(brand.name, series.name):
         return f"{brand.name}{series.name}"
     return series.name
 
