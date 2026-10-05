@@ -106,6 +106,14 @@ class VehicleListItemOut(BaseModel):
     series_name: str
     brand_id: int
     brand_name: str
+    #: 车系名里是否**已经**带上了品牌标识（如「小米SU7」之于「小米汽车」）。
+    #: 前端据此决定要不要在车系名前再拼一次品牌——判据由后端给，
+    #: 前端 3 处（BrowseCard / CarCard / SearchBar）曾各自重推一遍
+    #: `!series_name.startsWith(brand_name)`，那条规则只挡**完全**前缀，
+    #: 于是 33 个车系在卡片上显示成「小米汽车小米SU7」「启源长安启源A06」。
+    #: 同一规则的第二份 TS 实现必然与后端 `_brand_leads_series` 漂移
+    #: （本会话已因「两套独立单位识别器」吃过一次亏），故由后端下发结论。
+    show_brand_prefix: bool = True
     brand_type: str | None = None
     body_type: str | None = None
     energy_types: list[str] = []

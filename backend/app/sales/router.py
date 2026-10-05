@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.catalog import services as catalog
-from app.catalog.series_index import keyword_needle, keyword_score
+from app.catalog.series_index import _brand_leads_series, keyword_needle, keyword_score
 from app.common.database import get_session
 from app.common.enums import NEW_ENERGY_TYPES
 from app.common.images import proxy_image_url
@@ -137,6 +137,7 @@ def home(
                 series_name=series.name,
                 brand_id=brand.id,
                 brand_name=brand.name,
+                show_brand_prefix=not _brand_leads_series(brand.name or "", series.name),
                 thumbnail_url=proxy_image_url(series.thumbnail_url),
                 body_type=series.body_type,
                 energy_types=series.energy_types or [],

@@ -13,7 +13,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.agent.series_qa import display_fact_key, probe_facts, size_line
-from app.catalog.series_index import HEADLINE_PREFIX
+from app.catalog.series_index import HEADLINE_PREFIX, split_key_unit
 from app.rag.ingest import _summary_chunk_text
 from tests.seed import make_brand, make_series, make_source, make_variant, make_year
 
@@ -108,6 +108,75 @@ def test_distinct_display_names_are_still_stripped():
     """无同名冲突时照常剥——歧义保护不能反过来让所有键都不剥。"""
     lines = probe_facts([("电池慢充时间(小时)", "1.5", None, None)], "电池快充多久")
     assert lines == ["电池慢充时间 = 1.5 小时"], lines
+
+
+# ── 键尾括号的两种形态 + 显式单位白名单 ──────────────────────────────────
+def test_unit_parenthesis_with_cycle_suffix():
+    """「括号 + 已知工况代号」形态必须识别——`unit_from_key` 早就支持，
+    合并成 `split_key_unit` 时若只认「括号在末尾」就会把这批单位弄丢。
+
+    实测回归：`最低荷电状态油耗(L/100km)WLTC = 4.7（WLTC）` 少了 L/100km。
+    """
+    for key in (
+        "最低荷电状态油耗(L/100km)WLTC",
+        "最低荷电状态油耗(L/100km)NEDC",
+        "最低荷电状态油耗(L/100km)CLTC",
+    ):
+        assert split_key_unit(key) == ("最低荷电状态油耗", "L/100km"), key
+    lines = probe_facts(
+        [("最低荷电状态油耗(L/100km)WLTC", "4.7", None, "WLTC")], "油耗怎么样"
+    )
+    assert lines == ["最低荷电状态油耗 = 4.7 L/100km（WLTC）"], lines
+
+
+def test_abbreviations_are_not_treated_as_units():
+    """库里这些**能通过 ASCII 字符集**却不是单位，剥了会把缩写塞到值上。
+
+    判据用显式白名单而不是「形状像单位」：`NOA`/`AT`/`ICCB`/`Cd`/`100kWh`
+    实测都曾被当单位注入。`Cd` 是无量纲风阻系数，`ICCB` 是接口标准，
+    `100kWh` 是电池包规格（属于名字的一部分）。
+    """
+    for key in (
+        "全场景领航辅助(NOA)订阅￥320/月",
+        "高速城快领航辅助(NOA)订阅￥320/月",
+        "全地形轮胎（AT）",
+        "便携式充电枪 (ICCB)",
+        "风阻系数(Cd)",
+        "长续航电池包(100kWh)",
+    ):
+        assert split_key_unit(key) == (key, None), key
+        assert display_fact_key(key) == key, key
+
+
+def test_known_units_still_recognised():
+    """白名单里的真单位（半角/全角/工况尾巴三种形态）都要认。"""
+    for key, name, unit in [
+        ("轴距(mm)", "轴距", "mm"),
+        ("前备厢容积(L)", "前备厢容积", "L"),
+        ("最大马力(Ps)", "最大马力", "Ps"),
+        ("电池快充时间(小时)", "电池快充时间", "小时"),
+        ("充电峰值电压（V）", "充电峰值电压", "V"),   # 全角括号
+        ("CLTC综合油耗(L/100km)", "CLTC综合油耗", "L/100km"),
+    ]:
+        assert split_key_unit(key) == (name, unit), key
+
+
+def test_embedded_value_unit_must_be_in_allowlist():
+    """值尾单位也走白名单，否则「数字 + 非单位文字」的值会被劈成「数字 + 文字」。
+
+    `_VALUE_UNIT_RE = ^(.*?)([^\\d\\s.]+)$` 是**懒惰**匹配，只有当值里**前面有数字**时
+    group1 才非空——所以「米其林AT」这种纯文字值根本走不到白名单（group1 为空直接
+    原样返回），能触发误判的形状是「2AT」「3NOA」这类。
+    """
+    from app.catalog.series_index import _split_embedded_unit
+
+    assert _split_embedded_unit("150kW") == ("150", "kW")
+    assert _split_embedded_unit("29.4") == ("29.4", "")
+    assert _split_embedded_unit("米其林AT") == ("米其林AT", "")  # group1 为空，原样
+    # 数字在前 + 不在白名单的尾缀：不能被当成「数字 + 单位」拆开
+    for value in ("2AT", "3NOA", "5Cd", "100ICCB"):
+        assert _split_embedded_unit(value) == (value, ""), value
+    assert _split_embedded_unit("480km") == ("480", "km")
 
 
 # ── 2. 尺寸众数 + 覆盖率 ─────────────────────────────────────────────────

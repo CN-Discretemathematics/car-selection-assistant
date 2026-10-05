@@ -24,6 +24,15 @@ export interface HomeCard {
   series_name: string;
   brand_id: number;
   brand_name: string;
+  /**
+   * 车系名里是否**已经**带上了品牌标识——由后端判定，前端不要再拼一次。
+   *
+   * 此前三处卡片（`CarCard` / `BrowseCard` / `SearchBar`）各自重推了一遍
+   * `!series_name.startsWith(brand_name)`，那条规则只挡**完全**前缀，
+   * 于是 33 个车系显示成「小米汽车小米SU7」「启源长安启源A06」「本田东风本田S7」。
+   * 判据在 TS 里再写一份必然与后端 `_brand_leads_series` 漂移，故改为直接用后端结论。
+   */
+  show_brand_prefix: boolean;
   thumbnail_url: string | null;
   body_type: string | null;
   energy_types: string[];
@@ -230,6 +239,8 @@ export interface VehicleListItem {
   series_name: string;
   brand_id: number;
   brand_name: string;
+  /** 车系名里是否已带品牌标识；由后端判定，见 `HomeCard.show_brand_prefix`。 */
+  show_brand_prefix: boolean;
   brand_type: string | null;
   body_type: string | null;
   energy_types: string[];

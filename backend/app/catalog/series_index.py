@@ -321,9 +321,29 @@ _KEY_UNIT_RE = re.compile(r"\(([^()]*)\)[^()]*$")
 _UNIT_CHARS = re.compile(r"^[A-Za-z0-9%·²³/°]+$")
 #: 键尾括号（半角或全角，且必须在末尾）——「轴距(mm)」「电池快充时间（小时）」
 _KEY_TAIL_PAREN_RE = re.compile(r"[（(]([^（）()]*)[)）]\s*$")
-#: 中文单位词：`_UNIT_CHARS` 只认 ASCII，「小时/分钟/英寸/匹」这些认不出来
-CN_UNIT_WORDS = frozenset(
-    {"小时", "分钟", "秒", "英寸", "吋", "匹", "千瓦", "牛米", "个"}
+#: 键尾括号后跟**工况代号**的形态——「最低荷电状态油耗(L/100km)WLTC」。
+#: 只认这四个已知的工况代号：库里还存在「全场景领航辅助(NOA)订阅￥320/月」这种
+#: 括号后接散文的键，泛化的「括号 + 任意尾巴」会把散文也当单位剥掉。
+_CYCLE_TOKENS = ("CLTC", "NEDC", "WLTC", "EUDC")
+_KEY_UNIT_CYCLE_RE = re.compile(r"[（(]([^（）()]*)[)）](" + "|".join(_CYCLE_TOKENS) + r")\s*$")
+#: 键尾括号里**确实是单位**的全集（大小写敏感，从全库 1365 个 fact_key 的
+#: 括号内容实测归纳而来：60 种里 22 种是真单位）。
+#:
+#: **为什么不用「形状像单位」的规则**：`^[A-Za-z0-9%·²³/°]+$` 太宽松，库里这些
+#: 缩写会全部被误判成单位并塞到值上——
+#:   `全场景领航辅助(NOA)订阅￥320/月` → 值后面多一个「NOA」
+#:   `全地形轮胎（AT）`              → 值后面多一个「AT」
+#:   `便携式充电枪 (ICCB)`            → 「ICCB」是接口标准，不是单位
+#:   `风阻系数(Cd)`                  → Cd 是无量纲系数，不是单位
+#:   `长续航电池包(100kWh)`           → 「100kWh」是电池包规格，属于名字的一部分
+#: 判据从「形状像」改成「确实在库里当单位用过」，才是可枚举、可审计的。
+_KNOWN_UNITS = frozenset(
+    {
+        "mm", "L/100km", "kW", "L", "km", "kg", "N·m", "%", "°", "Ps", "V",
+        "s", "m", "rpm", "kWh", "W", "mL", "km/h", "Ah", "Wh/kg", "kWh/100km",
+        # 中文单位词
+        "小时", "分钟", "秒", "英寸", "吋", "匹", "千瓦", "牛米", "个",
+    }
 )
 
 
@@ -341,15 +361,29 @@ def split_key_unit(key: str) -> tuple[str, str | None]:
     （实测 877 车系 × 10 组提问 32347 行里有 **719 行**如此）。
     两个识别器必须共用同一个判据，否则改一边就会漂。
 
-    只认**末尾**的括号：中部括号是名字的一部分
-    （`540°全景影像系统(带透明底盘)`、`L2级组合驾驶辅助包（限时免费）`）。
+    识别的两种形态（库里实测就这两种）：
+      1. 括号在末尾：            轴距(mm) / 电池快充时间（小时）
+      2. 括号 + 已知工况代号：    最低荷电状态油耗(L/100km)WLTC
+         ——第 2 种是 `unit_from_key` 早就支持的（其 docstring 明确写了
+         「键尾带工况文本也兼容」），**合并时若只认第 1 种就会把这批单位弄丢**，
+         实测 `最低荷电状态油耗(L/100km)WLTC = 4.7（WLTC）` 少了 L/100km。
+
+    单位判定用**显式白名单** `_KNOWN_UNITS`（从全库括号内容归纳），
+    不用「形状像单位」的规则——库里 `NOA` / `AT` / `ICCB` / `Cd` / `100kWh`
+    都能通过 ASCII 字符集，却都不是单位。
+
+    括号里的中文名字一律保留（剥掉就丢真实信息）：
+    `540°全景影像系统(带透明底盘)`、`L2级组合驾驶辅助包（限时免费）`、
+    `便携式充电枪 (ICCB)`。
     """
-    matched = _KEY_TAIL_PAREN_RE.search(key)
-    if not matched:
+    for pattern in (_KEY_UNIT_CYCLE_RE, _KEY_TAIL_PAREN_RE):
+        matched = pattern.search(key)
+        if not matched:
+            continue
+        inner = matched.group(1).strip()
+        if inner in _KNOWN_UNITS:
+            return key[: matched.start()].strip(), inner
         return key, None
-    inner = matched.group(1).strip()
-    if inner and (inner in CN_UNIT_WORDS or _UNIT_CHARS.match(inner)):
-        return key[: matched.start()].strip(), inner
     return key, None
 
 
@@ -380,11 +414,18 @@ _MULTI_VALUE_RE = re.compile(r"[/、,，]")
 
 
 def _split_embedded_unit(value: str) -> tuple[str, str]:
-    """拆出值里自带的单位后缀（「150kW」→「150」「kW」）；拆不出则原样返回。"""
+    """拆出值里自带的单位后缀（「150kW」→「150」「kW」）；拆不出则原样返回。
+
+    尾缀必须落在 `_KNOWN_UNITS` 白名单里才认——否则「高配」这种以非数字结尾的
+    值会被劈成「高~低 配」这种胡说八道（`_VALUE_UNIT_RE` 只是形状规则，不认白名单）。
+    """
     matched = _VALUE_UNIT_RE.match(value.strip())
     if not matched or not matched.group(1).strip():
         return value.strip(), ""
-    return matched.group(1), matched.group(2)
+    suffix = matched.group(2)
+    if suffix not in _KNOWN_UNITS:
+        return value.strip(), ""
+    return matched.group(1), suffix
 
 
 def _range_text(best: _Entry, group: list[_Entry]) -> str | None:
