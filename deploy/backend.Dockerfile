@@ -3,7 +3,17 @@
 # 运行依赖环境变量：见 backend/.env.example（生产经 .env 注入，不入仓库）
 FROM python:3.12-slim
 
-ENV PYTHONUNBUFFERED=1 \
+# 2026-10-05：构建时注入源码提交号，供 /api/v1/version 回报。
+# 目的：让「服务器跑的到底是不是 main 最新」**从外部可验**，而不必 SSH 上服务器
+# 去读 /var/lib/carsel/deployed-main.sha。此前只有 /health，而它返回的是
+# 写死的 settings.app_version（0.1.0），无论部署了哪个提交都不变——**看起来
+# 健康却无法证明是最新版本**，这正是本次事故的形状。
+# 未注入时留空，接口返回 "unknown" 而不是编一个值。
+ARG GIT_SHA=""
+ARG BUILD_TIME=""
+ENV GIT_SHA=${GIT_SHA} \
+    BUILD_TIME=${BUILD_TIME} \
+    PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/

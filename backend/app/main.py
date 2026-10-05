@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
@@ -81,6 +82,29 @@ app.include_router(admin_rag_router, prefix=api)
 @app.get(f"{api}/health", tags=["health"])
 def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.app_name, "version": settings.app_version}
+
+
+@app.get(f"{api}/version", tags=["health"])
+def version() -> dict[str, str]:
+    """**当前运行的源码提交号**——用来从外部验证「服务器 == main 最新」。
+
+    为什么必须有它（2026-10-05）：部署脚本靠 `/var/lib/carsel/deployed-main.sha`
+    判断是否最新，但那台文件**只有 SSH 上服务器才看得到**；而 `/health` 返回的
+    `version` 是写死的 `app_version`（0.1.0），**无论部署了哪个提交都不变**。
+    也就是说：此前从站外无法证明服务器跑的是最新版本，「接口 200」被误当成了
+    「已同步」。本次 PR #65 带着 CI 红灯被合并、#66 叠上去才发现，正是这条
+    观测缺口的直接后果。
+
+    契约：
+    - `commit_sha` 由镜像构建时 `ARG GIT_SHA` 注入；未注入返回 `"unknown"`
+      ——**宁可说不知道，也不编一个版本号**（与全项目诚实性口径一致）。
+    - 不查库、不依赖任何外部服务，恒 200（纯进程内常量）。
+    """
+    return {
+        "app_version": settings.app_version,
+        "commit_sha": os.getenv("GIT_SHA", "") or "unknown",
+        "build_time": os.getenv("BUILD_TIME", "") or "unknown",
+    }
 
 
 @app.get(f"{api}/ready", tags=["health"])

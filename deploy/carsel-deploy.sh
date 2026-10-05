@@ -55,7 +55,16 @@ current_sha=$(cat "$STATE_FILE" 2>/dev/null || echo "")
 if [ "$MODE" = "check" ]; then
   log "远端 ${BRANCH}=${remote_sha}"
   log "已部署=${current_sha:-<未知>}"
+  # 运行中容器自报的提交号（需镜像构建时注入 GIT_SHA，见 /api/v1/version）
+  running_sha=$(curl -fsSL -m 10 "${HEALTH_URL%/ready}/version" 2>/dev/null \
+    | sed -n 's/.*"commit_sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
+  log "运行中=${running_sha:-<未注入/未知>}"
   [ "$remote_sha" = "$current_sha" ] && log "状态：已是最新" || log "状态：有更新待部署"
+  # 三者不一致时**明确指出**：状态文件说最新、但跑的容器不是那个提交，
+  # 说明有人绕过脚本部署过（2026-10-05 #65 带着 CI 红灯被合并即属此类）。
+  if [ -n "$running_sha" ] && [ "$running_sha" != "$remote_sha" ]; then
+    log "⚠️ 运行中的容器与 main 不一致：站外验版本请 curl .../api/v1/version"
+  fi
   exit 0
 fi
 
@@ -143,11 +152,16 @@ fi
 
 # 4) 构建（失败则保持当前版本继续服务）
 cd "$APP_DIR/deploy" || { log "ERROR 缺少 ${APP_DIR}/deploy"; exit 1; }
-if ! docker compose build api web; then
+# 2026-10-05：把本次部署的提交号与构建时间注入镜像，供 /api/v1/version 回报。
+# 目的：让「服务器跑的 == main 最新」**从站外可验**（curl .../api/v1/version），
+# 而不必 SSH 上来读 deployed-main.sha。此前站外唯一的信号是 /health 的 200，
+# 而它返回写死的 app_version——「接口活着」被误当成「版本是最新的」。
+GIT_SHA="${remote_sha}" BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+  docker compose build api web || {
   log "ERROR 镜像构建失败，保持当前版本运行（未重启容器）"
   exit 1
-fi
-log "镜像构建完成"
+}
+log "镜像构建完成（commit=${remote_sha}）"
 
 # 关于数据库迁移（2026-10-03 查证，**本脚本不需要加这一步**）
 #
