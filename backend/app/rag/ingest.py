@@ -19,7 +19,15 @@ from langgraph.graph import END, START, StateGraph
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from app.catalog.series_index import HEADLINE_ORDER, HEADLINE_SPECS, display_name, rank_headlines
+from app.catalog.series_index import (
+    HEADLINE_ORDER,
+    HEADLINE_PREFIX,
+    HEADLINE_SPECS,
+    display_name,
+    head_with_size,
+    rank_headlines,
+    size_lines,
+)
 from app.common.models import (
     Brand,
     MonthlySales,
@@ -347,9 +355,16 @@ def _summary_chunk_text(
     else:
         parts.append("官方指导价：官方资料未披露。")
     parts.append(f"在售 {on_sale_count} 款。")
-    head_parts = [headline[label] for label in HEADLINE_ORDER if headline.get(label)]
+    # 2026-10-05：此前是 `[headline[label] for label in HEADLINE_ORDER]`，**只取值、
+    # 丢掉 label**，切片读起来是「核心参数：4135*1805*1570 mm；2650 mm；58~85 kW；
+    # 310~480 km（CLTC）」——读者与下游 LLM 都分不出 `2650 mm` 是轴距还是车长、
+    # `30.12~47.14 kWh` 是电池还是别的。这段文本会作为「数据佐证」直接进 LLM 上下文，
+    # 是最容易过度推断的地方。补回 label，并用与卡片同一个前缀常量（用户拍板）。
+    head_parts = [
+        f"{label} {headline[label]}" for label in HEADLINE_ORDER if headline.get(label)
+    ]
     if head_parts:
-        parts.append("核心参数：" + "；".join(head_parts) + "。")
+        parts.append(HEADLINE_PREFIX + "；".join(head_parts) + "。")
     if sales:
         month, sales_count, sales_type = sales
         # 切片文本会作为「数据佐证」展示给用户，口径标签与前端保持一致（2026-09-14）
@@ -444,6 +459,11 @@ def _chunk(state: IngestState) -> IngestState:
 
     # 3) 车系级摘要切片
     headlines = rank_headlines(materials["facts_by_series"])
+    # 尺寸口径必须与**问答卡片**同源（2026-10-05 审查 P1-2）：卡片走
+    # `size_lines`（众数 + 覆盖率），切片此前仍走 `rank_headlines` 的首值，
+    # 于是同一条回答里两个尺寸、LLM 必然挑一个说——实测 **113 个车系**打架。
+    # `size_lines` 是批量的（一次查询覆盖全部车系），不会把 N+1 带进索引构建。
+    size_map = size_lines(db, [series for series, _ in materials["series_rows"]])
     for series, brand in materials["series_rows"]:
         energy = " / ".join(series.energy_types or [])
         body_energy = "、".join(
@@ -455,7 +475,9 @@ def _chunk(state: IngestState) -> IngestState:
                 text=_summary_chunk_text(
                     series,
                     brand,
-                    headlines.get(series.id, {}),
+                    head_with_size(
+                        size_map.get(series.id), headlines.get(series.id, {})
+                    ),
                     materials["price_by_series"].get(series.id),
                     materials["count_by_series"].get(series.id, 0),
                     materials["sales_by_series"].get(series.id),
@@ -593,3 +615,4 @@ def run_ingest(
         "stages": state.get("stages", []),
         "warnings": state.get("warnings", []),
     }
+

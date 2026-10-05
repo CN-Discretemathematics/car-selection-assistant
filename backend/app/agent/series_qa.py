@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,11 +20,15 @@ from app.catalog import services as catalog
 from app.catalog.series_constraints import PARAM_KEYS
 from app.catalog.series_index import (
     HEADLINE_ORDER,
+    HEADLINE_PREFIX as _HEADLINE_PREFIX,
     normalize_name,
-    unit_from_key,
+    split_key_unit,
     display_name,
     rank_headlines,
+    head_with_size,
     series_fact_rows,
+    size_line,
+    size_lines,
     series_headline,
 )
 from app.common.enums import MISSING_VALUE_LABEL
@@ -70,9 +75,18 @@ _PARAM_PROBES: tuple[tuple[str, str], ...] = (
 _PROBE_SKIP_KEYS = {"优惠信息"}
 _PROBE_SKIP_VALUES = {"暂无", "-", "--", "未知"}
 _PROBE_MAX_KEYS = 8
-# 同一事实键跨款型的去重取值最多展示几个（2026-10-05 由魔法数 2 提为具名常量：
-# N6 正是「只列前 2 个」把头条那个值切掉了，截断披露也依赖这个数）。
-_PROBE_VALUE_MAX = 2
+#: 同一事实键跨款型的去重取值上限。
+#: 2026-10-05（N6-B，用户拍板「参数追问列全档」）：此前是 2，实测把头条那个值切掉了。
+#: 现在正常档位数不再受它约束；它只作**病态输入兜底**（例如某个脏键出了十几档），
+#: 超限时仍会如实披露「共 N 个，只列前 M 个」——截断可以，但截断必须说出来。
+_PROBE_VALUE_COERCE = 8
+
+#: 核心参数那一行的前缀见 `series_index.HEADLINE_PREFIX`（上面 import 为
+#: `_HEADLINE_PREFIX`）——车系问答卡片与 RAG 车系摘要切片共用同一常量，
+#: 两个展示点不可能再各说各话。
+
+#: 尺寸的事实键（text 模式，见 `HEADLINE_SPECS`）
+_SIZE_FACT_KEY = "长*宽*高(mm)"
 
 # 探针维度 → 用户可读名（v3 不可回答题诚实性标注：问了但 DB 完全没有的维度，
 # 必须显式回答「官方资料未披露」——评测 v3 拒答判定 0/60 通过暴露的缺失）
@@ -89,6 +103,31 @@ _PARAM_DIM_LABELS: dict[str, str] = {
 }
 # 汽车之家配置表的特征标记值 → 用户可读表述（●=标配、○=选装；- 已在跳过表内）
 _FEATURE_VALUE_LABEL = {"●": "有（标配）", "○": "选装"}
+
+#: 键尾括号的判定**不在本模块**——统一走 `series_index.split_key_unit`，
+#: 与 `probe_facts` 给值补单位用的是同一个函数（2026-10-05 审查 P1-1：
+#: 两个独立识别器会让「电池快充时间(小时)」与「(分钟)」剥成同名且都无单位）。
+
+
+def display_fact_key(key: str) -> str:
+    """用户可见的参数名：剥掉尾部**确实是单位**的括号。
+
+    用户此前看到的是「轴距(mm) = 2650 mm」「前备厢容积(L) = 70 L」——单位在标签和
+    值上各写了一遍。实测 877 车系 × 10 组提问共 32347 条渲染行，**15503 条（47.9%）**
+    是这个形态（用户 2026-10-05 拍板「只剥确实是单位的尾部括号」）。
+
+    **判据来自 `series_index.split_key_unit`——与值侧补单位用的是同一个函数**。
+    2026-10-05 审查实锤：此前这里和 `unit_from_key` 是两个各自独立的识别器
+    （本函数认全角括号 + 中文单位词表，`unit_from_key` 只认半角 + ASCII），
+    于是 `电池快充时间(小时)` 与 `电池快充时间(分钟)` 都被剥成「电池快充时间」，
+    而值侧又都补不出单位——同一回答里两个**量纲差 60 倍**的东西同名且都无单位
+    （实测 719 行；另有「排量(L)」vs「排量(mL)」同病）。
+
+    判据只在**末尾**括号上生效：中部括号是名字的一部分
+    （`540°全景影像系统(带透明底盘)`、`M碳陶瓷高性能卡钳（金色卡钳）`、
+    `L2级组合驾驶辅助包（限时免费）`、`AI空气投影（限时1500）`），剥掉就丢真实信息。
+    """
+    return split_key_unit(key)[0]
 
 # 否定语境（评审 P2）：「我不买汉兰达」——被否定的车系不做问答、不加会话锁定
 NEGATION_WORDS = ("不买", "不想买", "不想要", "不喜欢", "不考虑", "排除", "不要")
@@ -243,14 +282,31 @@ def probe_facts(
 
     lines: list[str] = []
     shown_keys = matched_keys[: _PROBE_MAX_KEYS]
+    # 剥括号会把**不同量纲**的键压成同一个名字：全库实测 3 组——
+    #   电池快充时间(小时) / 电池快充时间(分钟)   -> 都叫「电池快充时间」
+    #   排量(L) / 排量(mL)                        -> 都叫「排量」
+    #   全地形轮胎 / 全地形轮胎（AT）              -> 都叫「全地形轮胎」
+    # 值上会各自带单位（`0.35 小时` vs `21 分钟`）所以不丢信息，但两行同名仍容易误读。
+    # 因此：**同一个展示名被 >1 个键占用时，这些键一律保留原样**。
+    name_hits = Counter(display_fact_key(k) for k in shown_keys)
     for key in shown_keys:
         entries = values_by_key.get(key) or []
         if not entries:
             continue
         rendered: list[str] = []
-        for value, unit, cycle in entries[:_PROBE_VALUE_MAX]:
+        # N6-B（用户拍板「参数追问列全档」）：此前只列前 _PROBE_VALUE_MAX(=2) 个去重值，
+        # 与「核心参数」那一行（取极值）并存时两个口径打架——问「星愿续航多少」会
+        # 同时看到「480 km」（头条，取最大）和「310 / 410」（追问，取前两个）。
+        # 现在核心参数行已标「全系极值」且多档给区间，两边语义都交代清楚了，追问侧就**列全档**，
+        # 不再自己截断。`coerce` 仍作为**病态输入**的兜底（见下），但正常档位数
+        # （实测多在 2~4 档）不再触发。
+        entries_all = entries if len(entries) <= _PROBE_VALUE_COERCE else entries[:_PROBE_VALUE_COERCE]
+        for value, unit, cycle in entries_all:
             value = _FEATURE_VALUE_LABEL.get(value, value)  # ● → 有（标配）、○ → 选装
-            unit = unit or unit_from_key(key) or ""
+            # 2026-10-05（审查 P1-1）：此处必须与 `display_fact_key` 用**同一个**
+            # 键尾解析（`split_key_unit`），否则标签剥了「(小时)」而值侧补不出单位，
+            # 单位就彻底消失——`电池快充时间(小时)` 与 `(分钟)` 还会剥成同名。
+            unit = unit or split_key_unit(key)[1] or ""
             if unit and value.lower().endswith(unit.lower()):
                 unit = ""
             rendered.append(f"{value}{f' {unit}' if unit else ''}{f'（{cycle}）' if cycle else ''}")
@@ -262,13 +318,16 @@ def probe_facts(
         # 而旧文案只说「不同款型存在差异」——用户以为看到的就是全部。
         # 这与本轮 P1-3（佐证被 `text[:60]` 腰斩成「级别 = 紧…」）是同一类缺陷：
         # **截断了但没说截断**。这里补足「共几个、只列了几个」。
-        if len(entries) > _PROBE_VALUE_MAX:
-            suffix = f"（共 {len(entries)} 个取值，此处只列前 {_PROBE_VALUE_MAX} 个）"
+        if len(entries) > len(entries_all):
+            suffix = f"（共 {len(entries)} 个取值，此处只列前 {len(entries_all)} 个）"
         elif len(entries) > 1:
             suffix = "（不同款型存在差异）"
         else:
             suffix = ""
-        lines.append(f"{key} = {' / '.join(rendered)}{suffix}")
+        name = display_fact_key(key)
+        if name_hits[name] > 1:
+            name = key  # 同名歧义 → 保留原键，让量纲在标签上就分得开
+        lines.append(f"{name} = {' / '.join(rendered)}{suffix}")
     # 2026-10-05（PR #66 审查遗留）：**渲染行数为 0 时不得只留披露行**。
     # 前 N 个命中键的取值全是无信息量值（暂无/-/--/未知）时，循环会全部 `continue`，
     # 只剩披露行，上游拼成「你问到的相关参数：（另有 1 个相关参数未列出）。」
@@ -295,17 +354,70 @@ def should_answer(resolved: list[tuple[VehicleSeries, Brand | None]], message: s
     return bool(_SERIES_QA_RE.search(message))
 
 
+#: 配置表里表示「**标配**」的标记值（审查实测：18 个亮点键在全库只出现
+#: `●` / `○` / `支持` 三种；`○` 是**选装**、`-`/`暂无` 是未配备）。
+#: 只有这些值才计入「N 款中 M 款配备」的 M——把 ○ 算进去会让覆盖率虚高一截
+#: （实测记忆泊车 ○=333 ≈ ●=504 的四成）。
+_EQUIPPED_VALUES = frozenset({"●", "支持"})
+
+
+def _is_equipped(values: set[str] | None) -> bool:
+    """某款型是否**标配**了这项配置。
+
+    - 同一款可能同时有 `●` 行与 `○` 行（不同配置来源），只要有任一标配行即算配备；
+    - `○` 单独出现 = **选装**，不算配备（用户买标配款拿不到）；
+    - 空值 / `-` / `暂无` / `未知` 一律不算。
+    """
+    return bool(values and (values & _EQUIPPED_VALUES))
+
+
 def series_highlights(db: Session, series: VehicleSeries) -> list[str]:
-    """车系实际配备的亮点配置（最多 5 项）。"""
-    present = set(
-        db.execute(
-            select(SpecFact.fact_key)
-            .join(VehicleVariant, SpecFact.variant_id == VehicleVariant.id)
-            .where(VehicleVariant.series_id == series.id, VehicleVariant.status == "on_sale")
-            .distinct()
-        ).scalars()
-    )
-    return [label for key, label in _FEATURE_HIGHLIGHTS if key in present][:5]
+    """车系亮点配置，**带款型覆盖率标注**（最多 5 项）。
+
+    2026-10-05 生产实测（N1，用户拍板「标注覆盖率」）：此前只 select `fact_key`，
+    于是**任何一款配备就整系算有**。实测星愿在售 6 款，记忆泊车仅 **1/6**、遥控泊车
+    **2/6**、主动安全 **2/6**，而车系卡片把三项全列为「亮点配置」——6 款里 5 款
+    没有记忆泊车的用户被告知有。
+
+    交叉验证（同一轮对话内）：问「星愿不同版本有什么区别」时，版本差异路径对**同一份
+    数据**逐款标「①~⑤ 官方资料未披露、⑥ 有」——口径是诚实的。两条路径对同一件事
+    给出不同答案，错的那一条。
+
+    口径：`<项名>（在售 N 款中 M 款配备）`。`total` 取该车系**在售款型数**，
+    `M` 只统计**标配**款型。两个口径都被独立审查实测纠错过：
+
+    1. **○（选装）不是配备**。本文件 `_FEATURE_VALUE_LABEL = {"●": "有（标配）",
+       "○": "选装"}`。审查实测真实库：记忆泊车全局 ●=504 而 ○=333——若把 ○ 也算
+       「配备」，四成的计数是选装，于是会出现「0 款标配却写『在售 16 款中 2 款配备』」。
+    2. **按款型去重，不按事实行数**。`SpecFact` 对 `(variant_id, fact_key)` **没有唯一
+       约束**（全库 36241 组重复），按行累加会让 n 超过 total；一旦 n ≥ total，
+       标注条件 `n < total` 不成立，于是**静默退回裸标签**——审查实测 1841 条亮点
+       带标注、1841 条不带，N1 要治的病只修掉了一部分。
+    """
+    variants = catalog.series_variants(db, series.id, on_sale_only=True)
+    total = len(variants)
+    if not total:
+        return []
+    ids = [v.id for v in variants]
+    # set 而非 Counter：(variant_id, fact_key) 可能有多行重复，且同一款可能既有
+    # ● 行又有 ○ 行——我们要的是「这款配备吗」，所以按 (variant, key) 去重后再判值。
+    per_variant: dict[int, dict[str, set[str]]] = {}
+    for vid, key, value in db.execute(
+        select(SpecFact.variant_id, SpecFact.fact_key, SpecFact.fact_value)
+        .where(SpecFact.variant_id.in_(ids))
+    ).all():
+        per_variant.setdefault(vid, {}).setdefault(str(key), set()).add((value or "").strip())
+    out: list[str] = []
+    for key, label in _FEATURE_HIGHLIGHTS:
+        n = sum(
+            1 for per_variant in per_variant.values()
+            if _is_equipped(per_variant.get(key))
+        )
+        if n:
+            out.append(label if n >= total else f"{label}（在售 {total} 款中 {n} 款配备）")
+        if len(out) >= 5:
+            break
+    return out
 
 
 def _price_text(db: Session, series: VehicleSeries) -> str:
@@ -326,6 +438,90 @@ def _sales_text(db: Session, series: VehicleSeries) -> str:
     return f"；{sales.month} 月销量 {sales.sales_count:,} 辆（{label}）"
 
 
+def _price_overlap_verdict(db: Session, first: VehicleSeries, second: VehicleSeries) -> str:
+    """两车价格区间的**实际**关系 → 小结措辞（N2）。
+
+    返回可直接嵌进句子的片段：
+    - 区间重叠  → 「价格区间高度重叠」
+    - 完全不重叠 → 「价格区间没有重叠」
+    - 任一方价格未披露 → 空串（**什么都不说**，而不是编一个结论）
+
+    口径说明：判定用「重叠」而非「差异大小」，因为用户在这两个选项之间真正需要
+    的答案是「是不是同一价位的车」；给出「差异明显」却不给数字，正是本次实测里
+    最让人困惑的地方。
+    """
+    a = catalog.series_price_range(db, first.id)
+    b = catalog.series_price_range(db, second.id)
+    if not a or not b:
+        return ""
+    a_lo, a_hi = a
+    b_lo, b_hi = b
+    if a_lo is None or a_hi is None or b_lo is None or b_hi is None:
+        return ""
+    if a_lo <= b_hi and b_lo <= a_hi:
+        return "、价格区间高度重叠"
+    return "、价格区间没有重叠"
+
+
+def _multi_price_verdict(db: Session, series_list: list[VehicleSeries]) -> str:
+    """N 车系的价格关系 → 小结措辞（`resolve_series` 最多解析 **4 个**车系）。
+
+    两车沿用 `_price_overlap_verdict` 的成对口径；三车及以上改说**整体跨度** +
+    「有没有任意一对重叠」——只报跨度不报重叠会漏掉「贵的和便宜的挨着、中间那个
+    另算」的情况，只报重叠不报跨度则用户不知道这堆车大概多少钱。
+    任一车系价格未披露即返回空串：**什么都不说**，而不是拿已知的两台编一个结论。
+    """
+    if len(series_list) == 2:
+        return _price_overlap_verdict(db, series_list[0], series_list[1])
+    spans: list[tuple[float, float]] = []
+    for series in series_list:
+        bounds = catalog.series_price_range(db, series.id)
+        if not bounds or bounds[0] is None or bounds[1] is None:
+            return ""
+        spans.append((bounds[0], bounds[1]))
+    low = min(s for s, _ in spans) / 10000
+    high = max(e for _, e in spans) / 10000
+    overlap = any(
+        a_lo <= b_hi and b_lo <= a_hi
+        for i, (a_lo, a_hi) in enumerate(spans)
+        for b_lo, b_hi in spans[i + 1:]
+    )
+    span_text = f"{low:g}-{high:g} 万" if high != low else f"{low:g} 万"
+    tail = "其中有价格区间重叠" if overlap else "价格区间互不重叠"
+    return f"、指导价跨度 {span_text}、{tail}"
+
+
+def _count_phrase(count: int) -> str:
+    """「这两款车 / 这三款车 / 这四款车 / 这 5 款车」。
+
+    对比链路此前**通篇写死「两款车」**（开头、`values[0] vs values[1]`、小结），
+    而 `resolve_series` 明确「最多 4 个」——用户点名三款车时，第三款会被
+    **静默丢出对比行**，小结还写「两款车定位不同」，用户完全看不出来。
+    """
+    return {2: "这两款车", 3: "这三款车", 4: "这四款车"}.get(count, f"这 {count} 款车")
+
+
+def _summary_for_many(
+    db: Session, resolved: list[tuple[VehicleSeries, Brand | None]]
+) -> str:
+    """N 车系（>=3）的小结：按**全体**定位与价格说话，不假装只比了两台。"""
+    series_list = [series for series, _ in resolved]
+    names = [display_name(s, b) for s, b in resolved]
+    classes = [s.positioning or "未标注" for s in series_list]
+    verdict = _multi_price_verdict(db, series_list)
+    if len(set(classes)) == 1:
+        return (
+            f"小结：这几款车同属「{classes[0]}」级别{verdict}；"
+            "可以按用车场景（通勤/家庭/长途）和预算取舍——告诉我你的预算和主要用途，"
+            "我按库内参数帮你细比。"
+        )
+    spread = "、".join(f"{name}是「{cls}」" for name, cls in zip(names, classes, strict=True))
+    return (
+        f"小结：这几款车定位不一致（{spread}）{verdict}，直接比「谁更好」意义不大；"
+        "更合适的做法是按预算与用途缩小范围——告诉我预算和主要用途，我可以帮你筛真正同档的候选。"
+    )
+
+
 def _series_header(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
     return (
         f"{series.positioning or '定位未标注'} · "
@@ -338,10 +534,12 @@ def _series_header(db: Session, series: VehicleSeries, brand: Brand | None) -> s
 def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
     name = display_name(series, brand)
     parts = [f"「{name}」：{_series_header(db, series, brand)}"]
-    head = series_headline(db, series)
+    head = head_with_size(size_line(db, series), series_headline(db, series))
     if head:
         order = [label for label in HEADLINE_ORDER if label in head]
-        parts.append("核心参数：" + "；".join(f"{label} {head[label]}" for label in order))
+        parts.append(
+            _HEADLINE_PREFIX + "；".join(f"{label} {head[label]}" for label in order)
+        )
     highlights = series_highlights(db, series)
     if highlights:
         parts.append("亮点配置：" + "、".join(highlights))
@@ -387,14 +585,19 @@ def build_series_qa_answer(
     facts_by_series = series_fact_rows(db, [s.id for s, _ in resolved])
     heads_map = rank_headlines(facts_by_series)
 
-    blocks: list[str] = ["你说的这两款车我先放在一起看："]
+    # 尺寸**一次批量算完**再分发给各展示点：逐个查会让 N 车系对比多打 2N 条 SQL
+    # （审查 P2），而且卡片与逐项对比行必须拿到**同一份**结果。
+    size_map = size_lines(db, [series for series, _ in resolved])
+    blocks: list[str] = [f"你说的{_count_phrase(len(resolved))}我先放在一起看："]
     for series, brand in resolved:
         name = display_name(series, brand)
         blocks.append(f"\n【{name}】{_series_header(db, series, brand)}")
-        head = heads_map.get(series.id, {})
+        head = head_with_size(size_map.get(series.id), heads_map.get(series.id, {}))
         if head:
             order = [label for label in HEADLINE_ORDER if label in head]
-            blocks.append("  核心参数：" + "；".join(f"{label} {head[label]}" for label in order))
+            blocks.append(
+                "  " + _HEADLINE_PREFIX + "；".join(f"{label} {head[label]}" for label in order)
+            )
         # 按需参数查找（评审 M-R10）：对比语境下同样回答问到的具体参数
         series_facts = facts_by_series.get(series.id, [])
         probed = probe_facts(series_facts, message)
@@ -416,26 +619,53 @@ def build_series_qa_answer(
             blocks.append(f"  {sales.lstrip('；')}")
 
     # 逐项对比（双方都有数据的量纲）
-    heads = [heads_map.get(series.id, {}) for series, _ in resolved]
+    # 尺寸必须走 `size_line`（众数+覆盖率）而不是 `heads_map` 的首值，否则
+    # 上面那一块写「5050*1960*1505 mm（在售 6 款中 4 款为此尺寸）」、
+    # 下面这行写「4995*1910*1495 mm」——**同一条回答里自相矛盾**。
+    heads = [
+        head_with_size(size_map.get(series.id), heads_map.get(series.id, {}))
+        for series, _ in resolved
+    ]
     diff: list[str] = []
     for label in HEADLINE_ORDER:
         values = [h.get(label) for h in heads]
+        # 2026-10-05：此前是 `values[0] vs values[1]`——三个及以上车系时
+        # **后面的被静默丢掉**（`resolve_series` 明确最多 4 个）。
+        # 用户问「汉、汉L、秦PLUS 怎么选」，对比行里只有秦PLUS vs 汉，汉L 消失，
+        # 而上文三个车系块都在，用户看不出第三个没被比。
         if all(values):
-            diff.append(f"{label}：{values[0]} vs {values[1]}")
+            diff.append(f"{label}：{' vs '.join(values)}")  # type: ignore[arg-type]
     if diff:
         blocks.append("\n同量纲参数对比：" + "；".join(diff))
 
     # 客观小结（同级/异级判断，不含主观推荐）
+    #
+    # ⚠️ N2（2026-10-05 生产实测 + 用户拍板「真的去比」）：此前这里的「价格区间差异明显」
+    # 是**写死的字符串**——只要两车 positioning 不同就走该分支，而代码从头到尾
+    # **没有比较过价格**。实拍就当场自相矛盾：
+    #   前文列出  银河星愿 6.48-9.48 万  vs  零跑A10 6.58-8.68 万（高度重叠）
+    #   结尾却写  「两款车级别与价格区间差异明显」
+    # 这是本项目最不该出现的形状：**结论没有推导过程**。现在真的去比价格区间，
+    # 而且只依据实际算出的结论选择措辞；算不出（价格未披露）时**什么都不说**。
+    if len(resolved) >= 3:
+        blocks.append(_summary_for_many(db, resolved))
+        blocks.append("\n" + footer)
+        return "\n".join(blocks)
+
     first, second = resolved[0][0], resolved[1][0]
     same_class = first.positioning and first.positioning == second.positioning
+    price_verdict = _price_overlap_verdict(db, first, second)
     if same_class:
         blocks.append(
-            "小结：两款车同属「" + first.positioning + "」级别，但价格与动力总成差异决定了买点不同；"
+            "小结：两款车同属「" + first.positioning + "」级别" + price_verdict + "；"
             "可以按用车场景（通勤/家庭/长途）和预算取舍——告诉我你的预算和主要用途，我按库内参数帮你细比。"
         )
     else:
         blocks.append(
-            "小结：两款车级别与价格区间差异明显，直接比「谁更好」意义不大；"
+            "小结：两款车定位不同（「"
+            + (first.positioning or "未标注") + "」vs「"
+            + (second.positioning or "未标注") + "」）"
+            + price_verdict + "，直接比「谁更好」意义不大；"
             "更合适的做法是按预算与用途缩小范围——告诉我预算和主要用途，我可以帮你筛真正同档的候选。"
         )
     blocks.append("\n" + footer)
@@ -453,7 +683,18 @@ _VARIANT_HINT_RE = re.compile(
     r"顶配|次顶配|低配|高配|中配|入门版|旗舰版)"
 )
 _VARIANT_ASK_RE = re.compile(
-    r"(区别|差别|差异|不同|不一样|对比|比较|哪个好|哪款好|怎么选|选哪|差在哪|差多少|贵在哪|贵多少|值不值|值得吗)"
+    r"(区别|差别|差异|不同|不一样|对比|比较|哪个好|哪款好|怎么选|选哪|差在哪|差多少|贵在哪|贵多少|值不值|值得吗|"
+    # 2026-10-05（端到端扫版本路径发现）：下面这些是**清点型**问法——用户明确在问版本，
+    # 但句式里没有「区别/差异/怎么选」这类比较词，于是 HINT 命中而 ASK 落空，
+    # 确定性版本路径整个不触发：
+    #   「Model Y有哪些版本」「分几个版本」「星愿哪个版本好」「星愿哪款值得买」
+    # → 前两类落到 LLM 链路（拿不到版本清单）；后两类走单车系档案路径，
+    #   答的是定位/核心参数/亮点，**一个版本都没提**。
+    # 只扩 ASK、HINT 不动（仍需「版本/款型/顶配」等显式版本词），
+    # 17 条真实问法实测覆盖 9 条中的 7 条、**0 误判**。
+    # 「有几种配置/分几个配置」仍不命中（HINT 认「版本」不认「配置」）——
+    # 放宽 HINT 会让「星愿配置怎么样」这类想问档案的问法被误判成版本问法，暂不做。
+    r"有哪些|有哪几|分几个|几种|值得买|哪个版本)"
 )
 _VARIANT_DIFF_MAX = 6        # 文本内最多列出的版本数（超出按指导价取前 N 并提示）
 _VARIANT_DIFF_KEYS_MAX = 12  # 差异项最多列几条（其余引导用「加入对比」看全表）
@@ -680,3 +921,4 @@ def build_variant_diff_answer(
     ]
     lines.append("\n" + footer)
     return "\n".join(lines), out_rows
+

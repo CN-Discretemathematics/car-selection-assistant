@@ -25,6 +25,10 @@ class UserProfile(BaseModel):
     brand_ids: list[int] = Field(default_factory=list)
     brand_labels: list[str] = Field(default_factory=list)
     brand_exclude_ids: list[int] = Field(default_factory=list)
+    # 排除品牌的可读名（2026-10-05）。此前只有 ids，回执**结构上就写不出被排除的
+    # 是哪个品牌**，于是 `_priority_phrase` 只能要么完全不提、要么说「不看指定品牌」
+    # 这种零信息量的话——用户在追问时看不到自己说过的排除项。
+    brand_exclude_labels: list[str] = Field(default_factory=list)
     charging_tolerance: bool | None = None
     must_have: list[str] = Field(default_factory=list)
     nice_to_have: list[str] = Field(default_factory=list)

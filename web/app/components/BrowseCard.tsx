@@ -35,8 +35,8 @@ export default function BrowseCard({ item }: { item: VehicleListItem }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline justify-between gap-2">
             <h2 className="truncate text-[17px] font-semibold tracking-tight text-ink transition-colors duration-300 group-hover:text-apple">
-              {/* 部分车系名自带品牌前缀（如「腾势Z9GT」），避免「腾势 腾势Z9GT」重复 */}
-              {!item.series_name.startsWith(item.brand_name) && (
+              {/* 判据由后端 `show_brand_prefix` 给（车系名里已带品牌标识就别再拼一次） */}
+              {item.show_brand_prefix && (
                 <span className="mr-1.5 text-sm font-normal text-ash">{item.brand_name}</span>
               )}
               {item.series_name}

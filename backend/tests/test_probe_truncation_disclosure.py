@@ -14,7 +14,7 @@
 """
 from __future__ import annotations
 
-from app.agent.series_qa import _PROBE_MAX_KEYS, _PROBE_VALUE_MAX, probe_facts
+from app.agent.series_qa import _PROBE_MAX_KEYS, _PROBE_VALUE_COERCE, probe_facts
 
 # 星愿式事实：同一键 3 个去重取值，顺序即 DB 返回顺序（310/410/480）
 THREE_VALUES = [
@@ -27,18 +27,25 @@ THREE_VALUES = [
 ]
 
 
-def test_value_truncation_is_disclosed():
-    """3 个取值只列 2 个时，必须说清「共几个、只列了几个」。"""
+def test_normal_values_are_listed_in_full():
+    """N6-B（用户拍板「参数追问列全档」）：3 个取值必须**全部列出**。
+
+    此前只列前 2 个，恰好把头条那个 480 切掉，于是问「续航多少」会同时看到
+    「480」（核心参数取极值）与「310/410」（参数追问）两个打架的答案。
+    """
     out = probe_facts(THREE_VALUES, "续航是多少")
     line = next(ln for ln in out if "纯电续航里程" in ln)
-    assert f"共 3 个取值，此处只列前 {_PROBE_VALUE_MAX} 个" in line, f"截断未披露：{line}"
+    assert "310" in line and "410" in line and "480" in line, f"未列全档：{line}"
+    assert "只列前" not in line, f"3 个档不该触发兜底截断：{line}"
 
 
-def test_value_truncation_line_still_shows_two_values():
-    """披露不等于不展示：前 2 个取值仍要给出。"""
-    out = probe_facts(THREE_VALUES, "续航是多少")
-    line = next(ln for ln in out if "纯电续航里程" in ln)
-    assert "310" in line and "410" in line
+def test_pathological_value_count_is_coerced_and_disclosed():
+    """病态输入（脏键出了十几档）仍兜底截断，**但必须披露**——截断可以，不说不行。"""
+    n = _PROBE_VALUE_COERCE + 5
+    many = [("CLTC纯电续航里程", str(i), "km", "CLTC") for i in range(n)]
+    out = probe_facts(many, "续航")
+    line = next(ln for ln in out if "CLTC纯电续航里程" in ln)
+    assert "只列前" in line and f"共 {n} 个取值" in line, line
 
 
 def test_two_values_keeps_old_wording():
@@ -84,9 +91,14 @@ def test_key_cap_is_pinned_to_eight():
     assert _PROBE_MAX_KEYS == 8, "改了截断上限必须同步更新披露数量的期望值与本断言"
 
 
-def test_value_cap_is_pinned_to_two():
-    """`_PROBE_VALUE_MAX = 2` 同理：N6 的披露文案直接依赖它。"""
-    assert _PROBE_VALUE_MAX == 2
+def test_value_cap_is_pinned_to_eight():
+    """`_PROBE_VALUE_COERCE = 8` 本身要钉住。
+
+    2026-10-05（N6-B，用户拍板「参数追问列全档」）：它此前是 `_PROBE_VALUE_MAX = 2`，
+    而 2 正是把头条那个值切掉的元凶。现在它**不再约束正常档位数**，只作病态输入兜底
+    ——但兜底值本身仍需被钉住，否则改了它就没有任何测试会报警。
+    """
+    assert _PROBE_VALUE_COERCE == 8
 
 
 def test_no_bare_disclosure_line_when_nothing_rendered():

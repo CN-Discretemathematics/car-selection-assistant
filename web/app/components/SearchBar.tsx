@@ -283,8 +283,8 @@ function SearchBarInner({
                   )}
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13.5px] font-medium text-ink">
-                      {/* 部分车系名自带品牌前缀（如「腾势Z9GT」），避免「腾势 腾势Z9GT」重复 */}
-                      {!item.series_name.startsWith(item.brand_name) && (
+                      {/* 判据由后端 `show_brand_prefix` 给（车系名里已带品牌标识就别再拼一次） */}
+                      {item.show_brand_prefix && (
                         <span className="mr-1.5 font-normal text-ash">{item.brand_name}</span>
                       )}
                       {item.series_name}

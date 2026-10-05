@@ -13,7 +13,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.catalog import services as catalog
-from app.catalog.series_index import keyword_needle, keyword_score
+from app.catalog.series_index import _brand_leads_series, keyword_needle, keyword_score
 from app.common.database import get_session
 from app.common.enums import MISSING_VALUE_LABEL, NEW_ENERGY_TYPES
 from app.common.errors import not_found
@@ -166,6 +166,7 @@ def vehicle_list(
                 series_name=series.name,
                 brand_id=brand.id,
                 brand_name=brand.name,
+                show_brand_prefix=not _brand_leads_series(brand.name or "", series.name),
                 brand_type=brand.brand_type,
                 body_type=series.body_type,
                 energy_types=series.energy_types or [],

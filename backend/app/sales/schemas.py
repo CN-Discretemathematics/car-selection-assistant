@@ -24,6 +24,9 @@ class HomeCardOut(BaseModel):
     series_name: str
     brand_id: int
     brand_name: str
+    #: 车系名里是否**已经**带上了品牌标识；判据由后端 `_brand_leads_series` 给，
+    #: 前端不再各自重推（详见 `vehicles.schemas.VehicleListItemOut.show_brand_prefix`）。
+    show_brand_prefix: bool = True
     thumbnail_url: str | None = None
     body_type: str | None = None
     energy_types: list[str] = []

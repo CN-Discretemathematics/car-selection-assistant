@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.catalog.series_index import _brand_leads_series
 from app.catalog.services import latest_full_month
 from app.common.models import MonthlySales, VehicleVariant
 from tests.seed import (
@@ -57,6 +58,31 @@ def test_vehicle_list_browse(client: TestClient, db_session: Session):
     # 越界页码钳制到最后一页（评审 P2：此前返回空列表不友好）
     out_of_range = client.get("/api/v1/vehicles", params={"page": 999}).json()
     assert out_of_range["items"] and out_of_range["page"] < 999
+
+    # `show_brand_prefix`：车系名里**已经**带品牌标识时必须为 false，
+    # 否则前端会把品牌再拼一次，显示成「小米汽车小米SU7」「启源长安启源A06」。
+    # 此前前端 3 处各自重推 `!series_name.startsWith(brand_name)`，只挡**完全**前缀，
+    # 真实库 33 个车系中招。判据现在由后端 `_brand_leads_series` 统一下发。
+    for item in client.get("/api/v1/vehicles").json()["items"]:
+        expected = not _brand_leads_series(item["brand_name"] or "", item["series_name"])
+        assert item["show_brand_prefix"] is expected, item
+
+    branded = make_brand(db_session, "小米汽车")
+    mi = make_series(db_session, branded, name="小米SU7", source=source)
+    mi_year = make_year(db_session, mi)
+    make_variant(db_session, mi, mi_year, config_version="标准版", energy_type="BEV",
+                 price_cny="229900", source=source)
+    plain = make_series(db_session, brand, name="星愿", source=source)
+    plain_year = make_year(db_session, plain)
+    make_variant(db_session, plain, plain_year, config_version="标准版", energy_type="BEV",
+                 price_cny="64800", source=source)
+    db_session.commit()
+    got = {
+        i["series_name"]: i["show_brand_prefix"]
+        for i in client.get("/api/v1/vehicles").json()["items"]
+    }
+    assert got["小米SU7"] is False, "车系名已含品牌标识，不该再拼「小米汽车」"
+    assert got["星愿"] is True, "星愿不含品牌标识，应当拼上品牌"
 
     items = client.get("/api/v1/vehicles", params={"energy_type": "new_energy"}).json()["items"]
     assert items and all(any(t in ("BEV", "PHEV", "EREV") for t in i["energy_types"]) for i in items)
@@ -217,6 +243,30 @@ def test_home_sorted_and_filters(client: TestClient, db_session: Session):
     # 升序
     asc = client.get("/api/v1/home", params={"sort": "asc"}).json()
     assert [c["series_name"] for c in asc] == ["车系A", "车系B"]
+
+
+def test_home_card_carries_show_brand_prefix(db_session: Session, client):
+    """`/home` 卡片也必须带 `show_brand_prefix`——`CarCard` 消费它，
+    只在 `/vehicles` 侧下发会让首页继续显示「小米汽车小米SU7」。
+
+    独立于 `test_home_sorted_and_filters`：那个用例的 fixture 品牌名是**空的**，
+    而两条规则（后端 `_brand_leads_series` vs 前端 `startsWith`）在空品牌下
+    **结果相同**，断言会恒真——必须造一个真能分叉的品牌。
+    """
+    source = make_source(db_session)
+    brand = make_brand(db_session, name="小米汽车", source=source)
+    mi = make_series(db_session, brand, name="小米SU7", body_type="sedan",
+                     energy_types=("BEV",), source=source)
+    year = make_year(db_session, mi)
+    make_variant(db_session, mi, year, price_cny="229900", energy_type="BEV", source=source)
+    make_sales(db_session, mi, latest_full_month(), 8888, source=source)
+    db_session.commit()
+
+    card = next(
+        c for c in client.get("/api/v1/home").json() if c["series_name"] == "小米SU7"
+    )
+    assert card["brand_name"] == "小米汽车"
+    assert card["show_brand_prefix"] is False, "车系名已含品牌标识，不该再拼「小米汽车」"
 
 
 def test_home_defaults_to_latest_data_month(client: TestClient, db_session: Session):
