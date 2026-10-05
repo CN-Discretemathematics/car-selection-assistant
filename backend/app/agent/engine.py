@@ -53,6 +53,7 @@ from app.agent.routing import (
     log_route_decision,
     mentions_known_brand,
     profile_has_core_constraints,
+    RouteDecision,
 )
 from app.agent.schemas import (
     AgentMessageOut,
@@ -131,6 +132,23 @@ _UNLOCK_RE = re.compile(
 _COMPARE_FOLLOWUP_RE = re.compile(
     r"(对比|比较|相比|哪个好|哪款好|哪个更好|差在哪|差多少|区别|差别|不一样|"
     r"比一下|比起|比呢|跟.{1,8}比|和.{1,8}比|与.{1,8}比)"
+)
+
+#: `respond()` 里在 `decision_sink.append` **之前** return 的两条分支所填的哨兵决策。
+#:
+#: 2026-10-06（独立审查 P2-1 实测）：此前 `handle()` 的注释写着「此处是唯一对外出口，
+#: 一处覆盖全部分支」——**这句不成立**。闲聊（`is_chatty`）与版本差异
+#: （`asks_variant_diff`）两处 return 都在 sink 填充之前，于是那两类轮次
+#: `agent_turn_logs` **一行都不写**。而版本差异正是确定性链路、恰恰是「静默错答」
+#: 高发区，最需要留档。
+#:
+#: 哨兵带 `early_return:` 前缀，`handle()` 据此**不派发 shadow 旁路**，
+#: 以保持「这两条分支原先 sink 为空 → 不派发」的既有行为不变。
+_EARLY_RETURN_CHATTY = RouteDecision(
+    intent="chitchat", matched_rule="early_return:is_chatty"
+)
+_EARLY_RETURN_VARIANT_DIFF = RouteDecision(
+    intent="series_qa", matched_rule="early_return:asks_variant_diff"
 )
 
 
@@ -1142,15 +1160,19 @@ class AgentEngine:
                 payload["error"] = True
             logging.getLogger("app.agent.respond").info(json.dumps(payload, ensure_ascii=False))
         # shadow 旁路：回答产出**之后**才派发（原先在路由点派发，会与同请求的回答
-        # 链路并发）。is_chatty 提前返回时 sink 为空 → 不派发（与既有行为一致）。
-        # sink 元组第三个元素（resolved 车系）只给对话留档用，见下。
+        # 链路并发）。哨兵（`early_return:`）不派发——那两条分支原先 sink 为空，
+        # 派发会改变既有 shadow 行为（独立审查 P2-1）。
         entry = decision_sink[0] if decision_sink else None
-        if entry is not None and router_mode == "shadow":
-            decision, profile = entry[0], entry[1]
-            self._spawn_shadow_route(message, profile, decision)
-        # 对话逐轮留档（2026-10-05）。接在**这里**而不是 respond() 的各个 return 分支：
-        # respond() 有 15 处 return，逐处包必然漏掉几个；而此处是唯一的对外出口，
-        # 一处覆盖全部分支，且拿得到决策 + 车系 + 画像这三样复现所需的信息。
+        if entry is not None and router_mode == "shadow" and not str(
+            getattr(entry[0], "matched_rule", "")
+        ).startswith("early_return:"):
+            self._spawn_shadow_route(message, entry[1], entry[0])
+        # 对话逐轮留档（2026-10-05）。接在**这里**——`respond()` 的唯一对外出口，
+        # 一处即可覆盖全部分支（含 `is_chatty` / `asks_variant_diff` 两条早期返回，
+        # 它们通过哨兵决策把自己带进 sink；此前这两类轮次一行都不留）。
+        #
+        # ⚠️ 不要再写「一处覆盖全部分支」这类话——2026-10-06 的独立审查正是靠实测
+        # 推翻了它。改分支结构时**必须**同步检查 sink 是否被填。
         #
         # 走 run_in_threadpool：不阻塞事件循环；写失败只记 warning（record_turn 内部吞异常），
         # **绝不让留档把用户请求带崩**——留档是观测手段，不是业务逻辑。
@@ -1213,6 +1235,8 @@ class AgentEngine:
 
         # 0) 闲聊/能力咨询 → 自然回复（大模型 + 检索佐证）
         if is_chatty(message):
+            if decision_sink is not None:
+                decision_sink.append((_EARLY_RETURN_CHATTY, profile, []))
             return await self._plain_chat_reply(
                 db, session_id, message, locked_series_ids=profile.locked_series_ids
             )
@@ -1314,6 +1338,11 @@ class AgentEngine:
                     brand = await run_in_threadpool(db.get, Brand, locked_series.brand_id)
                     target = (locked_series, brand)
             if target is not None:
+                # 2026-10-06：这里也是 `decision_sink.append` **之前**的 return。
+                # 版本差异是确定性链路（本仓「静默错答」高发区），恰恰最需要留档，
+                # 此前却在 sink 为空时完全不留痕（独立审查 P2-1 实测）。
+                if decision_sink is not None:
+                    decision_sink.append((_EARLY_RETURN_VARIANT_DIFF, profile, []))
                 return await self._variant_diff_reply(db, session_id, target[0], target[1], message)
 
         # ── 意图路由（P0 决策/执行解耦）───────────────────────────────────────

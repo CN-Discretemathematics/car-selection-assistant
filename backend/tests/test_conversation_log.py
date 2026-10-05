@@ -205,6 +205,97 @@ def test_agent_turns_are_actually_logged(log_enabled, client, db_session: Sessio
     )
 
 
+def test_early_return_branches_are_also_logged(
+    log_enabled, client, db_session: Session
+):
+    """P2-1 回归（2026-10-06 独立审查）：闲聊与版本差异**也必须留档**。
+
+    `respond()` 有两处 return 在 `decision_sink.append` **之前**（`is_chatty` 与
+    `asks_variant_diff`），此前这两类轮次 `agent_turn_logs` **一行都不写**——
+    而版本差异正是确定性链路、恰是「静默错答」高发区，最需要留档。
+
+    `handle()` 的注释曾写着「此处是唯一对外出口，一处覆盖全部分支」，被本条实测推翻。
+    """
+    from tests.seed import (
+        make_brand,
+        make_series,
+        make_source,
+        make_variant,
+        make_year,
+    )
+
+    src = make_source(db_session, name="汽车之家")
+    brand = make_brand(db_session, name="问界", source=src)
+    s = make_series(db_session, brand, name="问界M6", body_type="suv",
+                    energy_types=("REEV",), source=src)
+    year = make_year(db_session, s)
+    make_variant(db_session, s, year, config_version="旗舰版", energy_type="BEV",
+                 price_cny="230000", source=src,
+                 facts=[("参数信息", "CLTC纯电续航里程(km)", "605", "km", "CLTC")])
+    db_session.commit()
+
+    cases = [
+        ("你好", "early_return:is_chatty"),
+        ("问界M6各版本有什么区别", "early_return:asks_variant_diff"),
+    ]
+    for msg, expect_rule in cases:
+        sid = client.post("/api/v1/agent/sessions").json()["session_id"]
+        client.post(f"/api/v1/agent/sessions/{sid}/messages", json={"message": msg})
+        rows = load_session(db_session, sid)
+        assert rows, f"「{msg}」走了早期返回分支，却一行都没留档"
+        rule = rows[0]["matched_rule"] or ""
+        assert rule.startswith("early_return:"), (
+            f"「{msg}」的留档应标明走了哪条早期分支，期望 {expect_rule}，实际 {rule!r}"
+        )
+
+
+def test_early_return_does_not_dispatch_shadow_route(
+    log_enabled, client, db_session: Session, monkeypatch
+):
+    """哨兵决策**不得**触发 shadow 旁路派发。
+
+    那两条分支原先 sink 为空 → 不派发；补了哨兵后若照旧派发，会改变既有 shadow 行为。
+    """
+    from app.agent import engine as engine_mod
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        engine_mod.AgentEngine, "_spawn_shadow_route",
+        lambda self, message, profile, decision: calls.append((message, decision)),
+    )
+    sid = client.post("/api/v1/agent/sessions").json()["session_id"]
+    client.post(
+        f"/api/v1/agent/sessions/{sid}/messages", json={"message": "你好"}
+    )
+    assert not calls, "闲聊分支不应派发 shadow 旁路"
+
+
+def test_pii_plate_and_split_id_are_masked(log_enabled, db_session: Session):
+    """2026-10-06 独立审查实测补齐：**车牌**与**身份证分段**此前不脱敏。
+
+    完整 18 位身份证会被「≥15 位连续数字」命中，但**拆开写**（地区码 / 生日 / 顺序码
+    分几次打进对话）就漏。车牌则是汽车场景唯一无法用通用规则覆盖的强标识。
+    """
+    from app.agent.conversation_log import _mask_text
+
+    raw = "我的车牌苏A12345，身份证 110101 和 19900101，手机 13800138000"
+    masked = _mask_text(raw)
+    assert "苏A12345" not in masked, f"车牌未脱敏：{masked}"
+    assert "110101" not in masked, f"身份证地区码未脱敏：{masked}"
+    assert "19900101" not in masked, f"身份证生日段未脱敏：{masked}"
+    assert "13800138000" not in masked, f"手机号未脱敏：{masked}"
+    # 未脱敏部分要保留，否则复现时输入就不是原话了
+    assert "我的车牌" in masked
+
+
+def test_plate_mask_does_not_eat_spec_text(log_enabled):
+    """车牌正则不得误伤参数/型号文本（否则留档失去复现价值）。"""
+    from app.agent.conversation_log import _mask_text
+
+    for safe in ("汉L的续航605km", "问界M6指导价23.00万", "轴距2950mm", "凯美瑞2.0T"):
+        assert _mask_text(safe) == safe, f"参数文本被车牌规则误伤：{safe!r} -> {_mask_text(safe)!r}"
+
+
 def test_multi_turn_session_logs_every_turn(log_enabled, client, db_session: Session):
     """多轮上下文型缺陷（「第2轮突然跑偏」）只有留全每一轮才查得出来。"""
     sid = client.post("/api/v1/agent/sessions").json()["session_id"]

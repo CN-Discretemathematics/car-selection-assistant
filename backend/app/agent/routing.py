@@ -656,13 +656,44 @@ _PII_PATTERNS = (
     re.compile(r"1[3-9]\d{9}"),
     re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
     re.compile(r"\d{15,18}"),
+    # 2026-10-06（独立审查实测补齐）：上面那条只认「≥15 位**连续**数字」，于是
+    # **身份证分段写**（前 6 位地区码 + 生日 8 位，分两三次打进对话）
+    # 完全漏掉——完整 18 位反而会被命中，拆开写就漏。汽车问答里「我身份证号是
+    # 110101 和 19900101 这样的」并不罕见，故补分段模式。
+    #
+    # ⚠️ 但**不能**靠两条前瞻式正则按顺序逐条 sub：第一段被换成 `***` 之后，
+    # 第二段就找不到它的参照物了（第一版就是这样：地区码被掩、生日段漏）。
+    # 故分段身份证改由 `_mask_split_id` **一次扫完整对**再替换。
+)
+
+#: 身份证**分段**：6 位地区码 + 8 位生日，顺序不定，中间可隔 0~8 个非数字字符。
+_SPLIT_ID_RE = re.compile(
+    r"(\d{6})([\s\S]{0,8}?)(\d{8})|(\d{8})([\s\S]{0,8}?)(\d{6})"
 )
 
 
+def _mask_split_id(text: str) -> str:
+    """一次扫完整对再替换（见 `_SPLIT_ID_RE` 处的说明）。"""
+
+    def _repl(m: re.Match) -> str:
+        return "***" + (m.group(2) or m.group(5) or "") + "***"
+
+    return _SPLIT_ID_RE.sub(_repl, text)
+
+
+def _mask_plate(text: str) -> str:
+    """车牌（苏A12345 / 京A·88888）。**汽车场景唯一无法用通用规则覆盖的强标识**，
+    且不会误伤参数文本（`[一-龥][A-Z][A-Z0-9]{5,6}` 要求汉字开头 + 字母 + 5~6 位）。
+    独立于 `_PII_PATTERNS`：它不是「模式化机密串」，形态是车牌。
+    """
+    return re.sub(r"[一-龥][A-Z][·]?[A-Z0-9]{5,6}", "***", text)
+
+
 def _mask_pii(text: str) -> str:
+    text = _mask_split_id(text)  # 先扫分段身份证：它依赖「两段同时在场」
     for pattern in _PII_PATTERNS:
         text = pattern.sub("***", text)
-    return text
+    return _mask_plate(text)
 
 
 def log_route_decision(
