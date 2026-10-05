@@ -70,6 +70,9 @@ _PARAM_PROBES: tuple[tuple[str, str], ...] = (
 _PROBE_SKIP_KEYS = {"优惠信息"}
 _PROBE_SKIP_VALUES = {"暂无", "-", "--", "未知"}
 _PROBE_MAX_KEYS = 8
+# 同一事实键跨款型的去重取值最多展示几个（2026-10-05 由魔法数 2 提为具名常量：
+# N6 正是「只列前 2 个」把头条那个值切掉了，截断披露也依赖这个数）。
+_PROBE_VALUE_MAX = 2
 
 # 探针维度 → 用户可读名（v3 不可回答题诚实性标注：问了但 DB 完全没有的维度，
 # 必须显式回答「官方资料未披露」——评测 v3 拒答判定 0/60 通过暴露的缺失）
@@ -239,19 +242,41 @@ def probe_facts(
             entries.append(entry)
 
     lines: list[str] = []
-    for key in matched_keys[: _PROBE_MAX_KEYS]:
+    shown_keys = matched_keys[: _PROBE_MAX_KEYS]
+    for key in shown_keys:
         entries = values_by_key.get(key) or []
         if not entries:
             continue
         rendered: list[str] = []
-        for value, unit, cycle in entries[:2]:
+        for value, unit, cycle in entries[:_PROBE_VALUE_MAX]:
             value = _FEATURE_VALUE_LABEL.get(value, value)  # ● → 有（标配）、○ → 选装
             unit = unit or unit_from_key(key) or ""
             if unit and value.lower().endswith(unit.lower()):
                 unit = ""
             rendered.append(f"{value}{f' {unit}' if unit else ''}{f'（{cycle}）' if cycle else ''}")
-        suffix = "（不同款型存在差异）" if len(entries) > 1 else ""
+        # 2026-10-05（N6-A）：截断**必须披露**。
+        # 实拍原样（星愿，问「续航和电池容量分别是多少」）：
+        #   核心参数：… 续航 480 km（CLTC）；电池 47.14 kWh
+        #   你问到的相关参数：CLTC纯电续航里程(km) = 310 km（CLTC） / 410 km（CLTC）（不同款型存在差异）
+        # 库内实有 3 个续航档（310/410/480），`entries[:2]` 恰好把**头条那个 480** 切掉，
+        # 而旧文案只说「不同款型存在差异」——用户以为看到的就是全部。
+        # 这与本轮 P1-3（佐证被 `text[:60]` 腰斩成「级别 = 紧…」）是同一类缺陷：
+        # **截断了但没说截断**。这里补足「共几个、只列了几个」。
+        if len(entries) > _PROBE_VALUE_MAX:
+            suffix = f"（共 {len(entries)} 个取值，此处只列前 {_PROBE_VALUE_MAX} 个）"
+        elif len(entries) > 1:
+            suffix = "（不同款型存在差异）"
+        else:
+            suffix = ""
         lines.append(f"{key} = {' / '.join(rendered)}{suffix}")
+    # 2026-10-05（PR #66 审查遗留）：**渲染行数为 0 时不得只留披露行**。
+    # 前 N 个命中键的取值全是无信息量值（暂无/-/--/未知）时，循环会全部 `continue`，
+    # 只剩披露行，上游拼成「你问到的相关参数：（另有 1 个相关参数未列出）。」
+    # ——声称「你问到的参数」却一条都没列。审查实测全库 877 车系 × 8 组提问命中 0 次
+    # （非生产可达），但这句话在任何产品口径下都不通，属**决策无关**的兜底。
+    if lines and len(matched_keys) > len(shown_keys):
+        # 同理：命中了但没展示的键也要说，否则用户以为那就是全部相关参数
+        lines.append(f"（另有 {len(matched_keys) - len(shown_keys)} 个相关参数未列出）")
     return lines
 
 
@@ -336,8 +361,12 @@ def build_series_qa_answer(
 
     if len(resolved) == 1:
         series, brand = resolved[0]
-        name = display_name(series, brand)
-        parts = [f"关于「{name}」：\n" + _describe(db, series, brand)]
+        # 2026-10-05（N5）：此前是 `关于「X」：` + `_describe()`，而 `_describe()`
+        # 自己就以「X：」开头，于是站上同一句里车系名出现两次：
+        #   关于「东风奕派eπ007」：
+        #   「东风奕派eπ007」：中大型车 · 轿车 · …
+        # `_describe` 是唯一调用点，故去掉外层重复的全名即可，不改它的内部结构。
+        parts = [_describe(db, series, brand)]
         # 按需参数查找（评审 M-R10）：提问命中的维度从全量 DB 事实直接取值
         facts = series_fact_rows(db, [series.id]).get(series.id, [])
         probed = probe_facts(facts, message)
@@ -481,6 +510,12 @@ def _diff_rank(key: tuple[str, str], label: str) -> tuple[int, int, str]:
     return (1, 0, key[0] + fact_key)
 
 
+#: SpecFact 里唯一属于**硬参数**的类目；其余（内部配置/安全配置/外部配置/
+#: 智能辅助驾驶/操控配置/个性化）都是**配置项**。实测库内分布：参数信息 44 万条，
+#: 其余六类合计约 30 万条——两者量级相当，混排才看不出差异（2026-10-05 N3）。
+_SPEC_CATEGORY = "参数信息"
+
+
 def build_variant_diff_answer(
     db: Session, series: VehicleSeries, brand: Brand | None, message: str = ""
 ) -> tuple[str, list[dict]]:
@@ -592,10 +627,28 @@ def build_variant_diff_answer(
         picked.append(key)
 
     if picked:
-        lines.append("\n版本差异（只列不同项，相同参数已隐藏）：")
-        for key in picked[:_VARIANT_DIFF_KEYS_MAX]:
-            cells = [f"{_MARKS[idx]} {value}" for idx, value in enumerate(_vector(key))]
-            lines.append(f"{labels[key]}：" + "｜".join(cells))
+        # 2026-10-05（N3）：配置项与硬参数分块列出。此前两者混在一张表里，
+        # 站上原样：续航/电池/功率/扭矩/快充/快充/记忆泊车/辅助泊车/座椅电动调节/
+        # 后座出风口/**后电动机型号 TZ160XS001**/整备质量 —— 想找「哪个版本有记忆泊车」
+        # 得在一堆 kW·min·kg 里翻，而「后电动机型号」这类内部件对选车几乎无意义，
+        # 却占一整行的显著位置。
+        #
+        # 刻意**只拆渲染、不动入选**：哪些条目进表仍由 `_VARIANT_DIFF_PRIORITY` 与
+        # `_VARIANT_DIFF_KEYS_MAX` 决定（评审 M2 的口径：部分版本缺收录也算差异）。
+        # 改入选集合会同时改变既有基线与「另有 N 项未列出」的计数，那属于判据变更，
+        # 不该由一个排版修正夹带。
+        shown_picked = picked[:_VARIANT_DIFF_KEYS_MAX]
+        groups = [
+            ("配置", [k for k in shown_picked if k[0] != _SPEC_CATEGORY]),
+            ("参数", [k for k in shown_picked if k[0] == _SPEC_CATEGORY]),
+        ]
+        for title, group in groups:
+            if not group:
+                continue
+            lines.append(f"\n版本差异·{title}（只列不同项）：")
+            for key in group:
+                cells = [f"{_MARKS[idx]} {value}" for idx, value in enumerate(_vector(key))]
+                lines.append(f"{labels[key]}：" + "｜".join(cells))
         if len(picked) > _VARIANT_DIFF_KEYS_MAX:
             lines.append(f"（另有 {len(picked) - _VARIANT_DIFF_KEYS_MAX} 项差异未列出，加入对比可查看完整表）")
     else:
