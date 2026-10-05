@@ -582,7 +582,15 @@ def _absent_series_note(
     if not resolved:
         return None
     resolved_brands = {brand.name for _s, brand in resolved if brand is not None}
-    series_names = [series.name for series, _b in resolved]
+    # ⚠️ 必须把「品牌+车系」的组合形式也塞进去：`series.name` 只是「朗逸」，
+    # 用户说的却是「大众朗逸」。只传车系名的话，owned 里不含「大众」，
+    # 「大众」会被当成一个独立候选品牌 → 后面「这是个品牌不是一台车」的守卫
+    # 误判，把本该披露的「明锐库里没有」也一并吞掉（2026-10-06 实测）。
+    series_names = [
+        name
+        for series, brand in resolved
+        for name in (series.name, f"{brand.name}{series.name}" if brand else series.name)
+    ]
     mentioned = brand_names_in_message(db, message, series_names=series_names)
 
     if mentioned and not (mentioned & resolved_brands):
@@ -594,7 +602,25 @@ def _absent_series_note(
             "换一台你说得出来的在售车型，或者把车系全名给我，我再查。"
         )
 
-    # 点名多台、只查到一部分：用对比连接词估一个**下界**，不足就披露（不猜缺哪台）
+    # 点名多台、只查到一部分：用对比连接词估一个**下界**，不足就披露（不猜缺哪台）。
+    # ⚠️ 但**必须先有显式的比较/列举信号**，否则会把「油耗**和**续航」这种
+    # 属性并列当成两台车（2026-10-06 独立审查 P1-1 实测）：
+    #     「汉的油耗和续航分别是多少」→ 曾答「你问的 2 台里只查到 1 台」，
+    #     **一个参数都不给**。中文里「和」绝大多数时候连的是属性，不是车。
+    if not _has_comparison_signal(message):
+        return None
+    # ⚠️ 「你提到的 X 库里没有收录」这句话**只对「库���确实没有这个车系」成立**。
+    # 若候选里出现的是一个**在库品牌**（大众 29 款、五菱 47 款…），说它「没有收录」
+    # 是假话——它不是一个车系名。此处不披露，让下游按已解析到的车系正常回答
+    # （与本轮改动前的行为一致）。品牌级对比消歧（「大众和汉哪个好」该回
+    # 「大众是品牌不是一款车，想比哪款？」）是独立的一层，尚未实现，见台账。
+    if mentioned:
+        return None
+    # 「这个候选其实是个品牌」也是「库里没有收录」这句话不成立的理由：
+    # 「大众和汉哪个好」里大众**不是没收录**，它是个有 29 款车的品牌。
+    # 这里用 require_model_suffix=False 取「消息里出现过的全部库内品牌」。
+    if brand_names_in_message(db, message, series_names, require_model_suffix=False):
+        return None
     implied = _implied_candidate_count(message)
     if implied > len(resolved):
         got_names = "、".join(series_names)
@@ -604,6 +630,18 @@ def _absent_series_note(
             "所以下面只列查得到的那部分——不是全部对比结果。"
         )
     return None
+
+
+#: 显式的**比较/列举**信号。没有它们就不要用连接词去猜「提到了几台车」——
+#: 「油耗和续航」里的「和」连的是属性。命中任何一个即认为用户在并列候选。
+#:
+#: `哪个` 必须带**后缀**才算：「油耗和续航**哪个重要**」是属性比较，
+#: 「朗逸和明锐**哪个好**」才是选车（2026-10-06 实测两者都会命中光秃秃的「哪个」）。
+_COMPARISON_SIGNALS_RE = re.compile(
+    r"(哪个(更|好|强|划算|值得|贵|合适|适合|车|款)|哪款(更|好|值得|划算|适合)|"
+    r"怎么选|如何选|选哪|对比|相比|比较|区别|差别|"
+    r"还是|或者|以及|vs|VS|、)"
+)
 
 
 #: 比较/并列句式里表示「还有下一台」的连接词。数它们是为了估出**候选台数下界**，
@@ -624,6 +662,15 @@ def _absent_series_note(
 #: **不含 `，`**：它在正常句子里只是停顿（「汉的续航是多少，油耗呢」），
 #: 计入会让每个逗号句都被当成并列而误报缺车——逗号的代价远大于收益。
 _CANDIDATE_CONNECTORS_RE = re.compile(r"还是|或者|以及|VS|vs|跟|和|与|或|、")
+
+
+def _has_comparison_signal(message: str) -> bool:
+    """消息里有没有**显式的比较/列举**信号（哪个/对比/还是/、…）。
+
+    没有它就不要用「和」去猜候选台数——中文里「和」绝大多数连的是属性
+    （「油耗和续航」），不是车。见 `_absent_series_note` 里的实测。
+    """
+    return bool(_COMPARISON_SIGNALS_RE.search(message))
 
 
 def _implied_candidate_count(message: str) -> int:

@@ -196,17 +196,81 @@ def test_real_queries_never_drop_a_named_car(db_session: Session, msg: str):
 def test_candidate_count_uses_longest_first_alternation(
     msg: str, expected: int
 ):
-    """候选台数估算必须**最长优先交替**，两种朴素写法各错一半：
+    """候选台数估算必须**用 findall 整体匹配**，不能逐项 `count()` 相加。
 
-    - 逐项 `count()` 求和 → 「买A或者B」数成 3 台（`或`+`或者` 各算一次）
-      → 正常的两车问题**误报缺车**，即披露逻辑自己的误报；
-    - 只留最长的写法 → 「A或B」数成 1 台 → 真的两车并列反而**漏报**。
+    2026-10-06 自查抓到：连接词表里同时有 `或` 与 `或者`，求和让「买A或者B」
+    数成 3 台 → 正常的两车问题**误报缺车**（披露逻辑自己的误报，比漏报更糟）。
 
-    这是自查时抓到的（2026-10-06），不是审查 subagent 报的——它没看这段。
+    ⚠️ 函数名里的「longest-first」是**历史遗留的错名**，已更正过一次：
+    当时我以为交替顺序必须是「最长优先」，变异测试把 `或` 排到 `或者` 前面，
+    17 条全绿——因为计数场景下顺序根本不影响结果（「或者」无论被哪个分支吃掉
+    都只产生 1 个匹配）。真正的关键只是「用 findall」。改名会牵动本轮多处引用，
+    暂留旧名但在此说明，**别被这个名字误导**。
     """
     from app.agent.series_qa import _implied_candidate_count
 
     assert _implied_candidate_count(msg) == expected
+
+
+def test_bare_brand_mention_is_not_a_missing_car(db_session: Session):
+    """P0 回归（2026-10-06 独立审查）：**裸品牌名**不得被判成「库里没有」。
+
+    「大众和汉哪个好」——大众有 29 款在售车，它不是一款车，更不是「没收录」。
+    披露逻辑最初只判「消息里出现了库内品牌 A，而解析出的车系属品牌 B」，
+    于是把 **39 个在库品牌**（奔驰 56 款 / 大众 29 / 丰田 27…）判成
+    「我们库里目前没有对应的车系资料」并**替换掉整段回答**——
+    比它要修的缺陷更严重，且更难被察觉（用户只会以为这台车没数据）。
+
+    区分：品牌词**紧跟字母数字**才是「点名了某品牌下的一台车」（传祺M6）；
+    独立出现只是比较候选方之一（大众**和**汉）。
+    """
+    _seed(db_session)
+    # 本文件的种子库里有：问界M6 / 传祺GS4 / 几何M6 / 朗逸(大众) / 柯珞克(斯柯达)
+    for msg in ("传祺和朗逸哪个好", "大众柯珞克哪个好"):
+        resolved = resolve_series(db_session, msg)
+        text = build_series_qa_answer(db_session, resolved, msg)
+        assert "我们库里目前**没有**" not in text, (
+            f"「{msg}」把在库品牌说成库里没有。实际：{text[:160]}"
+        )
+
+
+def test_attribute_conjunction_is_not_multi_car(db_session: Session):
+    """P1 回归（2026-10-06 独立审查）：「油耗**和**续航」是一台车的两个属性。
+
+    曾被算成「你问的 2 台里我们只查到 1 台」，**一个参数都不给**。
+    触发条件是没有显式比较信号时仍拿连接词去猜候选台数。
+
+    「哪个重要」也算属性比较——故 `哪个` 必须带选车类后缀（好/强/值得/划算…）
+    才算比较信号，这一点也一并钉住。
+    """
+    _seed(db_session)
+    for msg in ("朗逸的油耗和续航分别是多少", "朗逸的油耗和续航哪个重要"):
+        resolved = resolve_series(db_session, msg)
+        text = build_series_qa_answer(db_session, resolved, msg)
+        assert "你问的「" not in text and "没有收录" not in text, (
+            f"「{msg}」是属性并列，不该按多车处理。实际：{text[:160]}"
+        )
+        assert "续航" in text or "参数" in text or "朗逸" in text, (
+            f"「{msg}」应当正常给参数。实际：{text[:160]}"
+        )
+
+
+def test_real_comparison_still_discloses_missing_car(db_session: Session):
+    """反向保护：上面两条修完后，**真正的缺车对比仍要披露**。
+
+    「大众朗逸和明锐哪个更好」：朗逸在库、明锐不在。
+    注意「大众」是「大众朗逸」的组成部分，不得被当成独立候选品牌而吞掉披露。
+    """
+    from app.agent.series_qa import build_series_qa_answer as _build
+
+    _seed(db_session)
+    msg = "大众朗逸和明锐哪个更好"
+    resolved = resolve_series(db_session, msg)
+    text = _build(db_session, resolved, msg)
+    assert "没有收录" in text or "库里没有" in text, (
+        f"明锐确实不在库里，应当披露。实际：{text[:200]}"
+    )
+    assert "朗逸" in text, "查得到的那台仍要正常回答"
 
 
 @pytest.mark.xfail(
