@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -169,7 +168,6 @@ def resolve_brand_mentions(
 
 #: 品牌词后面若紧跟这些字符，说明它是**独立**出现的候选（后面接着另一台车），
 #: 而不是一个车系名的前缀。
-_CANDIDATE_CONNECTOR_CHARS = "和与跟、，,或还是？? 　"
 
 
 def brand_names_in_message(
@@ -196,7 +194,6 @@ def brand_names_in_message(
     排除掉，于是「这个候选其实是个品牌」这条守卫**看不到它**，结果两台都在库
     （五菱 47 款）却说「其余库里没有收录」。要判「品牌是否被当成一辆车点名」，
     必须**关掉**这个排除；真正的位置判断交给
-    `brand_names_used_as_vehicle_in_message`，那里按「品牌后面是否直接跟着已解析
     的车系名」来决定，避免把 `大众朗逸` 里的「大众」也算成一辆车。
     """
     normalized = normalize_name(message)
@@ -225,43 +222,6 @@ def brand_names_in_message(
         found.add(label)
     return found
 
-
-def brand_names_used_as_vehicle_in_message(
-    db: Session,
-    message: str,
-    resolved: list[tuple[Any, Any]],
-) -> set[str]:
-    """消息里被**当成一辆车**点名的品牌词。
-
-    判据是**品牌词后面跟的是不是并列连接词**（或消息到此为止），而不是
-    「后面跟的是不是某个已解析车系名」——后者会误伤 59.6% 的车系
-    （`series.name` 本身以品牌名开头）：
-
-        「五菱**和**五菱缤果哪个好」  → 五菱后面是连接词 → 被当成一辆车点名了
-            它是品牌（47 款）→ 不可说「库里没有收录」
-        「五菱之光**和**五菱祥运哪个好」→ 五菱后面是「之光」「祥运」，都不是连接词
-            → 五菱祥运才是那辆缺失的车（五菱祥运库里没有）→ **必须披露**
-
-    2026-10-06 独立审查 P0-1 实测：用「是否跟着已解析车系名」判，会把后者
-    这类**合法的缺失披露静默吞掉**，而用户问了两台车、系统只答一台还一声不吭——
-    正是本模块 docstring 自己说的「比崩溃更坏」的那一类。
-    """
-    normalized = normalize_name(message)
-    if not normalized:
-        return set()
-    used: set[str] = set()
-    for name, _brand_id, label in _load_entries(db):
-        start = 0
-        while True:
-            pos = normalized.find(name, start)
-            if pos < 0:
-                break
-            start = pos + 1
-            tail = normalized[pos + len(name):]
-            if not tail or tail[0] in _CANDIDATE_CONNECTOR_CHARS:
-                # 品牌词独立出现（后面是并列连接词，或到此为止）→ 被当成一辆车
-                used.add(label)
-    return used
 
 def catalog_overview(
     db: Session,
