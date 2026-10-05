@@ -70,12 +70,13 @@ def test_every_series_alias_has_written_basis():
         assert f'"{target}"' in src, f"{target} 不在清单源文件里"
     for target, wanted in list(SERIES_ALIASES.items()) + list(BRAND_ALIASES.items()):
         for alias in wanted:
-            # 依据必须在**该条目附近**：取该 key 起到下一行注释块之间的文本
             idx = src.find(f'"{target}"')
             assert idx >= 0, f"清单里找不到 {target}"
-            window = src[idx: idx + 400]
+            # 依据写在条目**前后**都合法（上方整段注释或行内注释），
+            # 故两侧都看——只看一侧会逼着人把注释写在固定位置，反而更容易失真。
+            window = src[max(0, idx - 400): idx + 400]
             assert ("真实" in window or "库里" in window or "口语" in window
-                    or "误写" in window), (
+                    or "误写" in window or "问句" in window), (
                 f"别名 {alias}（{target}）附近没有写明依据——"
                 "请补一句「哪条真实问句 / 库里叫什么」"
             )

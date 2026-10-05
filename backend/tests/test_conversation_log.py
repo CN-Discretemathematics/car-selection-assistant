@@ -255,19 +255,38 @@ def test_early_return_does_not_dispatch_shadow_route(
     """哨兵决策**不得**触发 shadow 旁路派发。
 
     那两条分支原先 sink 为空 → 不派发；补了哨兵后若照旧派发，会改变既有 shadow 行为。
+
+    ⚠️ 必须显式设 `AGENT_ROUTER_MODE=shadow`：默认 regex 下 `handle()` 的 shadow 分支
+    **根本不进**，`_spawn_shadow_route` 一次都不会被调用——本用例会无条件通过，
+    是**空转测试**（2026-10-06 独立审查 P2-3 实测：删掉 `early_return:` 过滤
+    全量测试依然全绿）。
     """
     from app.agent import engine as engine_mod
+
+    # `get_router_mode()` 每次直读环境变量、无缓存，故只需 setenv
+    monkeypatch.setenv("AGENT_ROUTER_MODE", "shadow")
 
     calls: list[tuple] = []
     monkeypatch.setattr(
         engine_mod.AgentEngine, "_spawn_shadow_route",
         lambda self, message, profile, decision: calls.append((message, decision)),
     )
+
+    # 先确认 shadow 模式下**确实**会派发（否则「没派发」证明不了任何事）
+    sid_ok = client.post("/api/v1/agent/sessions").json()["session_id"]
+    client.post(
+        f"/api/v1/agent/sessions/{sid_ok}/messages", json={"message": "汉怎么样"}
+    )
+    assert calls, "前提不成立：shadow 模式下正常车系分支本应派发 shadow 旁路"
+
+    calls.clear()
     sid = client.post("/api/v1/agent/sessions").json()["session_id"]
     client.post(
         f"/api/v1/agent/sessions/{sid}/messages", json={"message": "你好"}
     )
-    assert not calls, "闲聊分支不应派发 shadow 旁路"
+    assert not calls, (
+        f"闲聊分支不应派发 shadow 旁路，实际派发了 {len(calls)} 次"
+    )
 
 
 def test_pii_plate_and_split_id_are_masked(log_enabled, db_session: Session):
