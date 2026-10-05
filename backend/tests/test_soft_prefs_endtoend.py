@@ -59,12 +59,18 @@ def seeded(db_session: Session) -> dict[str, int]:
     source = make_source(db_session, name="汽车之家")
     brand = make_brand(db_session, name="测试品牌", source=source)
     out: dict[str, int] = {}
-    # 目标车：SUV + BEV + 15 万 + 5 座 + 车长 4600（唯一能靠「空间」翻盘的对手）
+    # 目标车：SUV + BEV + 15 万 + 6 座 + 车长 4600（唯一能靠「空间」翻盘的对手）
+    #
+    # 座位数取 6 是「5 人以上」的**开区间**下限（超过 5 人 → 至少 6 座）。此前全用
+    # 5 座，等于把「5 座车」当成「5 人以上」的合规车——生产实测正是这样把 5 座车
+    # 推给了要 6 个人的用户。其余对照车一律也给 6 座，保证它们**各自只违反一条**
+    # 约束（否则会被座位这条先筛掉，测试就变成了因错误的原因而绿）。
     plan = [
-        ("合规车", "suv", "BEV", "150000", ("参数信息", "座位数(个)", "5", "个", None)),
-        ("轿车对照", "sedan", "BEV", "150000", ("参数信息", "座位数(个)", "5", "个", None)),
-        ("燃油对照", "suv", "ICE", "150000", ("参数信息", "座位数(个)", "5", "个", None)),
-        ("超预算对照", "suv", "BEV", "250000", ("参数信息", "座位数(个)", "5", "个", None)),
+        ("合规车", "suv", "BEV", "150000", ("参数信息", "座位数(个)", "6", "个", None)),
+        ("座位不足对照", "suv", "BEV", "150000", ("参数信息", "座位数(个)", "5", "个", None)),
+        ("轿车对照", "sedan", "BEV", "150000", ("参数信息", "座位数(个)", "6", "个", None)),
+        ("燃油对照", "suv", "ICE", "150000", ("参数信息", "座位数(个)", "6", "个", None)),
+        ("超预算对照", "suv", "BEV", "250000", ("参数信息", "座位数(个)", "6", "个", None)),
         ("无座位事实", "suv", "BEV", "150000", None),
     ]
     for name, body, energy, price, fact in plan:
@@ -195,6 +201,10 @@ def test_soft_prefs_household_keeps_variants_without_seat_facts(db_session: Sess
 
     passengers 会下推成 `seat_count IS NULL OR seat_count >= N`。若 L1 的座位数
     判定被改成纯 `>= N`，本地快照库 6629 款型里 85%（没有座位事实）会被静默筛空。
+
+    生产库实测覆盖率是 1764/5915（29.8% 有座位事实），所以「缺数据」是常态而非
+    边角情况——正因如此才更要把「筛选保留」与「向用户披露未核实」分开处理：
+    筛选上保留（不误杀），表述上告知（不假装校验过）。
     """
     monkeypatch.setenv(sp.MODE_ENV, "llm")
     message = "我们一家五口人"
@@ -202,11 +212,18 @@ def test_soft_prefs_household_keeps_variants_without_seat_facts(db_session: Sess
 
     profile = _profile()
     assert asyncio.run(sp.run_if_enabled(profile, message, llm=llm)) is True
-    assert profile.passengers == 5, "「5人以上」必须按下界 5 解析（够用即可，不得按 7 座砍车）"
+    assert profile.passengers == 6, (
+        "「5 人以上」是开区间（超过 5 人）→ 座位下限 6。"
+        "取 5 会把 5 座车推给要 6 个人的用户（2026-10-05 生产实测）。"
+    )
 
     ids = set(_ids(db_session, profile))
     assert seeded["无座位事实"] in ids, "没有座位事实的款型被误杀了——缺数据 ≠ 不满足"
-    assert seeded["合规车"] in ids, "5 座合规车应当保留"
+    assert seeded["合规车"] in ids, "6 座合规车应当保留"
+    assert seeded["座位不足对照"] not in ids, (
+        "5 座车不得进「5 人以上」（= 至少 6 座）的候选集——"
+        "这正是生产实测里「首推两款 5 座车」那个缺陷"
+    )
 
 
 def test_soft_prefs_never_override_a_user_stated_household(db_session: Session, seeded, monkeypatch):
