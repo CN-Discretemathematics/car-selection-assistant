@@ -19,7 +19,7 @@ import re
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.catalog.series_index import normalize_name
+from app.catalog.series_index import _GENERIC_BRAND_SUFFIXES, normalize_name
 from app.common.models import Brand, VehicleSeries, VehicleVariant
 
 # 否定语境前缀（作用于品牌名之前 4 个字以内）
@@ -34,21 +34,57 @@ STRONG_INTENT_WORDS = ("品牌", "买", "购", "选车", "只要", "必须", "�
 # 易与日常词混淆的品牌名（归一化后）：仅在同句出现购买意图词时才作约束
 AMBIGUOUS_BRANDS = {"理想", "长安", "大众", "未来", "启辰", "东风"}
 
+
+def _strip_generic_suffix(brand_name: str) -> str:
+    """「小米汽车」→「小米」。口语里没人说全名。"""
+    for suffix in _GENERIC_BRAND_SUFFIXES:
+        if brand_name.endswith(suffix) and len(brand_name) - len(suffix) >= 2:
+            return brand_name[: -len(suffix)]
+    return ""
+
 # 品牌名索引缓存（指纹 = 活跃品牌数 + max(id)）；pytest 每次新建库，指纹可能碰撞，故测试下禁用
 _cache: dict = {"fingerprint": None, "entries": ()}
 
 
 def _load_entries(db: Session) -> tuple[tuple[str, int, str], ...]:
-    """(归一化品牌名或别名, brand_id, 展示名)，长名优先。"""
+    """(归一化品牌名或别名, brand_id, 展示名)，长名优先。
+
+    额外登记**去掉通用后缀**的品牌简称（2026-10-05 生产实测）：
+    全库有 5 个品牌名带「汽车」后缀（零跑汽车 / 小米汽车 / 理想汽车 / 吉利汽车 /
+    江淮汽车）且 `aliases` **全为空**，而用户口语只说「小米」「吉利」「江淮」。
+    实拍后果——同一句「品牌 + 问车型」换个说法就分裂成两条路：
+
+        「小米有几款车」        -> **全库盘点**（908 个车系），完全不提小米
+        「小米的车型有哪些」     -> 「暂时没有可核对的小米在售车型资料」
+        「奔驰有几款车」        -> 正确：「奔驰在售车型共 56 款」
+
+    品牌名恰好就是简称的（奔驰/特斯拉/比亚迪）不受影响，所以这表现为
+    **同一类问题里一部分品牌能问、一部分不能**。
+
+    两条防误伤：
+      1. 简称若**恰好等于另一个品牌的全名**（零跑/理想在库里各自另有同名品牌），
+         不登记——否则会同时命中两个 brand_id；
+      2. `AMBIGUOUS_BRANDS` 里的日常词（理想/长安/大众…）不登记，
+         它们已由「须带购车意图词」的既有规则处理。
+    """
     rows = db.execute(
         select(Brand.id, Brand.name, Brand.aliases).where(Brand.active_status == "active")
     ).all()
+    exact = {normalize_name(name or "") for _bid, name, _al in rows}
     entries: list[tuple[str, int, str]] = []
     for brand_id, name, aliases in rows:
         for candidate in (name, *(aliases or [])):
             normalized = normalize_name(candidate or "")
             if normalized:
                 entries.append((normalized, brand_id, name))
+        stem = _strip_generic_suffix(name or "")
+        if (
+            stem
+            and stem != normalize_name(name or "")
+            and stem not in exact
+            and stem not in AMBIGUOUS_BRANDS
+        ):
+            entries.append((stem, brand_id, name))
     entries.sort(key=lambda item: -len(item[0]))
     return tuple(entries)
 
@@ -84,6 +120,9 @@ def resolve_brand_mentions(
     2. **只有明确约束语气**（只要/必须/想买…）、消息基本只有品牌名、或提问本身就是
        品牌盘点（assume_constraint，如「奔驰都有哪些车型」）时，才升级为硬约束；
        单纯提及（「比亚迪和吉利哪个好」）不写进画像。
+    3. **长名优先落实在 span 上**（2026-10-05 实测）：`零跑汽车` 消息会同时命中
+       「零跑汽车」与「零跑」两个 brand_id——它们是同一个公司的两个品牌记录，
+       约束落在两个 id 上会让后续过滤/画像多带一个无关 id。
     """
     normalized = normalize_name(message)
     if not normalized:
@@ -94,16 +133,21 @@ def resolve_brand_mentions(
     explicit = assume_constraint or bool(BRAND_INTENT_RE.search(message))
     include: dict[int, str] = {}
     exclude: dict[int, str] = {}
+    claimed: list[tuple[int, int]] = []
     for name, brand_id, label in _load_entries(db):
         start = normalized.find(name)
         if start < 0:
             continue
+        end = start + len(name)
+        if any(start >= cstart and end <= cend for cstart, cend in claimed):
+            continue  # 已被更长的品牌名占住（`_load_entries` 已按长度降序）
         if any(name in series_norm for series_norm in series_norms):
             continue  # 品牌名属于被点名的车系名（「银河星愿」）→ 是对车系的指代
         if name in AMBIGUOUS_BRANDS and not (has_intent and has_strong_intent):
             continue  # 「理想的预算 20 万」不当作品牌「理想」；「我想买理想」才算
         if not (explicit or _is_bare_brand(normalized, name)):
             continue  # 只是提及，不构成硬约束
+        claimed.append((start, end))
         prefix = normalized[max(0, start - 4): start]
         if any(neg in prefix for neg in NEGATION_PREFIXES):
             exclude[brand_id] = label
