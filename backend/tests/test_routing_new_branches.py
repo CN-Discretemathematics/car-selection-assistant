@@ -66,11 +66,17 @@ def test_sales_ranking_reads_db_and_orders_by_sales(db_session: Session):
     assert text.index("星愿") < text.index("零跑A10"), text
 
 
-def test_sales_ranking_matches_home_endpoint_caliber(db_session: Session):
-    """助手榜与 `/home` 首页榜必须**同源同序**（否则两个面对同一月给出不同销冠）。
+def test_sales_ranking_orders_and_picks_latest_month(db_session: Session):
+    """销量榜的**排序**与**月份选择**（2026-10-05 独立审查 P1-2 更正后重命名）。
 
-    `catalog.sales_ranking` 就是两者共用的实现——本会话反复吃过「同一规则写两份
-    实现必然漂移」的亏，这里把「首页 Top-N 与助手榜顺序相同」钉成不变式。
+    ⚠️ 本测试**不验证**与 `/home` 同口径——它从未调用 `home()`，只是把一份写死的
+    期望顺序比对了两遍，证明的是「助手榜等于它自己」。名字原本叫
+    `test_sales_ranking_matches_home_endpoint_caliber`，宣称了它做不到的事：
+    审查用两种变异证明过，让 `/home` 单边加过滤或单边丢掉零售优先，本测试全绿。
+
+    真正的同口径不变式在 `tests/test_sales_ranking_matches_home.py`——
+    它**真的调 `/home` 接口**逐位比对 (series_id, sales_count)。本测试保留，
+    只负责它确实在验的两件事：默认取最近有数据的月份、按销量降序。
     """
     _seed_sales(db_session)
     ranked = [s.name for _sales, s, _brand in catalog.sales_ranking(db_session, limit=3)]

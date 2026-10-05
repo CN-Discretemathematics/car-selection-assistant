@@ -1843,9 +1843,18 @@ class AgentEngine:
                 "想看这几款的配置差异，直接说车系名就行。"
             )
             text = "".join(lines)
-            # 销量来自车系的来源记录（与卡片同一套引用口径）
+            # 引用必须挂在**销量记录自己**的来源上（MonthlySales.source_id）。
+            # 2026-10-06 审查 P0：原写成 `for _s, _v, s in rows`，而 rows 元素是
+            # (MonthlySales, VehicleSeries, Brand)，于是 `s` 绑到的是 **Brand**。
+            # 三个模型**都有** source_id，`getattr(..., None)` 的默认值形同虚设——
+            # 每条销量榜都挂着**品牌名录的来源**却贴「销量数据」标签。
+            # 该缺陷全仓 75 条相关测试全绿：把两个来源对调，任何断言都不变。
             source_ids = sorted(
-                {sid for sid in (getattr(s, "source_id", None) for _s, _v, s in rows) if sid}
+                {
+                    sid
+                    for sid in (getattr(sl, "source_id", None) for sl, _sv, _br in rows)
+                    if sid
+                }
             )
             citations = _source_citations(db, source_ids, label_suffix="销量数据")
         out = AgentMessageOut(
