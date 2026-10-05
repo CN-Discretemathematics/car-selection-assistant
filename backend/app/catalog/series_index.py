@@ -30,6 +30,14 @@ HEADLINE_SPECS: list[tuple[str, tuple[str, ...], str]] = [
 ]
 HEADLINE_ORDER: tuple[str, ...] = tuple(label for label, _, _ in HEADLINE_SPECS)
 
+#: 核心参数那一行的前缀。车系问答卡片与 RAG 车系摘要切片**共用**——
+#: 两个展示点对同一个车系说同一组数，措辞必须一致（用户 2026-10-05 拍板）。
+#: N6-B 曾在 2026-10-05 短暂写成「（最高配）」，被实测证伪：`rank_headlines` 的口径
+#: 是逐 label 极值，油耗/加速取 min（最省/最快）恰恰通常是低配。汉的
+#: 「续航 705km（←3 款 EV）+ 油耗 0.67L（←5 款 DM-i 插混）」在库里根本不存在。
+#: 常量放在本模块而不是各自的消费点，是为了**结构上**杜绝再次漂移。
+HEADLINE_PREFIX = "核心参数（全系极值）："
+
 
 def normalize_name(text: str) -> str:
     """归一化车系名/品牌名：去空白与分隔符、小写（腾势Z9 GT → 腾势z9gt）。"""

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,6 +20,7 @@ from app.catalog import services as catalog
 from app.catalog.series_constraints import PARAM_KEYS
 from app.catalog.series_index import (
     HEADLINE_ORDER,
+    HEADLINE_PREFIX as _HEADLINE_PREFIX,
     normalize_name,
     unit_from_key,
     display_name,
@@ -76,13 +78,12 @@ _PROBE_MAX_KEYS = 8
 #: 超限时仍会如实披露「共 N 个，只列前 M 个」——截断可以，但截断必须说出来。
 _PROBE_VALUE_COERCE = 8
 
-#: 核心参数那一行的前缀。N6-B 曾在 2026-10-05 短暂写成「（最高配）」，被实测证伪：
-#: `rank_headlines` 的口径是**逐 label 极值**（油耗/加速取 min = 最省/最快，恰恰通常是低配），
-#: 与配置高低无关。汉的「续航 705km（←EV）」配「油耗 0.67L（←DM-i 插混）」在库里
-#: 根本不存在这样一台车。现按用户拍板改为「全系极值」——这是对极值口径的准确陈述，
-#: 且多档时 `rank_headlines` 会输出 `620~705 km` 区间，每个数都是真实存在过的值。
-#: 两处展示（单车系 `_describe` / 多车系对比）共用本常量，避免再次漂移。
-_HEADLINE_PREFIX = "核心参数（全系极值）："
+#: 核心参数那一行的前缀见 `series_index.HEADLINE_PREFIX`（上面 import 为
+#: `_HEADLINE_PREFIX`）——车系问答卡片与 RAG 车系摘要切片共用同一常量，
+#: 两个展示点不可能再各说各话。
+
+#: 尺寸的事实键（text 模式，见 `HEADLINE_SPECS`）
+_SIZE_FACT_KEY = "长*宽*高(mm)"
 
 # 探针维度 → 用户可读名（v3 不可回答题诚实性标注：问了但 DB 完全没有的维度，
 # 必须显式回答「官方资料未披露」——评测 v3 拒答判定 0/60 通过暴露的缺失）
@@ -99,6 +100,34 @@ _PARAM_DIM_LABELS: dict[str, str] = {
 }
 # 汽车之家配置表的特征标记值 → 用户可读表述（●=标配、○=选装；- 已在跳过表内）
 _FEATURE_VALUE_LABEL = {"●": "有（标配）", "○": "选装"}
+
+#: 键尾括号（仅用户可见文案用；匹配逻辑仍用原键）
+_KEY_TAIL_PAREN_RE = re.compile(r"[（(]([^（）()]*)[)）]\s*$")
+#: 括号内容看起来是单位的样子（km / kWh / L/100km / s / mm / Ps / % …）
+_ASCII_UNIT_RE = re.compile(r"^[A-Za-z0-9%·²³/°]+$")
+#: 中文单位词——`unit_from_key` 只认 ASCII（「电池快充时间(小时)」它认不出「小时」）
+_CN_UNIT_WORDS = frozenset({"小时", "分钟", "秒", "英寸", "吋", "匹", "千瓦", "牛米", "个"})
+
+
+def display_fact_key(key: str) -> str:
+    """用户可见的参数名：剥掉尾部**确实是单位**的括号。
+
+    用户此前看到的是「轴距(mm) = 2650 mm」「前备厢容积(L) = 70 L」——单位在标签和
+    值上各写了一遍。实测 877 车系 × 10 组提问共 32347 条渲染行，**15503 条（47.9%）**
+    是这个形态（用户 2026-10-05 拍板「只剥确实是单位的尾部括号」）。
+
+    **只剥单位，不剥名字**。库里同时存在括号里是中文名字的键：
+    `540°全景影像系统(带透明底盘)`、`M碳陶瓷高性能卡钳（金色卡钳）`、
+    `L2级组合驾驶辅助包（限时免费）`——剥掉就丢了真实信息。
+    判据：括号内容要么是 ASCII 单位形态，要么落在中文单位词表里，否则原样返回。
+    """
+    matched = _KEY_TAIL_PAREN_RE.search(key)
+    if not matched:
+        return key
+    inner = matched.group(1).strip()
+    if inner and (inner in _CN_UNIT_WORDS or _ASCII_UNIT_RE.match(inner)):
+        return key[: matched.start()].strip()
+    return key
 
 # 否定语境（评审 P2）：「我不买汉兰达」——被否定的车系不做问答、不加会话锁定
 NEGATION_WORDS = ("不买", "不想买", "不想要", "不喜欢", "不考虑", "排除", "不要")
@@ -285,7 +314,7 @@ def probe_facts(
             suffix = "（不同款型存在差异）"
         else:
             suffix = ""
-        lines.append(f"{key} = {' / '.join(rendered)}{suffix}")
+        lines.append(f"{display_fact_key(key)} = {' / '.join(rendered)}{suffix}")
     # 2026-10-05（PR #66 审查遗留）：**渲染行数为 0 时不得只留披露行**。
     # 前 N 个命中键的取值全是无信息量值（暂无/-/--/未知）时，循环会全部 `continue`，
     # 只剩披露行，上游拼成「你问到的相关参数：（另有 1 个相关参数未列出）。」
@@ -430,10 +459,73 @@ def _series_header(db: Session, series: VehicleSeries, brand: Brand | None) -> s
     )
 
 
+def size_line(db: Session, series: VehicleSeries) -> str | None:
+    """「尺寸」这一行的展示文本：单档照旧；多档取**在售款型里的众数**并标覆盖率。
+
+    为什么单独查、不并进 `rank_headlines`：
+      1. 覆盖率必须**按款型**去重——`SpecFact` 对 `(variant_id, fact_key)` 无唯一约束
+         （全库 36241 组重复），按事实行累加会虚高。N1 已经吃过一次这个亏。
+         而 `rank_headlines` 拿到的行里没有 `variant_id`。
+      2. 尺寸是 text 模式「取首值」，那个首值取决于数据库返回顺序，本质是**任取**。
+         实测 312/877（35.6%）的车系尺寸多档，其中 113 个（36.2%）众数与首值不同——
+         改完这 113 个会真的换一个更有代表性的值。
+
+    并列第一时（实测 79 个车系）取**事实表里出现得最早**的那个：并列本就无从分优劣，
+    保持与改动前一致比换个任意排序更稳。覆盖率标注会把「N 款中 M 款」如实说清楚。
+
+    `rank_headlines` 侧的尺寸行为**不动**（仍取首值、不参与区间），
+    本函数只在渲染时覆盖它，所以离线索引与既有单测都不受影响。
+    """
+    rows = db.execute(
+        select(VehicleVariant.id, SpecFact.fact_value, SpecFact.unit)
+        .join(SpecFact, SpecFact.variant_id == VehicleVariant.id)
+        .where(
+            VehicleVariant.series_id == series.id,
+            VehicleVariant.status == "on_sale",
+            SpecFact.fact_key == _SIZE_FACT_KEY,
+        )
+    ).all()
+    if not rows:
+        return None
+
+    first_by_variant: dict[int, str] = {}
+    for variant_id, value, row_unit in rows:
+        if not value:
+            continue
+        # 行上的 unit 优先（与 `rank_headlines` 同口径），没有才从键名推
+        unit = (row_unit or "").strip() or (unit_from_key(_SIZE_FACT_KEY) or "")
+        text = str(value).strip()
+        if unit and text.lower().endswith(unit.lower()):
+            text = text[: -len(unit)].strip()  # 值自带单位，别再拼一遍
+        first_by_variant.setdefault(int(variant_id), f"{text} {unit}".strip())
+    if not first_by_variant:
+        return None
+
+    counter = Counter(first_by_variant.values())
+    # Counter 保插入序，most_common 在同票时保留「先出现」的那个（见 docstring）
+    top_text, top_count = counter.most_common(1)[0]
+    total = len(first_by_variant)
+    if len(counter) < 2:
+        return top_text  # 单档：top_text 已含单位，不要再拼一遍（否则「mm mm」）
+    return f"{top_text}（在售 {total} 款中 {top_count} 款为此尺寸）"
+
+
+def _head_with_size(
+    db: Session, series: VehicleSeries, head: dict[str, str]
+) -> dict[str, str]:
+    """把 `rank_headlines` 的尺寸项换成 `size_line` 的口径（众数 + 覆盖率）。
+
+    三个展示点（单车系块、对比块、逐项对比行）都必须过这一道——
+    少一个就会在同一条回答里出现两个互相矛盾的尺寸。
+    """
+    size = size_line(db, series)
+    return {**head, "尺寸": size} if size else head
+
+
 def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
     name = display_name(series, brand)
     parts = [f"「{name}」：{_series_header(db, series, brand)}"]
-    head = series_headline(db, series)
+    head = _head_with_size(db, series, series_headline(db, series))
     if head:
         order = [label for label in HEADLINE_ORDER if label in head]
         parts.append(
@@ -488,7 +580,7 @@ def build_series_qa_answer(
     for series, brand in resolved:
         name = display_name(series, brand)
         blocks.append(f"\n【{name}】{_series_header(db, series, brand)}")
-        head = heads_map.get(series.id, {})
+        head = _head_with_size(db, series, heads_map.get(series.id, {}))
         if head:
             order = [label for label in HEADLINE_ORDER if label in head]
             blocks.append(
@@ -515,7 +607,11 @@ def build_series_qa_answer(
             blocks.append(f"  {sales.lstrip('；')}")
 
     # 逐项对比（双方都有数据的量纲）
-    heads = [heads_map.get(series.id, {}) for series, _ in resolved]
+    # 尺寸必须走 `size_line`（众数+覆盖率）而不是 `heads_map` 的首值，否则
+    # 上面那一块写「5050*1960*1505 mm（在售 6 款中 4 款为此尺寸）」、
+    # 下面这行写「4995*1910*1495 mm」——**同一条回答里自相矛盾**。
+    heads = [_head_with_size(db, series, heads_map.get(series.id, {}))
+             for series, _ in resolved]
     diff: list[str] = []
     for label in HEADLINE_ORDER:
         values = [h.get(label) for h in heads]

@@ -19,7 +19,13 @@ from langgraph.graph import END, START, StateGraph
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
-from app.catalog.series_index import HEADLINE_ORDER, HEADLINE_SPECS, display_name, rank_headlines
+from app.catalog.series_index import (
+    HEADLINE_ORDER,
+    HEADLINE_PREFIX,
+    HEADLINE_SPECS,
+    display_name,
+    rank_headlines,
+)
 from app.common.models import (
     Brand,
     MonthlySales,
@@ -347,9 +353,16 @@ def _summary_chunk_text(
     else:
         parts.append("官方指导价：官方资料未披露。")
     parts.append(f"在售 {on_sale_count} 款。")
-    head_parts = [headline[label] for label in HEADLINE_ORDER if headline.get(label)]
+    # 2026-10-05：此前是 `[headline[label] for label in HEADLINE_ORDER]`，**只取值、
+    # 丢掉 label**，切片读起来是「核心参数：4135*1805*1570 mm；2650 mm；58~85 kW；
+    # 310~480 km（CLTC）」——读者与下游 LLM 都分不出 `2650 mm` 是轴距还是车长、
+    # `30.12~47.14 kWh` 是电池还是别的。这段文本会作为「数据佐证」直接进 LLM 上下文，
+    # 是最容易过度推断的地方。补回 label，并用与卡片同一个前缀常量（用户拍板）。
+    head_parts = [
+        f"{label} {headline[label]}" for label in HEADLINE_ORDER if headline.get(label)
+    ]
     if head_parts:
-        parts.append("核心参数：" + "；".join(head_parts) + "。")
+        parts.append(HEADLINE_PREFIX + "；".join(head_parts) + "。")
     if sales:
         month, sales_count, sales_type = sales
         # 切片文本会作为「数据佐证」展示给用户，口径标签与前端保持一致（2026-09-14）
