@@ -345,7 +345,18 @@ def _retrieve_chat_evidence(
             if not evidence:
                 evidence = retrieval_search(db, query, None, 3)
             return evidence
-    return retrieval_search(db, message, None, 3)
+    # ⚠️ N8（2026-10-05 生产实测 + 用户拍板）：既解析不出车系、会话里也没有任何
+    # 锁定车系时，**不检索**。
+    #
+    # 实拍：新对话第一句就问「它的电池呢」，这里退化成 `retrieval_search(db, message, None, 3)`
+    # —— 无 series 过滤的全局检索，query 是一句指代，于是召回了比亚迪元UP / 丰田bZ3 /
+    # smart精灵#3 三台**用户一个字都没提过**的车；LLM 随后把它们当作
+    # 「目前我资料里的三款」端给用户，还说要帮用户从这几款里挑。
+    #
+    # 为什么不只是改措辞：这条路径本质是「**零证据让模型自由发挥**」。本次模型恰好
+    # 守住了诚实性底线（它如实说「没有电池相关数据」而不是编一个），但那是运气不是
+    # 保证——换一个问题未必守得住。用户拍板：只追问，不检索。
+    return []
 # 两条匹配路径（偏好 `body` / avoid 排除项）现已**统一用小写化的 msg_low**，
 # 因此这张表**只需要小写键**。此前偏好路径用 msg_low、avoid 路径用原始 message，
 # 于是不得不同时留「MPV」与「mpv」两个键——当时功能没坏，但看起来像冗余，
@@ -682,10 +693,18 @@ def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
         labels = dict(zip(profile.brand_ids, profile.brand_labels))
         labels.update(dict(zip(hints.get("brand_ids") or [], hints.get("brand_labels") or [])))
         excluded = set(profile.brand_exclude_ids) | set(hints.get("brand_exclude_ids") or [])
+        # 排除项的可读名同样要累积（2026-10-05）：此前只有 ids，追问回执**结构上就
+        # 写不出被排除的是哪个品牌**，于是用户说过的「别推荐比亚迪」在回执里凭空消失。
+        excl_labels = dict(zip(profile.brand_exclude_ids, profile.brand_exclude_labels, strict=False))
+        excl_labels.update(
+            dict(zip(hints.get("brand_exclude_ids") or [],
+                     hints.get("brand_exclude_labels") or [], strict=False))
+        )
         kept_ids = (set(profile.brand_ids) | set(hints.get("brand_ids") or [])) - excluded
         profile.brand_ids = sorted(kept_ids)
         profile.brand_exclude_ids = sorted(excluded)
         profile.brand_labels = [labels.get(bid, str(bid)) for bid in profile.brand_ids]
+        profile.brand_exclude_labels = [excl_labels.get(bid, str(bid)) for bid in excluded]
     if hints.get("usage"):
         profile.usage = hints["usage"]
     if hints.get("charging_tolerance") is not None:
@@ -702,22 +721,81 @@ def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
     return profile
 
 
+def _join_names(names: list[str]) -> str:
+    """多值拼接。
+
+    2026-10-05（审查）：两个以上用「、」拼接读起来像**二选一**（「只看奔驰、宝马」
+    像是二选一而不是都要），所以两个以上改用「和」，三个以上用「等」收尾。
+    """
+    items = [str(n).strip() for n in names if str(n).strip()]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]}和{items[1]}"
+    return "、".join(items[:-1]) + f"等{items[-1]}"
+
+
+def _readable(code: str, fallback: str) -> str:
+    """把库内枚举码翻成中文；认不出来的**原样返回，不编**。
+
+    复用 `series_qa` 里那两张标签表（同源，不另抄一份），避免这里出现
+    「要 suv」「能源 BEV」这类枚举码外泄（审查实测）。
+    """
+    from app.agent.series_qa import _BODY_LABEL, _ENERGY_LABEL
+
+    table = _BODY_LABEL if fallback == "车身" else _ENERGY_LABEL
+    return table.get(code, code)
+
+
 def _priority_phrase(profile: UserProfile) -> str:
-    """把用户**已经说过**的侧重维度拼成一句自然话，供追问文案回执。
+    """把用户**已经说过的约束**全量复述成一句自然话，供追问文案回执。
 
     用户说「我最看重动力」之后，下一句却是「为了帮你挑到合适的车，先问一下：
     购车预算大概是多少？」——**他刚说的话一个字都没被回应**，
     看起来就像「说了没用」，于是「生硬」。
 
-    只用 `profile.weights`（来源只有 `merge_profile` 从 `extract_hints` 累积的
-    用户原话），不猜、不补：没说过就返回空串。
+    #64 起只回执**侧重维度**（`profile.weights`）。生产实测发现硬约束侧完全空白：
+    用户一句「只要奔驰，预算30万，别推荐电车」，三个约束**一个都没被回执**，
+    系统只回一句「这辆车的主要用途是什么呢？」。品牌与「别要电车」是用户下的
+    **指令**，被静默吞掉比软偏好被吞掉更伤信任。
+
+    2026-10-05（用户拍板「全量复述」）：侧重 + 品牌 + 预算 + 排除 + 人数 + 车身
+    + 能源全部进这一句。仍然只用**用户已经说过的**（画像里有值才写），不猜不补。
     """
+    parts: list[str] = []
     labels = [_DIM_LABELS[d] for d in (profile.weights or {}) if d in _DIM_LABELS]
-    if not labels:
+    if labels:
+        parts.append(("、".join(labels) if len(labels) > 1 else labels[0]) + "优先")
+    if profile.brand_labels:
+        parts.append("只看" + _join_names(profile.brand_labels))
+    b = profile.budget
+    if b.min is not None and b.max is not None:
+        parts.append(f"预算 {b.min / 10000:g}-{b.max / 10000:g} 万")
+    elif b.max is not None:
+        parts.append(f"预算不超 {b.max / 10000:g} 万")
+    elif b.min is not None:
+        parts.append(f"预算 {b.min / 10000:g} 万起")
+    # 排除品牌：**不再**因为同时说了正向品牌就静默丢弃（审查发现：那会让用户明说的
+    # 「别推荐比亚迪」凭空消失）。也去掉原先的「不看指定品牌」——不指名任何品牌
+    # 对用户零信息量。
+    if profile.brand_exclude_labels or profile.brand_exclude_ids:
+        names = profile.brand_exclude_labels or [str(b) for b in profile.brand_exclude_ids]
+        parts.append("不要" + _join_names(names))
+    if profile.avoid:
+        parts.append("不要" + _join_names(profile.avoid))
+    if profile.passengers is not None:
+        parts.append(f" {profile.passengers} 人乘坐")
+    if profile.body_type:
+        parts.append("要 " + _join_names([_readable(v, "车身") for v in profile.body_type]))
+    if profile.energy_preference:
+        parts.append("要 " + _join_names([_readable(v, "能源") for v in profile.energy_preference]))
+    if profile.usage:
+        parts.append("用途" + _join_names(profile.usage))
+    if not parts:
         return ""
-    if len(labels) == 1:
-        return f"{labels[0]}优先，"
-    return "、".join(labels) + "优先，"
+    return "已记下：" + "；".join(p.strip() for p in parts if p.strip()) + "。"
 
 
 def _pending_phrase(profile: UserProfile, exclude: str = "") -> str:
@@ -2107,11 +2185,20 @@ class AgentEngine:
                     "2) 你能做：按预算/用途/人数/能源偏好推荐真实在售车型、介绍车型配置与官方指导价、回答汽车选购常识；\n"
                     "3) 只依据「数据佐证」和真实数据回答，绝不编造价格、销量或配置；没有数据就如实说不知道；\n"
                     "   涉及具体车型的续航/动力/空间等数字时，只引用「数据佐证」中出现的，一个数字都不能虚构；\n"
+                    "   **用户问到的参数，如果佐证里没有、或只有部分款型有，必须明确写「官方资料未披露」"
+                    "或「仅部分款型配备」**——绝不能提了参数名却不给值、也不标注缺失"
+                    "（2026-10-05 生产实测：说「电池容量和续航会有区别」却只给了容量、续航一个字未提，"
+                    "也未标未披露）；\n"
                     "4) 用户已给出预算/用途/人数中的任何一项时：先确认收到，再只追问缺失的一项；不要重复问已给的；\n"
                     "5) **不要在回答末尾自己抛问题**（例如「您更倾向插电混动还是纯电呢？」）："
                     "这一条路径不渲染选项按钮，用户只能手打。前端只会展示带选项的"
                     "固定追问，需要用户做选择时在这里只做陈述，把提问交给系统；\n"
-                    "6) 不谈论优惠、库存、成交价、贷款，不提供任何购买链接。\n"
+                    "6) **「数据佐证」为空或压根没有与你这句话相关的佐证时**"
+                    "（用户没说是哪一款车、库里也没有已锁定的车），"
+                    "**只能反问「您说的是哪一款车？请告诉我车名」**，"
+                    "严禁从库里随便挑几款车当作「我资料里的车型」推荐——"
+                    "用户没提过的车不能出现在候选里；\n"
+                    "7) 不谈论优惠、库存、成交价、贷款，不提供任何购买链接。\n"
                     + (f"数据佐证：\n{context}" if context else "数据佐证：（暂无，聊到具体车型时会检索真实数据）")
                 )
             try:
