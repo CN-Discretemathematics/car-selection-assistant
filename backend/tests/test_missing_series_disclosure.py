@@ -174,6 +174,41 @@ def test_real_queries_never_drop_a_named_car(db_session: Session, msg: str):
     )
 
 
+@pytest.mark.parametrize(
+    "msg,expected",
+    [
+        ("大众朗逸和明锐哪个更好", 2),
+        ("买A或者B", 2),          # 「或者」含「或」：逐项 count 会数成 3
+        ("A或B", 2),              # 只留「或者」不数「或」的话会少算成 1
+        ("买A还是B", 2),
+        ("A vs B", 2),
+        ("A和B或者C和D", 4),
+        ("目前看了海豹、极氪007、小米su7", 3),   # 真实问句里的「、」枚举
+        ("我的车和朋友的以及公司的", 3),
+        ("汉怎么样", 1),
+        ("汉的续航是多少", 1),
+        ("预算20万，家用5口人，想要新能源SUV", 1),
+        # 逗号**不能**计入：它在正常句子里只是停顿，计入会把每个逗号句
+        # 都当成并列而误报缺车
+        ("汉的续航是多少，油耗呢", 1),
+    ],
+)
+def test_candidate_count_uses_longest_first_alternation(
+    msg: str, expected: int
+):
+    """候选台数估算必须**最长优先交替**，两种朴素写法各错一半：
+
+    - 逐项 `count()` 求和 → 「买A或者B」数成 3 台（`或`+`或者` 各算一次）
+      → 正常的两车问题**误报缺车**，即披露逻辑自己的误报；
+    - 只留最长的写法 → 「A或B」数成 1 台 → 真的两车并列反而**漏报**。
+
+    这是自查时抓到的（2026-10-06），不是审查 subagent 报的——它没看这段。
+    """
+    from app.agent.series_qa import _implied_candidate_count
+
+    assert _implied_candidate_count(msg) == expected
+
+
 @pytest.mark.xfail(
     reason="销量榜正则漏接真实主句式（「什么车销量最好」等 11 条已实测漏接）；"
            "属口径变更，待产品拍板后修——见 docs 台账",

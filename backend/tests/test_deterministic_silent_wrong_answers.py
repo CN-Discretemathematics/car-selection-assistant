@@ -39,24 +39,37 @@ def _seed(db: Session):
 
 # ── 1) `~` 必须是多值分隔符 ────────────────────────────────────────────────
 
-def test_multi_value_re_includes_tilde():
-    """注释举的例值就含 `~`——字符类里没有它，是自相矛盾。"""
-    for sep in ("/", "、", ",", "，", "~", "～"):
-        assert _MULTI_VALUE_RE.search(sep), f"分隔符 {sep!r} 未被识别为多值分隔符"
+def test_multi_value_re_keeps_garbage_slash_separated():
+    """真正的垃圾是**斜杠**：端点整串，挑不出该取哪个当上下界。
 
-
-def test_tilde_separated_falls_back_without_slash():
-    """真实脏值 `29.165~74.96`（**不含** `/`）+ 另一条干净值 → 退回单值。
-
-    旧测试把脏值人工拆成 `29.165` 与 `74.96/75.26` 两条事实，于是没有任何一个
-    fact_value 含 `~`，防护只被 `/` 检验过——本条用的才是未拆分的原始形状。
+    2026-10-06 的一次错误在这里留了记录：独立审查建议把 `~` 也当分隔符，
+    照做后回真实库一量——**全库 23 条含 `~` 的 fact_value 全是合法区间**
+    （最大扭矩转速 1500~2400、厂商指导价 4.46万~4.49万），而代码自己就用 `~`
+    拼输出格式。把它当分隔符等于把 23 条真数据全打成单值。已撤回。
     """
-    assert _MULTI_VALUE_RE.search("29.165~74.96"), "前置：脏值应被识别为多值"
-    result = rank_headlines({1: [("电池能量(kWh)", "29.165~74.96", "kWh", None),
-                                ("电池能量(kWh)", "100", "kWh", None)]})
+    assert _MULTI_VALUE_RE.search("29.165~74.96/75.26"), "斜杠脏数据必须被拦下"
+
+
+def test_legitimate_tilde_ranges_are_not_filtered():
+    """合法区间**不得**被当成多值串退回单值——本文件最重要的回归防护。
+
+    两条数据都取自真实库实测（2026-10-06，全库 23 条含 `~` 的值全是这一类）：
+    最大扭矩转速 1500~2400、厂商指导价 4.46万~4.49万。
+    """
+    for legit in ("1500~2400", "4.46万~4.49万", "100~200"):
+        assert not _MULTI_VALUE_RE.search(legit), (
+            f"合法区间 {legit!r} 被误判成多值串 → 会退回单值，真实数据静默降级"
+        )
+
+
+def test_multi_value_re_still_catches_real_garbage():
+    """撤回 `~` 不等于放松：斜杠类脏数据仍必须拦下。"""
+    facts = {1: [("电池能量(kWh)", "29.165~74.96/75.26", "kWh", None),
+                 ("电池能量(kWh)", "100", "kWh", None)]}
+    result = rank_headlines(facts)
     value = result[1]["电池"]
-    assert "~" not in value, (
-        f"下端点本身是区间的乱码被拼进来了：{value!r}（应退回干净的单值 100）"
+    assert "/" not in value and "~74.96" not in value, (
+        f"下端点本身是区间的乱码被拼进来了：{value!r}"
     )
 
 
