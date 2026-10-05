@@ -27,8 +27,66 @@ BUDGET_MIN_LOOSE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*万?\s*(?:多万|出头|大
 # 裸「N万」仅在预算语境（「预算N万」）下视为预算上限——「销量30万」不得误判
 BUDGET_BARE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*万")
 BUDGET_CONTEXT_RE = re.compile(r"预算|落地|价位|价格")
-PASSENGERS_RE = re.compile(r"([一二两三四五六七八九十\d]+)\s*(?:个|口)?人|([一二两三四五六七八九十\d]+)\s*座")
+# 座位/人数解析。**必须区分闭开区间**。
+#
+# 2026-10-05 生产实测修：原 `PASSENGERS_RE` 只取数字、把「以上」整个丢掉，于是
+# 「5人以上」与「3~5人」双双解析成 5 座——那个选项因此**不提供任何新信息**，
+# 且系统会把 5 座车推给明确要 6 人以上的用户（站点实测：「5人以上」→ 首推两款
+# 5 座车，卡片写「座位满足（≥5 座）」）。
+#
+# 两条分支的「以上」口径**刻意不同**，别顺手统一：
+# - 人数侧（「N 人以上」）= 用户说自己家有几个人，按**开区间**读 → 座位下限 N+1。
+#   这是 `_passenger_options` 递给用户点的那个选项，**定义权在产品**（用户 2026-10-05
+#   拍板「算 6 座」）。
+# - 座位侧（「N 座以上」）= 用户在描述车本身的配置，按**含端点**读（5 座含 5 座）。
+#   若也 +1，用户说「找台5座以上的」会被反向多要一个座位，砍掉真正符合的车。
+#
+# ⚠️ 人数侧的 +1 **与同文件预算侧的口径相反**，这是有意的：预算侧「20 万以上」取
+# 下限 20（含端点，`BUDGET_MIN_RE`），因为钱是连续量；人数侧的「5 人以上」是产品
+# 定义的档位标签，取「超过 5 人」。别拿「与预算侧对齐」当理由把这里改成含端点——
+# 那是把用户拍板的口径改回去。中文「5 人以上」的字面标准义确实含端点，这里取开区间
+# 属**产品选择**而非语言学必然。
+_PASSENGERS_PEOPLE_RE = re.compile(
+    r"([一二两三四五六七八九十\d]+)\s*(?:个|口)?\s*人\s*(以上|开以上|或以上|以内|以下|之内|内)?"
+)
+_PASSENGERS_SEATS_RE = re.compile(
+    r"([一二两三四五六七八九十\d]+)\s*座\s*(以上|开以上|或以上|以内|以下|之内|内)?"
+)
+#: 人数侧出现这些后缀时按**开区间**读（「超过 N 人」），座位下限 +1。
+#: 必须覆盖正则里所有「以上」写法（审查 L1 实测：原先只有「以上」，
+#: 「5 人开以上」「5 人或以上」会漏掉 +1，同一语义三种写法两种结果）。
+_PEOPLE_OPEN_BOUND_SUFFIXES = ("以上", "开以上", "或以上")
 _CN_DIGITS = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def parse_passengers(text: str) -> int | None:
+    """人数/座位文本 → 座位数下限。**座位解析的唯一实现**。
+
+    曾经只有一个 `PASSENGERS_RE`，两个调用点（`parse_budget_and_seats` 与
+    `engine.extract_hints`）各自 `.search()` + 取组号。这正是本次事故的结构性
+    原因：**开区间规则没有单一归属，谁都能写出「只取数字」的版本**，于是 5 座车
+    被推给要 6 人以上的用户。现在规则与匹配收在同一个函数里，调用点无法再绕开。
+
+    人数分支与座位分支同时命中时取**文本中靠前**的那个（沿用旧正则「谁先出现谁
+    生效」的行为，不在这里悄悄改语义）。
+    """
+    people = _PASSENGERS_PEOPLE_RE.search(text or "")
+    seats = _PASSENGERS_SEATS_RE.search(text or "")
+    if people and (not seats or people.start() <= seats.start()):
+        token, suffix, is_people = people.group(1), people.group(2), True
+    elif seats:
+        token, suffix, is_people = seats.group(1), seats.group(2), False
+    else:
+        return None
+    n = _cn_int(token or "")
+    if not n:
+        return None
+    # +1 **只作用于人数分支**（见模块注释：开区间 = 超过 N 人）。
+    # 座位分支「6 座以上」是用户在描述车，按**含端点**读；若也 +1 就会把
+    # 「找台 6 座以上的」反向变成要 7 座，砍掉真正符合的车。
+    if is_people and suffix in _PEOPLE_OPEN_BOUND_SUFFIXES:
+        n += 1
+    return n
 
 
 def _cn_int(token: str) -> int | None:
@@ -83,13 +141,10 @@ def parse_budget_and_seats(text: str) -> dict:
                                 break
     if lo is not None:
         out["budget_min"] = int(lo)
-    m = PASSENGERS_RE.search(text)
-    if m:
-        n = _cn_int(m.group(1) or m.group(2) or "")
-        if n:
-            out["passengers"] = n
+    seats = parse_passengers(text)
+    if seats:
+        out["passengers"] = seats
     return out
-
 
 # 能源/车身关键词（流水线约束解析用；评测的措辞映射在 gen_eval_questions，判定共用）
 _ENERGY_KEYWORDS: tuple[tuple[str, str], ...] = (

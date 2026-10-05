@@ -640,6 +640,11 @@ def recommendation_tool(
             matched.append("用途匹配")
         if profile.energy_preference and dims["energy"] == 1.0:
             matched.append("能源偏好匹配")
+        # 座位这条是**唯一可能被静默跳过**的硬约束：`seats is None`（库里查不到
+        # 座位数）时既不满足也不筛掉——按「缺数据 ≠ 不满足」保留候选是对的，但
+        # **对用户不披露就是假装校验过**。生产实测：用户明说「5 人以上」，
+        # 70.2% 的在售款型查不到座位数，它们照样进列表且只字不提这条没校验。
+        # 所以把「有没有真的校验过」作为数据带出（见 seat_verified / seat_check）。
         if profile.passengers is not None and seats is not None and seats >= profile.passengers:
             matched.append(f"座位满足（≥{profile.passengers} 座）")
 
@@ -656,6 +661,9 @@ def recommendation_tool(
                     "price_cny": price,
                     "score": round(score, 4),
                     "matched": matched,
+                    # 用户点名了乘坐人数、但这台查不到座位数 → 座位这条**没校验**。
+                    # 用户没提人数时本就没有座位约束可言，故为 True（无需披露）。
+                    "seat_verified": profile.passengers is None or seats is not None,
                     # 占位：取舍必须等全部候选打完分才能算（要跟本批最优比），
                     # 由下方第二遍统一填。循环内无法计算。
                     "tradeoffs": [],
@@ -710,6 +718,23 @@ def recommendation_tool(
             item.pop("_measured", None)
 
     top = scored[:limit]
+    # 座位约束的**校验覆盖率**：分母是**本次展示的候选数**（top），不是全部候选。
+    #
+    # ⚠️ 这里曾经用 `len(scored)` 当分母（审查 M2 实测）：12 款候选里 7 款未核实、
+    # 只展示 5 张，顶部却说「12 款候选里只有 5 款查到座位数，卡片已标『座位未核实』」
+    # ——而那 5 张上**一个标记都没有**，用户去找一个不存在的标记。
+    # 用户只看得见展示出来的卡片，所以覆盖率必须按展示口径算；被筛掉的候选
+    # 对他不存在，拿它们说事只会让文案与屏幕自相矛盾。
+    seat_check = None
+    if profile.passengers is not None:
+        unverified = sum(1 for _score, item in top if not item["seat_verified"])
+        if unverified > 0:
+            seat_check = {
+                "required": profile.passengers,
+                "verified": len(top) - unverified,
+                "unverified": unverified,
+                "total": len(top),
+            }
     return {
         # candidates_scanned = SQL 命中的候选数（= 实际参与评分的款型数）；
         # count = 通过全部硬约束与 Python 侧过滤后真正打分的条数。
@@ -718,6 +743,7 @@ def recommendation_tool(
         "candidates_scanned": candidates_scanned,
         "variants": [item[1] for item in top],
         "weights_used": weights,
+        "seat_check": seat_check,
     }
 
 

@@ -208,9 +208,19 @@ def test_household_band_value_equals_regex_path(label):
     assert sp.HOUSEHOLD_SIZES[label] == extract_hints(f"平时{label}乘坐")["passengers"]
 
 
-def test_household_open_band_uses_lower_bound():
-    """「5人以上」是开区间：取下界 5（够用即可），不得按 7 座去砍掉 5 座车。"""
-    assert sp.HOUSEHOLD_SIZES["5人以上"] == 5
+def test_household_open_band_is_exclusive_lower_bound_plus_one():
+    """「5 人以上」是**开区间**：字面读作「超过 5 人」→ 座位下限 6。
+
+    这条口径是生产实测订正出来的（2026-10-05）：站点上用户点「5 人以上」，系统把
+    两款 **5 座**车排在最前、卡片写「座位满足（≥5 座）」——5 座车满足不了要 6 个
+    人的用户。同时「5 人以上」与「3~5 人」解析出同一个值，那个追问选项等于废的。
+    """
+    assert sp.HOUSEHOLD_SIZES["5人以上"] == 6
+
+
+def test_household_bands_are_mutually_distinct():
+    """三档必须**互不相同**：同值即意味着某个选项不提供任何新信息（2026-10-05）。"""
+    assert len(set(sp.HOUSEHOLD_SIZES.values())) == len(sp.HOUSEHOLD_SIZES)
 
 
 def test_to_hints_never_emits_body_or_energy():

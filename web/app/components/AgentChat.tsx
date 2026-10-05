@@ -504,6 +504,12 @@ function RecommendationCard({ variant }: { variant: RecommendedVariant }) {
       {variant.matched.length > 0 && (
         <p className="mt-1.5 text-xs leading-5 text-[#1d7d3f]">{variant.matched.join("、")}</p>
       )}
+      {/* 座位未核实：用户点名了人数，但这台查不到座位数 → 座位那条**根本没查**。
+          不提示的话，这张卡和已验证车长得一模一样，用户会默认座位已校验过
+          （2026-10-05 生产实测：用户点「5 人以上」，列表里混入 5 座车且只字未提）。 */}
+      {variant.seat_verified === false && (
+        <p className="mt-1 text-xs leading-5 text-ash">座位未核实（资料未披露座位数）</p>
+      )}
       {/* 内部说明类妥协项（未参与评分/暂无数据源等）不呈现给用户 */}
       {(() => {
         const internalNotes = ["未参与", "暂无", "未披露", "数据源"];

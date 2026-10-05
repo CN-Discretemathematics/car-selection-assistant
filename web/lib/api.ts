@@ -172,6 +172,12 @@ export interface RecommendedVariant {
   score: number;
   matched: string[];
   tradeoffs: string[];
+  /**
+   * 座位这条硬约束是否真的校验过。false = 用户点名了乘坐人数，但库里查不到这台车
+   * 的座位数，因此既没满足也没筛掉（缺数据 ≠ 不满足）。
+   * 缺失时按 true 处理：后端未部署该字段的老响应不应凭空多出一排警告。
+   */
+  seat_verified?: boolean;
 }
 
 export interface AgentMessageOut {
