@@ -46,7 +46,12 @@ def test_min_mode_range_is_still_ascending():
 
 
 def test_single_tier_stays_single_value():
-    """单档 → 单值逐字不变。实测 388/784 个车系属这一类，零影响。"""
+    """单档 → 单值逐字不变。
+
+    实测 784 个多款型车系里 **174 个（22.2%）**输出逐字不变、610 个（77.8%）会变。
+    2026-10-05 订正：本文件初版写的是「388/784 零影响」，388 是「未被拼接」的
+    车系数，而**未被拼接 ≠ 文本不变**（星愿 6 款未被拼接，但动力 85→58~85）。
+    """
     out = rank_headlines({1: [(F_RANGE, "705", None, "CLTC")]})
     assert out[1]["续航"] == "705 km（CLTC）", out
 
@@ -74,30 +79,12 @@ def test_unit_embedded_in_value_is_merged():
     assert out[1]["动力"] == "150~200kW", out
 
 
-# ── 安全阀：单位 / 测试口径不一致 → 退回单值 ────────────────────────────────
-def test_mixed_units_fall_back_to_single_value():
-    """kW 与 Ps 混排时**不得**合成区间（1156 Ps 与 850 kW 不可比）。
+# ── 安全阀：fact_key / 单位 / 测试口径任一不一致 → 退回单值 ─────────────────
+def test_mixed_keys_fall_back_to_single_value():
+    """`CLTC综合续航` 与 `CLTC纯电续航里程`（**不同 fact_key**）不得合成一个区间。
 
-    旧代码本来就只取首个单位组比极值；这里钉住的是：区间逻辑不能绕过这道阀。
-    实测 513 个车系命中此情形。
-    """
-    out = rank_headlines(
-        {1: [
-            (F_POWER, "200", None, None),
-            (F_HP, "1156", None, None),
-        ]}
-    )
-    assert "~" not in out[1]["动力"], out
-    assert out[1]["动力"] in ("200 kW", "1156 Ps"), out
-
-
-def test_mixed_cycles_fall_back_to_single_value():
-    """综合续航与纯电续航（**不同 fact_key**）**不得**合成一个区间。
-
-    「汉」正是这个形状：DM-i 报 `CLTC纯电续航里程` 125/245km，EV 报
-    `CLTC综合续航` 605/635/705km。两者 unit 都是 km、cycle 都是 CLTC，
-    只查 unit+cycle 会合成出 `125~705 km`——让用户以为纯电续航能到 705。
-    首个实现就漏了 fact_key 这道阀，被本用例抓出来。
+    两者 unit 都是 km、cycle 都是 CLTC，只查 unit+cycle 会合成出 `605~125` 这种
+    把「综合」和「纯电」混为一谈的数。首个实现就漏了 fact_key 这层，被本用例抓红。
     """
     out = rank_headlines(
         {1: [
@@ -109,12 +96,53 @@ def test_mixed_cycles_fall_back_to_single_value():
     assert out[1]["续航"] == "605 km（CLTC）", out
 
 
+def test_same_key_different_unit_is_excluded_from_range():
+    """**同一 fact_key 但 unit 不同**的值不得进同一个区间。
+
+    注意这一条钉的**不是** `_range_text` 里 cohort 元组的 `e.unit`（那个条件是冗余的：
+    `best` 恒取自 `same_unit` 组，组内 unit 已经全等），而是**既有的 `ref_unit` 分组**——
+    改动之前它就在，只是从没被测试覆盖过。审查实测：抹掉 cohort 里的 `e.unit` 后
+    本用例仍然全绿，说明真正起作用的是上游那道过滤。
+
+    同一 fact_key 配一个数值更大的异单位值（900 mi）：上游过滤失效就会选到 900，
+    拼出 `310~900 km` 这种把英里当公里的区间。
+    """
+    out = rank_headlines(
+        {1: [
+            (F_RANGE, "310", "km", "CLTC"),
+            (F_RANGE, "480", "km", "CLTC"),
+            (F_RANGE, "900", "mi", "CLTC"),
+        ]}
+    )
+    assert out[1]["续航"] == "310~480 km（CLTC）", out
+
+
+def test_mixed_power_units_fall_back_to_single_value():
+    """kW 与 Ps 混排时不得跨单位合成区间（1156 Ps 与 850 kW 不可比）。
+
+    实测 513 个车系命中此情形。两档 kW + 一档数值更大的 Ps：若 `ref_unit` 分组失效，
+    极值会选到 1156 Ps，区间变成 `200~1156`——所以这条同样钉住上游分组。
+    """
+    out = rank_headlines(
+        {1: [
+            (F_POWER, "200", None, None),
+            (F_POWER, "850", None, None),
+            (F_HP, "1156", None, None),
+        ]}
+    )
+    assert out[1]["动力"] == "200~850 kW", out
+
+
 def test_range_uses_the_cohort_of_the_extreme_not_all_keys():
     """区间只取**极值所在那一组**的取值，不把别的 fact_key 拉进来。
 
-    汉的真实形状：综合续航 {605, 635, 705}（EV），纯电续航 {125, 245}（DM-i）。
-    max 是 705（来自综合续航），所以区间是 `605~705`——DM-i 的 125 不参与，
-    既不出现 `125~705` 这种量纲错误的数，也不退回单值丢掉区间信息。
+    合成用例：综合续航 {605, 635, 705}，纯电续航 {125}。max 是 705（来自综合续航），
+    于是区间是 `605~705`——125 不参与，既不出现 `125~705` 这种量纲错误的数，
+    也不退回单值丢掉区间信息。
+
+    （真实数据里「汉」不长得这样：它的 40 行续航事实全在 `CLTC纯电续航里程` 一个键，
+    `CLTC综合续航` 一行都没有，所以实际输出是 `125~705 km（CLTC）`。
+    「综合/纯电分属两键」的形状在库里确实存在，但不在汉身上。）
     """
     out = rank_headlines(
         {1: [
@@ -175,3 +203,33 @@ def test_extreme_selection_unchanged_when_range_unavailable():
         ]}
     )
     assert mixed[1]["电池"] == "72 kWh（快充）", mixed  # max 仍取 72，且带口径后缀
+
+
+# ── 多值串脏数据：端点含分隔符时退回单值 ───────────────────────────────────
+def test_slash_separated_multi_value_falls_back():
+    """库里存在「一个 fact_value 里塞多个取值」的脏数据，区间必须退回单值。
+
+    实测命中（AION i60 / AION V / 极狐阿尔法S6 / 极狐阿尔法T6 / 枫叶80v L 共 5 处）：
+    电池值形如 `29.165~74.96/75.26`。`_numeric` 只取到 74.96 参与比较，端点却整串
+    输出，于是拼出 `29.165~74.96/75.26 kWh`——高端口会被读成 `74.96/75.26` 或
+    `75.26`，**比旧单值更难读**。宁可退回单值。
+    """
+    out = rank_headlines(
+        {1: [
+            (F_BATTERY, "29.165", None, None),
+            (F_BATTERY, "74.96/75.26", None, None),
+        ]}
+    )
+    assert "~" not in out[1]["电池"], out
+    assert out[1]["电池"] == "74.96/75.26 kWh", out
+
+
+def test_whitespace_around_raw_values_is_trimmed():
+    """端点首尾空白要 strip，否则会拼出 `310 ~480 km` 这种双空格。"""
+    out = rank_headlines(
+        {1: [
+            (F_RANGE, "  310  ", None, "CLTC"),
+            (F_RANGE, "480", None, "CLTC"),
+        ]}
+    )
+    assert out[1]["续航"] == "310~480 km（CLTC）", out

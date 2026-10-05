@@ -255,6 +255,8 @@ class _Entry(NamedTuple):
 
 
 _VALUE_UNIT_RE = re.compile(r"^(.*?)([^\d\s.]+)$")
+#: 库里把多个取值塞进一个 fact_value 的分隔符（实测命中：电池 `29.165~74.96/75.26`）。
+_MULTI_VALUE_RE = re.compile(r"[/、,，]")
 
 
 def _split_embedded_unit(value: str) -> tuple[str, str]:
@@ -265,7 +267,7 @@ def _split_embedded_unit(value: str) -> tuple[str, str]:
     return matched.group(1), matched.group(2)
 
 
-def _range_text(best: _Entry, group: list[_Entry], same_unit: bool) -> str | None:
+def _range_text(best: _Entry, group: list[_Entry]) -> str | None:
     """`best` 所在那一组（同 fact_key + 同单位 + 同测试口径）取值 >=2 档时的区间文本。
 
     返回 None 表示「合不出可信区间」，调用方退回单值——此时输出与改动前逐字一致。
@@ -275,35 +277,51 @@ def _range_text(best: _Entry, group: list[_Entry], same_unit: bool) -> str | Non
     「汉：续航 705km（来自 3 款 EV）；油耗 0.67L（来自 5 款 DM-i 插混）」，
     这台车在库里根本不存在。单值同样会骗人（小米SU7「最高配续航 902km」实际来自
     中配后驱Pro，顶配四驱Max 为性能牺牲了续航）。改成区间后，展示的每个数都是
-    **真实存在过的值**，不会再造出虚构配置；单值车系（min==max）输出逐字不变，
-    388/784 个车系零影响。
+    **真实存在过的值**，不会再造出虚构配置。
 
-    **三道安全阀，缺一不可**——每道都对应一类真实存在、但合在一起就错误的量：
-      1. 单位一致（否则 1156 Ps 与 850 kW 被写进同一个区间）；
-      2. **fact_key 一致**（`CLTC综合续航` 与 `CLTC纯电续航里程` 都是 km+CLTC，
-         却是两个不同的量——合成 `125~705 km` 会让用户以为纯电续航能到 705；
-         首个版本就漏了这道阀，被自己的测试抓出来了）；
-      3. 测试口径一致（WLTC 与 CLTC 的续航不可写进同一个区间）。
-    取「极值所在的那一组」而不是全部：汉的 705 来自 `CLTC综合续航`，
-    于是输出 `605~705 km（CLTC）`（只含 EV 那三档），DM-i 的 125/245 不参与。
+    **影响面（2026-10-05 独立复核订正）**：784 个多款型车系里 **610 个（77.8%）**
+    输出会变，只有 174 个逐字不变。此前这里写的是「388/784 个车系零影响」——
+    388 是「未被拼接」的车系数，而**未被拼接 ≠ 文本不变**：星愿 6 款、未被拼接，
+    但动力 85→58~85、续航 480→310~480，照样出区间。影响面比当初估的 2.2 倍。
+
+    **合区间的条件是「同一个量」**——(fact_key, unit, cycle) 三元组全等才算同一档：
+      - **fact_key**（本次新增、真正起作用的一层）：`CLTC综合续航` 与
+        `CLTC纯电续航里程` 都是 km+CLTC 却是两个量，合成 `125~705 km` 会让用户
+        以为纯电续航能到 705。首个版本漏了这层，被自己的测试抓出来；
+      - **unit**：这一层其实是**冗余的**——`best` 恒取自 `same_unit` 组，组内 unit
+        已经全等（上游 `ref_unit` 分组在改动前就挡住了跨单位）。保留在三元组里是
+        防将来重构时把 `group` 换成别的集合；
+      - **cycle**：WLTC 与 CLTC 的续航不能写进同一个区间。
+
+    取「极值所在的那一组」而不是全部：极值来自哪个键/单位/口径，区间就只在该组内取。
+    实测「汉」的 705 落在 `CLTC纯电续航里程(km)`（该车系 40 行续航事实全在这一键，
+    `CLTC综合续航` 一行都没有），于是输出 `125~705 km（CLTC）`——DM-i 插混的 125
+    与纯电的 705 都在库里真实存在，这正是改前那个孤零零的 `705` 藏掉的信息。
     """
-    if not same_unit:
-        return None
-    cohort = [e for e in group if (e.key, e.unit, e.cycle) == (best.key, best.unit, best.cycle)]
+    cohort = [
+        e
+        for e in group
+        if (e.key, e.unit, e.cycle) == (best.key, best.unit, best.cycle)
+    ]
     numeric = [e for e in cohort if e.num is not None]
     if len({e.num for e in numeric}) < 2:
         return None
     lo = min(numeric, key=lambda e: e.num)  # type: ignore[type-var]
     hi = max(numeric, key=lambda e: e.num)  # type: ignore[type-var]
+    # 库里存在「多值串」脏数据（实测 1671 个区间 cell 命中 5 个，如 AION i60 的
+    # 电池 `29.165~74.96/75.26 kWh`）：端点是整串，挑不出到底取哪个当上下界，
+    # 拼出来的新格式反而比旧单值更难读（高端口会被读成 `74.96/75.26`）。退回单值。
+    if _MULTI_VALUE_RE.search(lo.raw) or _MULTI_VALUE_RE.search(hi.raw):
+        return None
     suffix = f"（{best.cycle}）" if best.cycle else ""
     if best.unit:
-        return f"{lo.raw}~{hi.raw} {best.unit}{suffix}"
+        return f"{lo.raw.strip()}~{hi.raw.strip()} {best.unit}{suffix}"
     # 单位写在值里（如「150kW」）：两端要拆出同一个后缀才拼，否则原样并列
     lo_body, lo_unit = _split_embedded_unit(lo.raw)
     hi_body, hi_unit = _split_embedded_unit(hi.raw)
     if lo_unit and lo_unit == hi_unit:
         return f"{lo_body}~{hi_body}{lo_unit}{suffix}"
-    return f"{lo.raw}~{hi.raw}{suffix}"
+    return f"{lo.raw.strip()}~{hi.raw.strip()}{suffix}"
 
 
 def rank_headlines(
@@ -354,9 +372,11 @@ def rank_headlines(
             if not numeric:
                 continue
             # 只在同一单位内比极值：kW 不与 Ps 比大小（防止「1156 Ps > 850 kW」错选）
+            # 注意 `unit_matched` **恒非空**（`numeric[0].unit` 按定义就等于 ref_unit），
+            # 所以它不是一道独立的闸门，只是「取哪个单位组参与比较」；单位一致性
+            # 真正由 `_range_text` 的 cohort 三元组（key, unit, cycle）保证。
             ref_unit = numeric[0].unit
-            unit_matched = [e for e in numeric if e.unit == ref_unit]
-            same_unit = unit_matched or numeric
+            same_unit = [e for e in numeric if e.unit == ref_unit] or numeric
             best = same_unit[0]
             for entry in same_unit[1:]:
                 num = entry.num
@@ -369,10 +389,9 @@ def rank_headlines(
                     best = entry
             # 区间优先于单值：N9 修法。极值**选择逻辑未变**，只在能证明同键同单位同口径时
             # 把展示换成区间，取不到区间时 out[label] 与改动前逐字相同。
-            out[label] = _range_text(best, same_unit, bool(unit_matched)) or best.text
+            out[label] = _range_text(best, same_unit) or best.text
         out_map[sid] = out
     return out_map
-
 
 
 def series_headline(db: Session, series: VehicleSeries) -> dict[str, str]:
