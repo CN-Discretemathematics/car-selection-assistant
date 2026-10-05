@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -172,6 +173,7 @@ def brand_names_in_message(
     series_names: list[str] | None = None,
     *,
     require_model_suffix: bool = True,
+    exclude_owned: bool = True,
 ) -> set[str]:
     """消息里出现的**库内品牌名**（只判「出现」，不判是否构成约束）。
 
@@ -184,15 +186,14 @@ def brand_names_in_message(
         「传祺M6值得买吗」→ 传祺 + `M6`  → 是点名一台车 ✅
         「大众和汉哪个好」 → 大众 + `和`  → 只是比较候选方之一 ❌
 
-    这个区分不是洁癖：2026-10-06 独立审查 P0-1 实测，少了它，「大众和汉哪个好」
-    会把 **39 个在库品牌**（奔驰 56 款、大众 29 款、丰田 27 款…）判成
-    「库里没有车系资料」并替换掉整段回答——比它要修的缺陷更严重。
-
-    传 `require_model_suffix=False` 可拿到「消息里出现过的全部库内品牌」，
-    用于「这个候选其实是个品牌、不是一款车」这类判断（见 `_absent_series_note`）。
-
-    `series_names` 传入已解析出的车系名，用于排除「品牌词属于车系名本身」
-    （「银河星愿」里的「银河」是对车的指代，不是另一个品牌）。
+    `exclude_owned=False` 时**不做**「品牌词属于已解析车系名」的排除。
+    ⚠️ 两个开关会互相干扰，2026-10-06 的独立审查 P1-2 就是这么踩的：
+    「五菱**和**缤果Pro哪个好」里「五菱」是「五菱缤果Pro」的子串，被 `exclude_owned`
+    排除掉，于是「这个候选其实是个品牌」这条守卫**看不到它**，结果两台都在库
+    （五菱 47 款）却说「其余库里没有收录」。要判「品牌是否被当成一辆车点名」，
+    必须**关掉**这个排除；真正的位置判断交给
+    `brand_names_used_as_vehicle_in_message`，那里按「品牌后面是否直接跟着已解析
+    的车系名」来决定，避免把 `大众朗逸` 里的「大众」也算成一辆车。
     """
     normalized = normalize_name(message)
     if not normalized:
@@ -202,7 +203,7 @@ def brand_names_in_message(
     for name, _brand_id, label in _load_entries(db):
         if name not in normalized:
             continue
-        if any(name in s for s in owned):
+        if exclude_owned and any(name in s for s in owned):
             continue  # 该品牌词属于被点名的车系名本身
         # 2026-10-06（独立审查 P0-1）：只在品牌词**紧跟**一个字母/数字串时才算
         # 「点名了某品牌下的某台车」。
@@ -219,6 +220,41 @@ def brand_names_in_message(
                 continue  # 品牌词独立出现（后面跟的是「和」「的」等），不是车型前缀
         found.add(label)
     return found
+
+
+def brand_names_used_as_vehicle_in_message(
+    db: Session,
+    message: str,
+    resolved: list[tuple[Any, Any]],
+) -> set[str]:
+    """消息里被**当成一辆车**点名的品牌词（`exclude_owned` 的精确版）。
+
+    与 `brand_names_in_message(..., exclude_owned=False)` 的区别在于**按位置判断**：
+
+        「大众**朗逸**和明锐哪个更好」→ 大众后面直接跟着已解析的「朗逸」
+            → 大众是这台车的**前缀**，不算「又点名了一辆车」→ 应当照常披露明锐缺失
+        「五菱**和**缤果Pro哪个好」  → 五菱后面是连接词，不跟任何已解析车系名
+            → 五菱确实被当成一辆车点名了，而它是品牌（47 款）→ 不可说「库里没有收录」
+
+    这是 2026-10-06 独立审查 P1-2 的实测结论：子串排除会「把正要被检测的品牌藏起来」。
+    """
+    normalized = normalize_name(message)
+    if not normalized:
+        return set()
+    resolved_names = [normalize_name(series.name) for series, _b in resolved]
+    used: set[str] = set()
+    for name, _brand_id, label in _load_entries(db):
+        start = 0
+        while True:
+            pos = normalized.find(name, start)
+            if pos < 0:
+                break
+            start = pos + 1
+            tail = normalized[pos + len(name):]
+            if any(tail.startswith(rn) for rn in resolved_names if rn):
+                continue  # 品牌是某个已解析车系名的前缀（大众朗逸）→ 不是另一辆车
+            used.add(label)
+    return used
 
 
 def catalog_overview(

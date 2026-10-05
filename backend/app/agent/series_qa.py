@@ -577,21 +577,26 @@ def _absent_series_note(
     第二条：点名多台只查到一部分时也要说。「大众朗逸和明锐哪个更好」——明锐不在
     库里，不能只答朗逸就让用户以为看全了。
     """
-    from app.catalog.brands import brand_names_in_message
+    from app.catalog.brands import (
+        brand_names_in_message,
+        brand_names_used_as_vehicle_in_message,
+    )
 
     if not resolved:
         return None
     resolved_brands = {brand.name for _s, brand in resolved if brand is not None}
-    # ⚠️ 必须把「品牌+车系」的组合形式也塞进去：`series.name` 只是「朗逸」，
-    # 用户说的却是「大众朗逸」。只传车系名的话，owned 里不含「大众」，
-    # 「大众」会被当成一个独立候选品牌 → 后面「这是个品牌不是一台车」的守卫
-    # 误判，把本该披露的「明锐库里没有」也一并吞掉（2026-10-06 实测）。
-    series_names = [
+    # ⚠️ 排除用的名字与**展示用的名字必须是两个列表**（2026-10-06 独立审查 P1-1 实测）。
+    # 上一版把「品牌+车系」组合形式塞进同一个 `series_names`，而该列表同时被拿去
+    # 拼用户可见文案，于是库里 **541/908（60%）以品牌名开头**的车系被拼成重影：
+    #     真实库答：…（奔驰GLC、奔驰奔驰GLC、宝马X3、宝马宝马X3）
+    # 排除只需要知道「哪些品牌词属于已解析车系」，展示则必须是干净的车系名。
+    owned_names = [
         name
         for series, brand in resolved
         for name in (series.name, f"{brand.name}{series.name}" if brand else series.name)
     ]
-    mentioned = brand_names_in_message(db, message, series_names=series_names)
+    display_names = [series.name for series, _b in resolved]
+    mentioned = brand_names_in_message(db, message, series_names=owned_names)
 
     if mentioned and not (mentioned & resolved_brands):
         names = "、".join(sorted(mentioned))
@@ -619,11 +624,11 @@ def _absent_series_note(
     # 「这个候选其实是个品牌」也是「库里没有收录」这句话不成立的理由：
     # 「大众和汉哪个好」里大众**不是没收录**，它是个有 29 款车的品牌。
     # 这里用 require_model_suffix=False 取「消息里出现过的全部库内品牌」。
-    if brand_names_in_message(db, message, series_names, require_model_suffix=False):
+    if brand_names_used_as_vehicle_in_message(db, message, resolved):
         return None
     implied = _implied_candidate_count(message)
     if implied > len(resolved):
-        got_names = "、".join(series_names)
+        got_names = "、".join(display_names)
         return (
             f"你问的「{implied} 台」里，我们只查到 {len(resolved)} 台"
             f"（{got_names}），其余**库里没有收录**，"
