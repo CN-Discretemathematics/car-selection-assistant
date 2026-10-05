@@ -40,6 +40,7 @@ from app.agent.llm_router import (
     route_with_llm,
 )
 from app.agent.routing import (
+    asks_brand_count,
     asks_brand_lineup,
     asks_catalog_count,
     asks_general_advice,
@@ -85,6 +86,7 @@ from app.agent.tools import (
     vehicle_evidence,
     vehicle_search,
 )
+from app.catalog import services as catalog
 from app.catalog.brands import brand_series_overview, resolve_brand_mentions
 from app.catalog.series_index import display_name, resolve_series
 from app.common.enums import NEW_ENERGY_TYPES, expand_avoid, expand_energy_prefs
@@ -123,6 +125,28 @@ _UNLOCK_RE = re.compile(
     r"(看看其他|看看别的|其他车|别的车|其他选择|别的选择|还有什么选择|更多选择|"
     r"换个|换一换|换别的|不要只看|不只看|都看看|别的车型|其他车型)"
 )
+# 2026-10-05（用户拍板）：本轮只点名一台、另一台在**会话历史**里时的对比标记。
+# 有了它才把锁定车系并入 resolved——否则「它的续航够不够」这种参数追问
+# 会被误当成两车对比（实测该问法应走单车系档案）。
+_COMPARE_FOLLOWUP_RE = re.compile(
+    r"(对比|比较|相比|哪个好|哪款好|哪个更好|差在哪|差多少|区别|差别|不一样|"
+    r"比一下|比起|比呢|跟.{1,8}比|和.{1,8}比|与.{1,8}比)"
+)
+
+
+def _load_series_pairs(
+    db: Session, series_ids: list[int]
+) -> list[tuple[VehicleSeries, Brand | None]]:
+    """按 id 取 (车系, 品牌) 对；查不到的直接跳过（不留 None 坑下游）。"""
+    out: list[tuple[VehicleSeries, Brand | None]] = []
+    for series_id in series_ids:
+        series = db.get(VehicleSeries, series_id)
+        if series is None:
+            continue
+        out.append((series, db.get(Brand, series.brand_id)))
+    return out
+
+
 # 用户授权「宽松推荐」的口语表达（「没想好/不知道」表示信息缺失，不算授权）。
 # 2026-09 用户反馈补充：「先看推荐/直接推荐/先推荐」= 明确要求跳过剩余追问、
 # 按已有画像直接出推荐（与「随便」同一语义档；仍受 profile_has_core_constraints 门控）。
@@ -1185,7 +1209,11 @@ class AgentEngine:
             db,
             message,
             series_names=[s.name for s, _brand in resolved],
-            assume_constraint=asks_brand_lineup(message) or asks_catalog_count(message),
+            assume_constraint=(
+                asks_brand_lineup(message)
+                or asks_catalog_count(message)
+                or asks_brand_count(db, message)
+            ),
         )
         if brand_hints:
             profile = merge_profile(profile, brand_hints)
@@ -1225,6 +1253,23 @@ class AgentEngine:
             if not wants_unlock and not NEGATION_RE.search(message):
                 mentioned = [s.id for s, _ in resolved]
                 profile.locked_series_ids = sorted(set(profile.locked_series_ids) | set(mentioned))
+
+        # 2026-10-05（用户拍板）：本轮只点名了一台、另一台**存在于会话历史**时，
+        # 把锁定的那台并入 resolved，否则对比意图整个丢失：
+        #   第1轮「汉怎么样」  -> 锁定汉，给了档案
+        #   第2轮「和汉L比呢」-> 本轮只解析出汉L 1 个车系，系统反问「预算大概多少？」
+        # 「汉L和汉哪个好」正常是因为两台都在本轮消息里。
+        # 只在**带对比/指代标记**时合并：否则「它的续航够不够」会被误当成两车对比。
+        if (
+            len(resolved) == 1
+            and profile.locked_series_ids
+            and _COMPARE_FOLLOWUP_RE.search(message)
+        ):
+            current = resolved[0][0].id
+            missing = [i for i in profile.locked_series_ids if i != current]
+            if missing:
+                extra = await run_in_threadpool(_load_series_pairs, db, missing[:1])
+                resolved = resolved + extra
         # 唯一一次落盘：无条件，覆盖上面品牌合并 / 解锁 / 重新锁定三种变更。
         # 原来分散在 3 处条件写里，任何一条分支漏写都会丢画像——统一到末尾后，
         # 「本轮结束前画像一定已持久化」成为结构性保证而非人工纪律。
@@ -1300,6 +1345,8 @@ class AgentEngine:
             return await self._series_qa_reply(db, session_id, message, resolved)
         if decision.intent == "brand_lineup":
             return await self._brand_overview_reply(db, session_id, profile, message)
+        if decision.intent == "sales_ranking":
+            return await self._sales_ranking_reply(db, session_id, message)
         if decision.intent == "catalog_count":
             energy_allowed = _expand_energy_prefs(list(profile.energy_preference or []))
             return await self._catalog_overview_reply(
@@ -1763,6 +1810,52 @@ class AgentEngine:
                 f"另有 {overview['without_price']} 款暂无官方指导价数据，无法确认是否落在预算内。"
             )
         return "".join(lines)
+
+    async def _sales_ranking_reply(
+        self, db: Session, session_id: str, message: str
+    ) -> AgentMessageOut:
+        """销量榜回复：直接读库报数（2026-10-05 用户拍板新增确定性分支）。
+
+        生产实测：问「有什么热门的车」落到 LLM 后被答成「销量数据不完整，没法给你
+        准确的热门榜」，并**凭记忆列举**速腾/凯美瑞/卡罗拉——三款都不是销冠
+        （销冠是星愿 39,651 辆），而首页正下方就是同一份榜单。
+        库里**有**完整月销量，之前只是没接过去：现在是新增能力，不是修 bug。
+
+        数据走 `catalog.sales_ranking`，与 `/home` **同一份实现、同一口径**
+        （零售优先/门户回退、只取最近有数据的月份），不另写一份查询。
+        """
+        month = catalog.latest_sales_month(db)
+        rows = await run_in_threadpool(catalog.sales_ranking, db, limit=10)
+        if not rows:
+            text = "库内暂时没有可用的月销量数据，我不能凭印象给你编一份销量榜。"
+            citations: list[Citation] = []
+        else:
+            marks = "①②③④⑤⑥⑦⑧⑨⑩"
+            lines = [f"{month} 在售车系销量榜前十（榜单口径）："]
+            for index, (sales, series, _brand) in enumerate(rows):
+                lines.append(
+                    f"{marks[index]} {display_name(series, None)}："
+                    f"月销 {sales.sales_count:,} 辆"
+                )
+            top_sales, top_series, _top_brand = rows[0]
+            lines.append(
+                f"本期销冠是{display_name(top_series, None)}，月销 {top_sales.sales_count:,} 辆。"
+                "想看这几款的配置差异，直接说车系名就行。"
+            )
+            text = "".join(lines)
+            # 销量来自车系的来源记录（与卡片同一套引用口径）
+            source_ids = sorted(
+                {sid for sid in (getattr(s, "source_id", None) for _s, _v, s in rows) if sid}
+            )
+            citations = _source_citations(db, source_ids, label_suffix="销量数据")
+        out = AgentMessageOut(
+            session_id=session_id,
+            explanation=text,
+            citations=citations,
+            recommended_series_ids=[series.id for _sales, series, _brand in rows[:3]],
+        )
+        await self._emit(session_id, text, out)
+        return out
 
     async def _tool_loop_reply(
         self,

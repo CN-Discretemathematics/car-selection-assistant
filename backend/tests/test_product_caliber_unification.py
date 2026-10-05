@@ -121,8 +121,11 @@ def test_source_citations_no_longer_accepts_a_limit_argument():
 
 
 def test_no_call_site_passes_limit():
+    # 2026-10-05：4 → 5（新增「销量榜」确定性分支的引用）。
+    # **真实不变式是下面那条**（任何调用点都不得传 limit）；计数只是「所有调用点
+    # 都被这条断言覆盖到」的代理，漏了一个就静默失守，故仍硬编码。
     calls = re.findall(r"(?<!def )_source_citations\((?:[^()]|\([^()]*\))*\)", _SRC, re.S)
-    assert len(calls) == 4, f"应有 4 个调用点，实际 {len(calls)}"
+    assert len(calls) == 5, f"应有 5 个调用点，实际 {len(calls)}"
     for c in calls:
         assert "limit" not in c, f"调用点仍在传 limit：{c[:80]}"
 

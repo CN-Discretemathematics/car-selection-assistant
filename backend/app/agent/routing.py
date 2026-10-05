@@ -191,6 +191,44 @@ def asks_catalog_count(message: str) -> bool:
     return bool(_CATALOG_COUNT_RE.search(message))
 
 
+#: 「什么车卖得好 / 热门榜 / 销量排名」——库里**有**完整月销量（首页就在用同一份），
+#: 但此前落到 LLM 后被答成「销量数据不完整」并凭记忆列举。
+#: 排除「解释/为什么」语境：那是问原因不是要榜单。
+_SALES_RANKING_RE = re.compile(
+    r"(热门的?|卖得(好|快)|销量(榜|排名|排行)|最(火|畅销|受欢迎)|"
+    r"什么车(最)?(火|畅销|受欢迎)|哪款车(最)?(火|畅销)|卖得最好的)"
+)
+_SALES_RANKING_EXCLUDE_RE = re.compile(r"(为什么|怎么算|解释|是不是真的|准不准)")
+
+
+def asks_sales_ranking(message: str) -> bool:
+    """是否在要一份**销量榜**（读库报数，不该由模型凭记忆列举）。"""
+    if _SALES_RANKING_EXCLUDE_RE.search(message):
+        return False
+    return bool(_SALES_RANKING_RE.search(message))
+
+
+#: 「几款 / 多少款」这类数量词。`_CATALOG_COUNT_RE` 要求数量词后面紧跟
+#: 「车系/车型/款型/品牌/车」这类锚点，于是「奔驰**现在有几款在售**」接不住——
+#: 数量词与品牌名之间夹了「现在…在售」，品牌没被锁成约束、`brand_lineup` 进不去。
+_BRAND_COUNT_RE = re.compile(r"(多少|几)\s*(款|个|台|辆|种)")
+
+
+def asks_brand_count(db: Session, message: str) -> bool:
+    """「某品牌 + 数量词」盘点（用户 2026-10-05 拍板接进确定性盘点）。
+
+    生产实测（2026-10-05）：同一个品牌，「奔驰有几款车」能答「在售 56 款」，
+    「奔驰**现在有几款在售**」却说没有——差别只在这句话的数量词接不住
+    `_CATALOG_COUNT_RE`，品牌因此没被锁成硬约束，最后由 LLM 自己决定要不要调工具，
+    而它有时调有时不调。走确定性盘点后两类都读库。
+    """
+    if not _BRAND_COUNT_RE.search(message):
+        return False
+    if _CATALOG_COUNT_EXCLUDE_RE.search(message):
+        return False
+    return mentions_known_brand(db, message)
+
+
 def asks_tool_assist(message: str) -> bool:
     """是否属于盘点/对比/解释类自由提问（工具循环的候选问法）。"""
     return bool(_TOOL_ASSIST_RE.search(message))
@@ -323,15 +361,33 @@ def decide_route(
     #      但需要的是库内完整事实，不能交给模型记忆。
     asks_lineup = asks_brand_lineup(message)
     asks_count = asks_catalog_count(message)
-    if profile.brand_ids and not resolved and (asks_lineup or asks_count):
+    # 2026-10-05（用户拍板）：「奔驰现在有几款在售」的数量词接不住 `asks_catalog_count`
+    # （词与品牌名之间夹了「现在…在售」，缺「车系/车型/款型/品牌/车」锚点），
+    # 品牌因此没被锁成硬约束 → 最终由 LLM 自己决定要不要调工具，而它有时调有时不调。
+    asks_bcount = asks_brand_count(db, message)
+    if profile.brand_ids and not resolved and (asks_lineup or asks_count or asks_bcount):
         return RouteDecision(
             intent="brand_lineup",
-            matched_rule="0.7:brand_ids+not_resolved+(asks_brand_lineup|asks_catalog_count)",
+            matched_rule="0.7:brand_ids+not_resolved+(asks_brand_lineup|asks_catalog_count|asks_brand_count)",
             signals={
                 "brand_ids": list(profile.brand_ids),
                 "asks_brand_lineup": asks_lineup,
                 "asks_catalog_count": asks_count,
+                "asks_brand_count": asks_bcount,
             },
+        )
+
+    # 0.7a2) 销量/热门榜（「什么车卖得好」「本月销量榜」）→ 读库如实给榜单。
+    #        生产实测（2026-10-05）：该问题落到 LLM 后被答成
+    #        「销量数据不完整，没法给你准确的热门榜」，并凭记忆列举了速腾/凯美瑞/
+    #        卡罗拉——**三款都不是销冠**（销冠是星愿 39,651 辆），而首页正下方
+        #        就是同一份榜单。**该能答的说没有、不能答的凭记忆答**，两头都错。
+    #        守卫：不与「已点名车系」共存（「汉卖得好吗」是单车系问题，走档案/检索）。
+    if asks_sales_ranking(message) and not resolved:
+        return RouteDecision(
+            intent="sales_ranking",
+            matched_rule="0.7a2:asks_sales_ranking+no_resolved",
+            signals={"body_type": list(profile.body_type or [])},
         )
 
     # 0.7b) 全库盘点计数（「全部车型有多少款车」）→ 读库如实报数。
@@ -499,10 +555,14 @@ def llm_intent_executable(
         return bool(resolved) and should_answer(resolved, message)
     if intent == "brand_lineup":
         return bool(profile.brand_ids) and not resolved and (
-            asks_brand_lineup(message) or asks_catalog_count(message)
+            asks_brand_lineup(message)
+            or asks_catalog_count(message)
+            or asks_brand_count(db, message)
         )
     if intent == "catalog_count":
         return not core_constraints and not resolved and not profile.brand_ids
+    if intent == "sales_ranking":
+        return not resolved and asks_sales_ranking(message)
     if intent == "tool_loop":
         # 同 decide_route 的 0.75 分支：带排序意图时 tool_loop 是错的执行分支。
         # （原先把否决写在这个 return **之后**，是死代码——LLM 改写照样能从这扇门进来。）

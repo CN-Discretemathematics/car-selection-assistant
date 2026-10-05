@@ -156,6 +156,49 @@ def series_price_range(
     return low, high
 
 
+def sales_ranking(
+    db: Session,
+    *,
+    month: str | None = None,
+    limit: int = 10,
+    body_type: str | None = None,
+) -> list[tuple[MonthlySales, VehicleSeries, Brand]]:
+    """按销量从高到低返回车系榜（**与 /home 同口径**）。
+
+    口径与 `app/sales/router.py::home` 逐条一致（2026-10-05 抽出，避免第二份实现）：
+      - 月份默认取**最近一个有销量数据的月份**（销量月中发布，月初按「最近完整
+        自然月」取会让榜单整体消失——2026-09-02 生产故障）；
+      - 同一车系同时有零售与门户口径时，**零售优先**，门户回退（评审 M2）；
+      - 只统计车系/品牌都 active 的记录；
+      - 排名恒按销量从高到低，不受展示排序影响（评审 P2）。
+
+    助手侧的「什么车卖得好 / 热门榜 / 销量排名」确定性回答直接用它——
+    生产实测此前该问题落到 LLM 后被答成「销量数据不完整，没法给你准确的热门榜」，
+    并凭记忆列举了三款都不是销冠的车（2026-10-05，见台账第三十八节）。
+    """
+    target_month = month or latest_sales_month(db)
+    stmt = (
+        select(MonthlySales, VehicleSeries, Brand)
+        .join(VehicleSeries, MonthlySales.series_id == VehicleSeries.id)
+        .join(Brand, VehicleSeries.brand_id == Brand.id)
+        .where(
+            MonthlySales.month == target_month,
+            MonthlySales.sales_type.in_(("retail", "portal")),
+            VehicleSeries.active_status == "active",
+            Brand.active_status == "active",
+        )
+    )
+    if body_type:
+        stmt = stmt.where(VehicleSeries.body_type == body_type)
+    chosen: dict[int, tuple[MonthlySales, VehicleSeries, Brand]] = {}
+    for sales, series, brand in db.execute(stmt.order_by(MonthlySales.sales_count.desc())).all():
+        cur = chosen.get(series.id)
+        if cur is None or sales.sales_type == "retail":
+            chosen[series.id] = (sales, series, brand)
+    rows = sorted(chosen.values(), key=lambda r: -r[0].sales_count)
+    return rows[:limit] if limit > 0 else rows
+
+
 def latest_sales(db: Session, series_id: int, month: str | None = None) -> MonthlySales | None:
     month = month or latest_sales_month(db)
     # 优先统一零售口径；无零售数据时回退门户榜单口径（如汽车之家），展示时如实标注
