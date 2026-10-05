@@ -450,6 +450,65 @@ def _price_overlap_verdict(db: Session, first: VehicleSeries, second: VehicleSer
     return "、价格区间没有重叠"
 
 
+def _multi_price_verdict(db: Session, series_list: list[VehicleSeries]) -> str:
+    """N 车系的价格关系 → 小结措辞（`resolve_series` 最多解析 **4 个**车系）。
+
+    两车沿用 `_price_overlap_verdict` 的成对口径；三车及以上改说**整体跨度** +
+    「有没有任意一对重叠」——只报跨度不报重叠会漏掉「贵的和便宜的挨着、中间那个
+    另算」的情况，只报重叠不报跨度则用户不知道这堆车大概多少钱。
+    任一车系价格未披露即返回空串：**什么都不说**，而不是拿已知的两台编一个结论。
+    """
+    if len(series_list) == 2:
+        return _price_overlap_verdict(db, series_list[0], series_list[1])
+    spans: list[tuple[float, float]] = []
+    for series in series_list:
+        bounds = catalog.series_price_range(db, series.id)
+        if not bounds or bounds[0] is None or bounds[1] is None:
+            return ""
+        spans.append((bounds[0], bounds[1]))
+    low = min(s for s, _ in spans) / 10000
+    high = max(e for _, e in spans) / 10000
+    overlap = any(
+        a_lo <= b_hi and b_lo <= a_hi
+        for i, (a_lo, a_hi) in enumerate(spans)
+        for b_lo, b_hi in spans[i + 1:]
+    )
+    span_text = f"{low:g}-{high:g} 万" if high != low else f"{low:g} 万"
+    tail = "其中有价格区间重叠" if overlap else "价格区间互不重叠"
+    return f"、指导价跨度 {span_text}、{tail}"
+
+
+def _count_phrase(count: int) -> str:
+    """「这两款车 / 这三款车 / 这四款车 / 这 5 款车」。
+
+    对比链路此前**通篇写死「两款车」**（开头、`values[0] vs values[1]`、小结），
+    而 `resolve_series` 明确「最多 4 个」——用户点名三款车时，第三款会被
+    **静默丢出对比行**，小结还写「两款车定位不同」，用户完全看不出来。
+    """
+    return {2: "这两款车", 3: "这三款车", 4: "这四款车"}.get(count, f"这 {count} 款车")
+
+
+def _summary_for_many(
+    db: Session, resolved: list[tuple[VehicleSeries, Brand | None]]
+) -> str:
+    """N 车系（>=3）的小结：按**全体**定位与价格说话，不假装只比了两台。"""
+    series_list = [series for series, _ in resolved]
+    names = [display_name(s, b) for s, b in resolved]
+    classes = [s.positioning or "未标注" for s in series_list]
+    verdict = _multi_price_verdict(db, series_list)
+    if len(set(classes)) == 1:
+        return (
+            f"小结：这几款车同属「{classes[0]}」级别{verdict}；"
+            "可以按用车场景（通勤/家庭/长途）和预算取舍——告诉我你的预算和主要用途，"
+            "我按库内参数帮你细比。"
+        )
+    spread = "、".join(f"{name}是「{cls}」" for name, cls in zip(names, classes, strict=True))
+    return (
+        f"小结：这几款车定位不一致（{spread}）{verdict}，直接比「谁更好」意义不大；"
+        "更合适的做法是按预算与用途缩小范围——告诉我预算和主要用途，我可以帮你筛真正同档的候选。"
+    )
+
+
 def _series_header(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
     return (
         f"{series.positioning or '定位未标注'} · "
@@ -576,7 +635,7 @@ def build_series_qa_answer(
     facts_by_series = series_fact_rows(db, [s.id for s, _ in resolved])
     heads_map = rank_headlines(facts_by_series)
 
-    blocks: list[str] = ["你说的这两款车我先放在一起看："]
+    blocks: list[str] = [f"你说的{_count_phrase(len(resolved))}我先放在一起看："]
     for series, brand in resolved:
         name = display_name(series, brand)
         blocks.append(f"\n【{name}】{_series_header(db, series, brand)}")
@@ -615,8 +674,12 @@ def build_series_qa_answer(
     diff: list[str] = []
     for label in HEADLINE_ORDER:
         values = [h.get(label) for h in heads]
+        # 2026-10-05：此前是 `values[0] vs values[1]`——三个及以上车系时
+        # **后面的被静默丢掉**（`resolve_series` 明确最多 4 个）。
+        # 用户问「汉、汉L、秦PLUS 怎么选」，对比行里只有秦PLUS vs 汉，汉L 消失，
+        # 而上文三个车系块都在，用户看不出第三个没被比。
         if all(values):
-            diff.append(f"{label}：{values[0]} vs {values[1]}")
+            diff.append(f"{label}：{' vs '.join(values)}")  # type: ignore[arg-type]
     if diff:
         blocks.append("\n同量纲参数对比：" + "；".join(diff))
 
@@ -629,6 +692,11 @@ def build_series_qa_answer(
     #   结尾却写  「两款车级别与价格区间差异明显」
     # 这是本项目最不该出现的形状：**结论没有推导过程**。现在真的去比价格区间，
     # 而且只依据实际算出的结论选择措辞；算不出（价格未披露）时**什么都不说**。
+    if len(resolved) >= 3:
+        blocks.append(_summary_for_many(db, resolved))
+        blocks.append("\n" + footer)
+        return "\n".join(blocks)
+
     first, second = resolved[0][0], resolved[1][0]
     same_class = first.positioning and first.positioning == second.positioning
     price_verdict = _price_overlap_verdict(db, first, second)
@@ -887,3 +955,4 @@ def build_variant_diff_answer(
     ]
     lines.append("\n" + footer)
     return "\n".join(lines), out_rows
+
