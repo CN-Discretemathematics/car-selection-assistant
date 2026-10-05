@@ -24,6 +24,12 @@ services:
     build:
       context: ..
       dockerfile: deploy/backend.Dockerfile
+      args:
+        # 构建期注入源码提交号，供 /api/v1/version 回报（2026-10-05）。
+        # 缺省 "unknown"：宁可说不知道，也不编一个版本号。
+        # 部署脚本会显式传入；此处兜底让本地 `docker compose build` 也不会失败。
+        GIT_SHA: ${GIT_SHA:-}
+        BUILD_TIME: ${BUILD_TIME:-}
     restart: unless-stopped
     env_file:
       - ../backend/.env

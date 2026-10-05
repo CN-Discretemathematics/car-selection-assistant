@@ -2210,7 +2210,15 @@ class AgentEngine:
             # 检索词 = 用户需求词 + 候选车系名（系列介绍切片必含车系名，保证可命中）
             series_query = f"{query} {v['series_name']}".strip()
             try:
-                hits = retrieval_search(db, series_query, filters={"series_id": sid}, top_k=1)
+                # ⚠️ top_k 必须是 3 而不是 1（2026-10-05 修 CI 红灯）。
+                # P1-2 要求佐证**点名推荐的那个款型**，而 `top_k=1` 时检索常把
+                # **车系级摘要**（series_summary）排在第一——它按定义不含款型名，
+                # 于是 `_mentions_variant` 判否、整条佐证被丢弃，§13 的
+                # 「官方资料佐证」直接消失（test_agent_recommendation_with_sources
+                # 在 #65 合并后的 main 上红，PR #66 背锅）。
+                # 放宽召回条数、**再从中挑点名该款型的那条**：P1-2 的意图
+                # （绝不拿兄弟款型的参数冒充）不变，只是不再因排序而整条丢失。
+                hits = retrieval_search(db, series_query, filters={"series_id": sid}, top_k=3)
             except Exception:  # noqa: BLE001 - 检索不可用不影响推荐（原则 7）
                 continue
             # ⚠️ 2026-10-05：按 `series_id` 过滤只能保证**同车系**，管不到**同款型**。
