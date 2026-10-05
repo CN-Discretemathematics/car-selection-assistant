@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     # Agent 会话（本地开发为进程内存储 + TTL；生产替换为 Redis）
     agent_session_ttl_seconds: int = 3600
+    # 对话逐轮留档（2026-10-05 新增）。
+    # 此前全仓**不保存任何对话**——会话在 TTL 后蒸发，线上答错无法复现。
+    # 默认开启：留档的价值在于「出事之后查得到」，默认关等于这个价值不存在。
+    # 关闭：设 false 即完全停写（表仍在）；测试夹具显式关掉，见 tests/conftest.py。
+    agent_conversation_log_enabled: bool = True
+    #: 留档保留天数，0 = 永不自动清理（法规要求长期留存时用这个出口，
+    #: 关掉自动清理、交给外部流程接管）。
+    agent_conversation_log_retention_days: int = 30
     # 认证（邮箱验证码 + OTP；本地进程内存储，生产 Redis）
     dev_echo_codes: bool = False  # 仅开发模式：注册/登录响应回显验证码；生产必须为 false
     auth_token_ttl_seconds: int = 30 * 86400

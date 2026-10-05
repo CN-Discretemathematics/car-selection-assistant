@@ -315,6 +315,82 @@ class RouteDecision:
     signals: dict = field(default_factory=dict)
 
 
+def _car_context(
+    message: str, profile: UserProfile, resolved: list, db: Session
+) -> bool:
+    """是否处在汽车语境（工具循环只接管与车相关的问法）。
+
+    单独抽出来是因为 0.65 的对比守卫也要用它——原先守卫与 0.75 各写一份判定，
+    两份条件一旦漂移就没有任何东西能发现（见 `_tool_loop_eligible`）。
+    """
+    return bool(
+        resolved
+        or profile.brand_ids
+        or profile.locked_series_ids
+        or _CAR_CONTEXT_RE.search(message)
+        or has_car_intent(message)
+        or mentions_known_brand(db, message)   # 本条消息提到库内品牌（如「解释一下比亚迪的销量」）
+    ) and not _NON_CAR_RE.search(message)
+
+
+def _tool_loop_eligible(
+    message: str,
+    hints: dict,
+    profile: UserProfile,
+    resolved: list,
+    db: Session,
+    *,
+    car_context: bool | None = None,
+) -> bool:
+    """规则 0.75（工具循环咨询）的**全部**前置条件，唯一实现。
+
+    为什么必须和 0.65 的对比守卫共用一份（2026-10-05 实测缺陷）：
+    守卫 `not (_CONTRAST_ASK_RE.search(m) and len(resolved) >= 2)` 的语义是
+    「对比问题让给工具循环」——它**假定** 0.75 一定接得住。但 0.75 还要求
+    `not profile_core`（画像无预算/人数/用途），守卫没算这一条，于是：
+
+        第1轮「预算20万，汉怎么样」 → 锁定汉
+        第2轮「对比一下汉L」        → 并入后 resolved=2，守卫让出车系问答
+                                    → 0.75 被 profile_core 拦下
+                                    → 一路掉到 4:recommendation_fallback
+                                    → 答「预算大概多少？」
+
+    **用户第 1 轮就把预算说过了**，第 2 轮反而被再问一次。实测（真库真 decide_route）：
+    该缺口只影响含「对比」二字的消息；「哪个好 / 比呢 / 比一下」等说法不受影响，
+    因为 `_CONTRAST_ASK_RE` 只认字面「对比」。
+
+    修法不是给守卫补条件（那只是把同一个 bug 抄第三遍），而是让守卫问一个和
+    0.75 **完全同源**的问题：「0.75 真的会接住吗」。接不住就不让出，留在车系问答
+    ——它本来就支持多车系对比（`build_series_qa_answer` 的 `" vs "` 拼接）。
+    条件收敛到一处后，两边不可能再漂移。
+
+    `car_context` 可由调用方传入已算好的值，避免同一轮里重复查库
+    （`mentions_known_brand` 是一次 DB 查询）。
+    """
+    if car_context is None:
+        car_context = _car_context(message, profile, resolved, db)
+    core_hint_keys = {"budget", "passengers", "usage"} & set(hints)
+    # 画像层只看预算/人数/用途：不能用 profile_has_core_constraints（它把 body_type
+    # 也算核心约束，而 merge_profile 已把本轮消息里的「SUV」写进画像 → 自己把自己拦掉，
+    # 2026-09-15 实测「有哪些增程SUV…」因此落回追问预算）。
+    profile_core = (
+        profile.budget.min is not None
+        or profile.budget.max is not None
+        or bool(profile.usage)
+        or profile.passengers is not None
+    )
+    return (
+        asks_tool_assist(message)
+        and car_context
+        and not core_hint_keys
+        and not profile_core
+        # 2026-10-04：用户表达了**可执行**的排序偏好时，本分支是错的去向。
+        # 「有哪些车推荐」问的是**一批车**，但既然说了看重什么，就该走推荐链按其加权，
+        # 而不是丢进工具循环给一段聊天回答。与规则 2 的 general_advice 否决同源。
+        and not _ranking_intent_skips_consultation(hints, resolved, profile)
+    )
+
+
 def decide_route(
     message: str,
     hints: dict,
@@ -347,9 +423,16 @@ def decide_route(
 
     # 车系档案问答（原内联：if resolved and should_answer(resolved, message)）
     if resolved and should_answer(resolved, message):
-        # 0.65) 对比措辞守卫：「对比」动词 + ≥2 个解析车系 → 落 0.75 工具循环（见
-        # _CONTRAST_ASK_RE 注），不进车系问答。
-        if not (_CONTRAST_ASK_RE.search(message) and len(resolved) >= 2):
+        # 0.65) 对比措辞守卫：「对比」动词 + ≥2 个解析车系 → 落 0.75 工具循环，不进车系问答。
+        #      **仅当 0.75 确实接得住时才让出**（2026-10-05 实测缺陷，见 `_tool_loop_eligible`
+        #      docstring）：原先无条件让出，而 0.75 还要求 `not profile_core`，
+        #      于是「第1轮说过预算 → 第2轮对比一下汉L」被反问「预算大概多少？」。
+        diverts_to_tool_loop = (
+            bool(_CONTRAST_ASK_RE.search(message))
+            and len(resolved) >= 2
+            and _tool_loop_eligible(message, hints, profile, resolved, db)
+        )
+        if not diverts_to_tool_loop:
             return RouteDecision(
                 intent="series_qa",
                 matched_rule="series_qa:resolved+should_answer",
@@ -422,40 +505,15 @@ def decide_route(
         )
 
     # 0.75) 盘点/对比/解释类自由提问 → LLM 工具调用循环（步数受限、全程审计）。
-    #       两个前置条件（第二轮审查）：
-    #       a) 必须有「汽车语境」（命中车系/品牌/锁定车系/购车词/汽车名词），
-    #          防「量子纠缠」「华为 vs 苹果」这类通用问题被劫持；
-    #       b) 不得带核心约束（预算/人数/用途）——带约束的继续走推荐链；
-    #          车身类型（如「有哪些增程SUV」）不算核心约束：那正是要「列一批」的问法，
-    #          实测把它算作核心线索会把这类问题错误地交给追问预算的推荐链（2026-09-15）。
-    #       判定表达式与原实现逐字符等价（含 or 短路：mentions_known_brand 只在
-    #       前面全部为假时才查库，与原赋值语句的求值顺序一致）。
-    car_context = bool(
-        resolved
-        or profile.brand_ids
-        or profile.locked_series_ids
-        or _CAR_CONTEXT_RE.search(message)
-        or has_car_intent(message)
-        or mentions_known_brand(db, message)   # 本条消息提到库内品牌（如「解释一下比亚迪的销量」）
-    ) and not _NON_CAR_RE.search(message)
-    # 画像层同样只看预算/人数/用途：不能直接用 profile_has_core_constraints（它把 body_type
-    # 也算核心约束，而 merge_profile 已把本轮消息里的「SUV」写进画像 → 自己把自己拦掉，
-    # 2026-09-15 实测「有哪些增程SUV…」因此落回追问预算）。
-    profile_core = (
-        profile.budget.min is not None
-        or profile.budget.max is not None
-        or bool(profile.usage)
-        or profile.passengers is not None
-    )
-    if (
-        asks_tool_assist(message)
-        and car_context
-        and not core_hint_keys
-        and not profile_core
-        # 2026-10-04：用户表达了**可执行**的排序偏好时，本分支是错的去向。
-        # 「有哪些车推荐」问的是**一批车**，但既然说了看重什么，就该走推荐链按其加权，
-        # 而不是丢进工具循环给一段聊天回答。与规则 2 的 general_advice 否决同源。
-        and not _ranking_intent_skips_consultation(hints, resolved, profile)
+    #       前置条件（第二轮审查）：必须有「汽车语境」（防「量子纠缠」「华为 vs 苹果」
+    #       被劫持）；不得带核心约束（预算/人数/用途）——带约束的继续走推荐链；
+    #       车身类型（如「有哪些增程SUV」）不算核心约束：那正是要「列一批」的问法，
+    #       实测把它算作核心线索会把这类问题错误地交给追问预算的推荐链（2026-09-15）。
+    #       条件本体已抽到 `_tool_loop_eligible`（与 0.65 对比守卫共用同一份判定，
+    #       2026-10-05 起），这里只负责把它和 car_context 算给下游 signals 用。
+    car_context = _car_context(message, profile, resolved, db)
+    if _tool_loop_eligible(
+        message, hints, profile, resolved, db, car_context=car_context
     ):
         return RouteDecision(
             intent="tool_loop",

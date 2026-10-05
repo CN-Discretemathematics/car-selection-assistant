@@ -46,6 +46,11 @@ def _revisions() -> dict[str, str | None]:
                     if line.startswith("revision =")), None)
         down = next((line.split("=", 1)[1].strip().strip("'\"") for line in src.splitlines()
                      if line.startswith("down_revision =")), None)
+        # `down_revision = None` 被上面的字符串处理留成了字面量 "None"（truthy），
+        # 于是 root 被误判成「有父节点」，全局链检查数不出 root（2026-10-05 实测）。
+        # 这里显式转回 None。
+        if down is not None and down.strip("'\"").lower() in ("none", "null"):
+            down = None
         if rev:
             out[rev] = down
     return out
@@ -67,18 +72,48 @@ def _load_migration():
     return mod
 
 
-def test_migration_chain_has_no_fork_and_ends_at_new_rev():
-    """新迁移必须接在**加入它之前**的那个 head 上。
+def test_migration_chain_is_linear_and_ends_at_single_head():
+    """整条迁移链必须**线性无分叉**——这是全局不变式，不是某一个迁移的属性。
 
-    求 head 时必须**先把新迁移从版本集合里剔除**——它一旦加入，自己就成了唯一 head，
-    拿 head 跟自己的 down_revision 比必然自我矛盾（我第一版就这么写错了）。
+    2026-10-05 更正：本条原先把 `NEW_REV`（座位数那个）写死在断言里，
+    于是**每加一个迁移都会让它变红**——2026-10-05 加 `agent_turn_logs` 时实测如此。
+    一个「每加一个正常迁移就失败」的测试，等于半个摆设：大家会习惯性忽略它。
+    现改为断言**全局**不变式，且严格度只增不减：
+
+      - 恰好一个 root（down_revision 为 None）
+      - 恰好一个 head（没有分叉、没有两个分支并行）
+      - 每个非 root 的 down_revision 都真实存在（没有悬空引用）
+      - 从 head 能一路走到 root（没有环、没有断链）
+
+    这样任何**新增**迁移都会自动纳入检查，而不需要改这个文件。
     """
     vers = _revisions()
-    before = _heads({k: v for k, v in vers.items() if k != NEW_REV})
-    after = _heads(vers)
-    assert len(before) == 1, f"加入前应恰好一个 head，实际 {before}（分叉？）"
-    assert vers[NEW_REV] == before[0], f"down_revision 应接 {before[0]}，实为 {vers[NEW_REV]}"
-    assert after == [NEW_REV], f"加入后 head 应是新迁移自身，实际 {after}"
+    roots = [r for r, d in vers.items() if not d]
+    heads = _heads(vers)
+    assert len(roots) == 1, f"应恰好一个 root（down_revision=None），实际 {roots}"
+    assert len(heads) == 1, f"应恰好一个 head（分叉？），实际 {heads}"
+
+    # 悬空引用：down_revision 指向不存在的 revision
+    dangling = {r: d for r, d in vers.items() if d and d not in vers}
+    assert not dangling, f"down_revision 指向不存在的迁移：{dangling}"
+
+    # 从 head 一路走回 root；走不到说明有环或断链
+    seen: list[str] = []
+    cur = heads[0]
+    while cur:
+        seen.append(cur)
+        cur = vers[cur]
+        if len(seen) > len(vers):
+            raise AssertionError(f"迁移链成环，未能到达 root：{seen}")
+    assert len(seen) == len(vers), (
+        f"从 head 只能走到 {len(seen)} 个，但链上有 {len(vers)} 个——"
+        f"有分支没被遍历到（可达 {seen}）"
+    )
+    assert seen[-1] == roots[0], f"链路终点应是 root {roots[0]}，实为 {seen[-1]}"
+
+    # 座位数那次迁移自身仍必须挂在链上（它的专属断言保留）
+    assert NEW_REV in vers, f"{NEW_REV} 不在迁移集合里"
+    assert vers[NEW_REV] in vers, f"{NEW_REV} 的 down_revision 悬空：{vers[NEW_REV]}"
 
 
 def test_migration_upgrades_and_downgrades_on_sqlite(tmp_path):
