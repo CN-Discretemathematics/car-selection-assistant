@@ -120,7 +120,7 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 | P1.5 | `PUSH_GUARD_ALLOW` 环境变量 → commit body 内联 `# gate-allow: <理由>` trailer | 环境变量不留痕；CI 中 `--no-verify` 应直接失败 |
 | P1.6 | `autofix` job 改「只发 PR 评论，不推分支」 | 门禁改写自己的输入，`--fix` 的正则回归可静默洗白 PR |
 | P1.7 | 收窄 `doc_sync_check.py` 的 `ALLOW_WORDS` | 含「计划/待建/规划/历史/旧/曾」的行**同时豁免**悬空引用与过期模式两类检查——很宽的静默逃生口 |
-| P1.8 | 迁移数规则当前空转 | 实际 9 个迁移，全仓无文档声明迁移数，规则报告绿但没守任何东西 |
+| P1.8 | 迁移数规则当前空转 | 实际 10 个迁移，全仓无文档声明迁移数，规则报告绿但没守任何东西 |
 | P1.9 | 强化 `.env.example` 占位符识别 | 目前只靠主机名里的 `xxx+` 侥幸通过；`你的密码` 是中文，不匹配任何模式——距失败只差一次主机名改动 |
 
 **门禁的结构性盲区（诚实记录，不要指望它们）**：
@@ -279,7 +279,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `backend/app/agent/tools.py` `tradeoffs` | **整条链曾是死代码**——`recommendation_tool` 从不 append，消费链恒空 —— ✅ **2026-10-02 已修活**（纯计算版取舍叙事，见 `docs/sales-agent-proposal.md` L3）。同时修 `engine.py` `break` 只跳出内层的上限失效 bug |
 | `backend/app/agent/tools.py:397-399` | `brand_series_count` 统计**过滤后候选集**而非品牌规模，跨查询不可比 |
 | `backend/app/agent/engine.py:354` | ⚠️ **本条为审计误判，已更正**：`"MPV"` 键**不是死条目**。偏好路径用小写化的 `msg_low` 匹配（`"mpv" in msg_low`），而「不要…」的 avoid 路径用的是**原始 message**、大小写敏感（`"MPV" in message`）——两个键各覆盖一种输入，删掉大写键会让「不要MPV」漏掉排除项。真正的问题是**两条路径大小写处理不一致**（一个 lower 一个原样），统一它属行为变更，需产品拍板 |
-| `backend/app/agent/series_qa.py:390-400` | 多车系路径硬编码只处理 2 个车系（解析层最多返回 4 个） |
+| `backend/app/agent/series_qa.py:390-400` | 多车系路径硬编码只处理 2 个车系（解析层最多返回 4 个）—— ✅ **已修**（2026-10-05，PR #70 的 `0ae87be`）：对比行由 `values[0] vs values[1]` 改为对全部车系 `" vs ".join(values)`（现 `series_qa.py:637`），开头与小结的「两款车」改为按 N 选措辞（`_count_phrase`），三车及以上改用 `_summary_for_many` 报整体跨度；`tests/test_multi_series_compare.py` 端到端钉住（台账第三十节 (e)） |
 | `backend/app/agent/session.py:35-39` | `_prune()` O(n) 且每次操作都跑，活跃 session 无上限 |
 | `backend/app/agent/llm_router.py:135` | 模块级 LRU 无 prompt 版本键，prompt 改了旧判定活到重启 —— ✅ **已修**：key 并入 `ROUTER_VERSION`，改提示词时 +1 即自然失效（未加 TTL：容量已有 LRU 淘汰，且路由裁决的时效性问题用版本键解决更直接） |
 | `backend/app/sources/autohome_sku.py:112,123` | 库层零重试；tools 层固定 3s、无退避无抖动 |

@@ -35,7 +35,7 @@
 | 评分用**固定权重** `_WEIGHT_DIM_KEYWORDS` / `_WEIGHT_RAISE` | `backend/app/agent/engine.py:406,419` | 「我最看重后排」 |
 | `tradeoffs`（**取舍叙事**）**整条链是死代码，从未 append** | `backend/app/agent/tools.py:458,541` → `engine.py:1060-1072,1090` | 「这台的好处是 X，代价是 Y」 |
 | `brand_series_count` 统计**过滤后候选集** | `backend/app/agent/tools.py:397-399` | 「这个牌子售后网点多」 |
-| 多车系问答硬编码只处理 2 个车系 | `backend/app/agent/series_qa.py:390-400` | 「这三款怎么选」 |
+| 多车系问答硬编码只处理 2 个车系 —— ✅ **已修**（2026-10-05，`0ae87be`）：对比行改为对全部车系拼接，三款以上不再被静默丢弃（现 `series_qa.py:637` + `_count_phrase`，`tests/test_multi_series_compare.py` 钉住） | `backend/app/agent/series_qa.py:390-400` | 「这三款怎么选」 |
 
 **销售的差异不在「知道参数」——参数你的系统比销售全得多。差异在「把模糊需求翻译成取舍」。**
 而「取舍」这件事，恰好在你代码里已经搭好了管道、却没有接上任何数据源。

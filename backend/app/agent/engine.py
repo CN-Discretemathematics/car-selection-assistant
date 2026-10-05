@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from app.agent import known_facts, soft_prefs, soft_probe
+from app.agent import conversation_log, known_facts, soft_prefs, soft_probe
 from app.agent.answer_contract import (
     answer_numbers_allowed,
     check_catalog_overview_text,
@@ -1143,9 +1143,28 @@ class AgentEngine:
             logging.getLogger("app.agent.respond").info(json.dumps(payload, ensure_ascii=False))
         # shadow 旁路：回答产出**之后**才派发（原先在路由点派发，会与同请求的回答
         # 链路并发）。is_chatty 提前返回时 sink 为空 → 不派发（与既有行为一致）。
-        if router_mode == "shadow" and decision_sink:
-            decision, profile = decision_sink[0]
+        # sink 元组第三个元素（resolved 车系）只给对话留档用，见下。
+        entry = decision_sink[0] if decision_sink else None
+        if entry is not None and router_mode == "shadow":
+            decision, profile = entry[0], entry[1]
             self._spawn_shadow_route(message, profile, decision)
+        # 对话逐轮留档（2026-10-05）。接在**这里**而不是 respond() 的各个 return 分支：
+        # respond() 有 15 处 return，逐处包必然漏掉几个；而此处是唯一的对外出口，
+        # 一处覆盖全部分支，且拿得到决策 + 车系 + 画像这三样复现所需的信息。
+        #
+        # 走 run_in_threadpool：不阻塞事件循环；写失败只记 warning（record_turn 内部吞异常），
+        # **绝不让留档把用户请求带崩**——留档是观测手段，不是业务逻辑。
+        if entry is not None:
+            await run_in_threadpool(
+                conversation_log.record_turn,
+                db,
+                session_id=session_id,
+                user_text=message,
+                out=out,
+                decision=entry[0],
+                profile=entry[1],
+                resolved=entry[2],
+            )
         return out
 
     async def respond(
@@ -1335,7 +1354,7 @@ class AgentEngine:
             elapsed_ms=(time.perf_counter() - route_started) * 1000,
         )
         if decision_sink is not None:
-            decision_sink.append((decision, profile))
+            decision_sink.append((decision, profile, list(resolved)))
 
         if decision.intent == "comparison":
             return await self._comparison_analysis_reply(
@@ -1821,8 +1840,10 @@ class AgentEngine:
         （销冠是星愿 39,651 辆），而首页正下方就是同一份榜单。
         库里**有**完整月销量，之前只是没接过去：现在是新增能力，不是修 bug。
 
-        数据走 `catalog.sales_ranking`，与 `/home` **同一份实现、同一口径**
-        （零售优先/门户回退、只取最近有数据的月份），不另写一份查询。
+        数据走 `catalog.sales_ranking`。⚠️ 它与 `/home` **不是同一份实现**
+        （2026-10-05 独立审查更正）：`/home` 根本不调用它，SQL 构造与零售优先去重
+        在 `sales/router.py` 与 `catalog/services.py` 各存一份。口径逐条对齐，
+        由 `tests/test_sales_ranking_matches_home.py` 真调 `/home` 逐位比对来守。
         """
         month = catalog.latest_sales_month(db)
         rows = await run_in_threadpool(catalog.sales_ranking, db, limit=10)
@@ -1843,9 +1864,18 @@ class AgentEngine:
                 "想看这几款的配置差异，直接说车系名就行。"
             )
             text = "".join(lines)
-            # 销量来自车系的来源记录（与卡片同一套引用口径）
+            # 引用必须挂在**销量记录自己**的来源上（MonthlySales.source_id）。
+            # 2026-10-05 审查 P0：原写成 `for _s, _v, s in rows`，而 rows 的元素是
+            # (MonthlySales, VehicleSeries, Brand)，解包后 `s` 绑到的是 **Brand**——
+            # Brand/VehicleSeries/MonthlySales 三者都有 source_id，getattr 默认值形同虚设，
+            # 于是每条销量榜都挂着**品牌名录的来源**却贴「销量数据」标签。
+            # 该缺陷全量测试无感（把品牌来源与销量来源换掉，任何断言都不变）。
             source_ids = sorted(
-                {sid for sid in (getattr(s, "source_id", None) for _s, _v, s in rows) if sid}
+                {
+                    sid
+                    for sid in (getattr(sl, "source_id", None) for sl, _sv, _br in rows)
+                    if sid
+                }
             )
             citations = _source_citations(db, source_ids, label_suffix="销量数据")
         out = AgentMessageOut(
