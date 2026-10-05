@@ -166,6 +166,39 @@ def resolve_brand_mentions(
     return result
 
 
+def brand_names_in_message(
+    db: Session, message: str, series_names: list[str] | None = None
+) -> set[str]:
+    """消息里出现的**库内品牌名**（只判「出现」，不判是否构成约束）。
+
+    与 `resolve_brand_mentions` 的区别：那个要「明确约束语气」才收，返回的是
+    要写进画像的硬约束；这里只回答「用户提到了哪些我们认识的品牌」，用于
+    **检测静默替换**（2026-10-05）：
+
+        用户：传祺M6值得买吗?
+        库里：没有传祺M6，但有 问界M6（品牌是**问界**，不是传祺）
+
+    纯字符串匹配会把「M6」命中到问界M6，于是一张问界的参数卡被当答案发了出去——
+    数据全真、车完全不是用户问的那台。判据就是品牌对不上：
+    **它不需要知道传祺M6 长什么样，只需要知道答案不该是问界的。**
+
+    `series_names` 传入已解析出的车系名，用于排除「品牌词属于车系名本身」
+    （「银河星愿」里的「银河」是对车的指代，不是另一个品牌）。
+    """
+    normalized = normalize_name(message)
+    if not normalized:
+        return set()
+    owned = {normalize_name(n) for n in (series_names or []) if n}
+    found: set[str] = set()
+    for name, _brand_id, label in _load_entries(db):
+        if name not in normalized:
+            continue
+        if any(name in s for s in owned):
+            continue  # 该品牌词属于被点名的车系名本身
+        found.add(label)
+    return found
+
+
 def catalog_overview(
     db: Session,
     *,

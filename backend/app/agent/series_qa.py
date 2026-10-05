@@ -46,6 +46,11 @@ _ENERGY_LABEL = {"BEV": "纯电", "PHEV": "插混", "EREV": "增程", "HEV": "�
 _SERIES_QA_RE = re.compile(
     r"(优点|优势|亮点|卖点|缺点|怎么样|好不好|值得|值不值|性价比|推荐吗|对比|相比|比较|"
     r"区别|差别|哪个好|怎么选|选哪个|选哪款|选什么|介绍|了解|讲下|说下|看看|"
+    # 2026-10-06（真实语料实测）：真实用户的主句式是「X和Y**哪个更**好/更适合/更划算」，
+    # 而表里只有「哪个好」——「哪个更好」不是它的子串，于是这类问法 `should_answer`
+    # 返回 False，**明明解析出了车系却掉进推荐链去追问预算**。
+    # 实拍：「大众朗逸和明锐哪个更好」→ 只解析出朗逸 → 答「可以告诉我你的预算吗？」。
+    r"更(好|强|划算|合适|适合|便宜|贵|值得)|"
     r"想买|准备买|打算买|就要|关注|看中|"
     r"多少|多少钱|多大|多长|几升|几款|有没有|有没|带不带|带吗|配不配|配备|配了|支持吗|支持不|"
     r"价格|指导价|配置|参数|"
@@ -549,6 +554,71 @@ def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
     return "\n".join(parts)
 
 
+def _absent_series_note(
+    db: Session,
+    resolved: list[tuple[VehicleSeries, Brand | None]],
+    message: str,
+) -> str | None:
+    """用户点名的车库里没有 → 必须明说，**绝不用名字相近的另一台顶替**。
+
+    2026-10-06 实测（真实语料，2026-10-05 采自懂车帝「提问」帖与汽车之家问答区）：
+
+        用户：传祺M6值得买吗?
+        库里：没有传祺M6（传祺有 ES9 / E8 / 影豹 / GS3 / GS4 / GS8）
+        实际：把「M6」命中到 **问界M6**，输出问界 M6 的尺寸/轴距/动力/续航/油耗
+
+    数据全是真的，只是车不是用户问的那台。**这比崩溃更坏**——崩溃用户会重试，
+    自信的错答案用户会照着买。
+
+    判据是**品牌对不上**：消息里出现了库内品牌 A，而解析出的车系都属于品牌 B，
+    那么 A 名下的那台车多半不存在。与其猜它该是什么（要靠别名词典，且必然不全），
+    不如如实说「我们库里没有」。这里不需要知道传祺M6 长什么样。
+
+    第二条：点名多台只查到一部分时也要说。「大众朗逸和明锐哪个更好」——明锐不在
+    库里，不能只答朗逸就让用户以为看全了。
+    """
+    from app.catalog.brands import brand_names_in_message
+
+    if not resolved:
+        return None
+    resolved_brands = {brand.name for _s, brand in resolved if brand is not None}
+    series_names = [series.name for series, _b in resolved]
+    mentioned = brand_names_in_message(db, message, series_names=series_names)
+
+    if mentioned and not (mentioned & resolved_brands):
+        names = "、".join(sorted(mentioned))
+        got = "、".join(sorted(resolved_brands))
+        return (
+            f"你提到的「{names}」，我们库里目前**没有**对应的车系资料"
+            f"（库里能查到的是 {got}），所以先不拿别的车来代替回答——"
+            "换一台你说得出来的在售车型，或者把车系全名给我，我再查。"
+        )
+
+    # 点名多台、只查到一部分：用对比连接词估一个**下界**，不足就披露（不猜缺哪台）
+    implied = _implied_candidate_count(message)
+    if implied > len(resolved):
+        got_names = "、".join(series_names)
+        return (
+            f"你问的「{implied} 台」里，我们只查到 {len(resolved)} 台"
+            f"（{got_names}），其余**库里没有收录**，"
+            "所以下面只列查得到的那部分——不是全部对比结果。"
+        )
+    return None
+
+
+#: 比较/并列句式里表示「还有下一台」的连接词。数它们是为了估出**候选台数下界**，
+#: 不做语义判断——宁可少报也不能报错数（多报会让正常的一句话平白多出一段披露）。
+_CANDIDATE_CONNECTORS = ("和", "与", "vs", "VS", "vs.", "还是", "跟", "或者", "或")
+
+
+def _implied_candidate_count(message: str) -> int:
+    """从并列连接词估「用户提到了几台车」的下界；没有并列信号时返回 1。"""
+    n = 1
+    for token in _CANDIDATE_CONNECTORS:
+        n += message.count(token)
+    return min(n, 5)  # 上界保护：连接词很多时按 5 台算，避免长句把披露写得离谱
+
+
 def build_series_qa_answer(
     db: Session,
     resolved: list[tuple[VehicleSeries, Brand | None]],
@@ -556,6 +626,12 @@ def build_series_qa_answer(
 ) -> str:
     """生成车系问答的确定性回答文本（所有内容来自数据库事实）。"""
     footer = "以上基于汽车之家参数配置页与官方指导价整理（动态驾驶感受、车主口碑与优惠信息不在数据范围内），具体以品牌官网为准。"
+
+    # 2026-10-06：先判「用户点名的车库里到底有没有」，有则直接说没有，
+    # **绝不落到后面的渲染**——那条路会用名字相近的另一台车编出一张自信的参数卡。
+    absent_note = _absent_series_note(db, resolved, message)
+    if absent_note:
+        return absent_note
 
     if len(resolved) == 1:
         series, brand = resolved[0]
