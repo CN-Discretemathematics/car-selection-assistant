@@ -76,6 +76,14 @@ _PROBE_MAX_KEYS = 8
 #: 超限时仍会如实披露「共 N 个，只列前 M 个」——截断可以，但截断必须说出来。
 _PROBE_VALUE_COERCE = 8
 
+#: 核心参数那一行的前缀。N6-B 曾在 2026-10-05 短暂写成「（最高配）」，被实测证伪：
+#: `rank_headlines` 的口径是**逐 label 极值**（油耗/加速取 min = 最省/最快，恰恰通常是低配），
+#: 与配置高低无关。汉的「续航 705km（←EV）」配「油耗 0.67L（←DM-i 插混）」在库里
+#: 根本不存在这样一台车。现按用户拍板改为「全系极值」——这是对极值口径的准确陈述，
+#: 且多档时 `rank_headlines` 会输出 `620~705 km` 区间，每个数都是真实存在过的值。
+#: 两处展示（单车系 `_describe` / 多车系对比）共用本常量，避免再次漂移。
+_HEADLINE_PREFIX = "核心参数（全系极值）："
+
 # 探针维度 → 用户可读名（v3 不可回答题诚实性标注：问了但 DB 完全没有的维度，
 # 必须显式回答「官方资料未披露」——评测 v3 拒答判定 0/60 通过暴露的缺失）
 _PARAM_DIM_LABELS: dict[str, str] = {
@@ -253,7 +261,7 @@ def probe_facts(
         # N6-B（用户拍板「参数追问列全档」）：此前只列前 _PROBE_VALUE_MAX(=2) 个去重值，
         # 与「核心参数」那一行（取极值）并存时两个口径打架——问「星愿续航多少」会
         # 同时看到「480 km」（头条，取最大）和「310 / 410」（追问，取前两个）。
-        # 现在核心参数行已标「最高配」，两边语义都交代清楚了，追问侧就**列全档**，
+        # 现在核心参数行已标「全系极值」且多档给区间，两边语义都交代清楚了，追问侧就**列全档**，
         # 不再自己截断。`coerce` 仍作为**病态输入**的兜底（见下），但正常档位数
         # （实测多在 2~4 档）不再触发。
         entries_all = entries if len(entries) <= _PROBE_VALUE_COERCE else entries[:_PROBE_VALUE_COERCE]
@@ -429,7 +437,7 @@ def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
     if head:
         order = [label for label in HEADLINE_ORDER if label in head]
         parts.append(
-            "核心参数（最高配）：" + "；".join(f"{label} {head[label]}" for label in order)
+            _HEADLINE_PREFIX + "；".join(f"{label} {head[label]}" for label in order)
         )
     highlights = series_highlights(db, series)
     if highlights:
@@ -484,7 +492,7 @@ def build_series_qa_answer(
         if head:
             order = [label for label in HEADLINE_ORDER if label in head]
             blocks.append(
-                "  核心参数（最高配）：" + "；".join(f"{label} {head[label]}" for label in order)
+                "  " + _HEADLINE_PREFIX + "；".join(f"{label} {head[label]}" for label in order)
             )
         # 按需参数查找（评审 M-R10）：对比语境下同样回答问到的具体参数
         series_facts = facts_by_series.get(series.id, [])

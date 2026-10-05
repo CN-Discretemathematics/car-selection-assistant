@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+from typing import NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -242,13 +243,81 @@ def unit_from_key(key: str) -> str | None:
     return candidate if _UNIT_CHARS.match(candidate) else None
 
 
+class _Entry(NamedTuple):
+    """一条参与极值/区间计算的事实。`text` 是单项展示文本，`raw`/`unit`/`cycle` 供合成区间用。"""
+
+    key: str
+    num: float | None
+    text: str
+    unit: str
+    raw: str
+    cycle: str
+
+
+_VALUE_UNIT_RE = re.compile(r"^(.*?)([^\d\s.]+)$")
+
+
+def _split_embedded_unit(value: str) -> tuple[str, str]:
+    """拆出值里自带的单位后缀（「150kW」→「150」「kW」）；拆不出则原样返回。"""
+    matched = _VALUE_UNIT_RE.match(value.strip())
+    if not matched or not matched.group(1).strip():
+        return value.strip(), ""
+    return matched.group(1), matched.group(2)
+
+
+def _range_text(best: _Entry, group: list[_Entry], same_unit: bool) -> str | None:
+    """`best` 所在那一组（同 fact_key + 同单位 + 同测试口径）取值 >=2 档时的区间文本。
+
+    返回 None 表示「合不出可信区间」，调用方退回单值——此时输出与改动前逐字一致。
+
+    N9（2026-10-05 实测）：`rank_headlines` 逐 label 取极值，784 个多款型车系里
+    **396 个（50.5%）**的核心参数整句没有任何一款型能复现——即
+    「汉：续航 705km（来自 3 款 EV）；油耗 0.67L（来自 5 款 DM-i 插混）」，
+    这台车在库里根本不存在。单值同样会骗人（小米SU7「最高配续航 902km」实际来自
+    中配后驱Pro，顶配四驱Max 为性能牺牲了续航）。改成区间后，展示的每个数都是
+    **真实存在过的值**，不会再造出虚构配置；单值车系（min==max）输出逐字不变，
+    388/784 个车系零影响。
+
+    **三道安全阀，缺一不可**——每道都对应一类真实存在、但合在一起就错误的量：
+      1. 单位一致（否则 1156 Ps 与 850 kW 被写进同一个区间）；
+      2. **fact_key 一致**（`CLTC综合续航` 与 `CLTC纯电续航里程` 都是 km+CLTC，
+         却是两个不同的量——合成 `125~705 km` 会让用户以为纯电续航能到 705；
+         首个版本就漏了这道阀，被自己的测试抓出来了）；
+      3. 测试口径一致（WLTC 与 CLTC 的续航不可写进同一个区间）。
+    取「极值所在的那一组」而不是全部：汉的 705 来自 `CLTC综合续航`，
+    于是输出 `605~705 km（CLTC）`（只含 EV 那三档），DM-i 的 125/245 不参与。
+    """
+    if not same_unit:
+        return None
+    cohort = [e for e in group if (e.key, e.unit, e.cycle) == (best.key, best.unit, best.cycle)]
+    numeric = [e for e in cohort if e.num is not None]
+    if len({e.num for e in numeric}) < 2:
+        return None
+    lo = min(numeric, key=lambda e: e.num)  # type: ignore[type-var]
+    hi = max(numeric, key=lambda e: e.num)  # type: ignore[type-var]
+    suffix = f"（{best.cycle}）" if best.cycle else ""
+    if best.unit:
+        return f"{lo.raw}~{hi.raw} {best.unit}{suffix}"
+    # 单位写在值里（如「150kW」）：两端要拆出同一个后缀才拼，否则原样并列
+    lo_body, lo_unit = _split_embedded_unit(lo.raw)
+    hi_body, hi_unit = _split_embedded_unit(hi.raw)
+    if lo_unit and lo_unit == hi_unit:
+        return f"{lo_body}~{hi_body}{lo_unit}{suffix}"
+    return f"{lo.raw}~{hi.raw}{suffix}"
+
+
 def rank_headlines(
     facts_by_series: dict[int, list[tuple[str, str, str | None, str | None]]]
 ) -> dict[int, dict[str, str]]:
-    """批量车系核心参数排名（在售事实极值/首值；同单位内比大小）。
+    """批量车系核心参数排名（在售事实极值/首值；同单位内比大小，多档给区间）。
 
     facts_by_series: series_id → [(fact_key, value, unit, cycle), ...]
     供多个调用方复用（车系问答 / RAG 车系摘要切片），避免 N 次单查。
+
+    数值型 label 在同单位同口径内取值 >=2 档时返回 `620~705 km（CLTC）` 这样的区间
+    （见 `_range_text`）；单档仍返回单值。`尺寸` 是 text 模式取首值，**不参与区间**——
+    长*宽*高 是三元组，合成 `4650~5190*1935*1795` 没有意义（且实测 35.6% 的车系
+    尺寸多档时本就只是任取其一，属独立残留问题，不在本函数职责内）。
     """
     out_map: dict[int, dict[str, str]] = {}
     for sid, rows in facts_by_series.items():
@@ -260,37 +329,50 @@ def rank_headlines(
 
         out: dict[str, str] = {}
         for label, keys, mode in HEADLINE_SPECS:
-            entries: list[tuple[str, float | None, str, str]] = []  # (key, num, text, unit)
+            entries: list[_Entry] = []
             for key in keys:
                 for value, unit, cycle in by_key.get(key, []):
                     unit = unit or unit_from_key(key) or ""
                     if unit and value.strip().lower().endswith(unit.lower()):
                         unit = ""  # 值本身已带单位（如「150kW」），避免重复
                     text = f"{value}{f' {unit}' if unit else ''}{f'（{cycle}）' if cycle else ''}"
-                    entries.append((key, _numeric(value) if mode != "text" else None, text, unit))
+                    entries.append(
+                        _Entry(
+                            key=key,
+                            num=_numeric(value) if mode != "text" else None,
+                            text=text,
+                            unit=unit,
+                            raw=value,
+                            cycle=cycle or "",
+                        )
+                    )
             if mode == "text":
                 if entries:
-                    out[label] = entries[0][2]
+                    out[label] = entries[0].text
                 continue
-            numeric = [e for e in entries if e[1] is not None]
+            numeric = [e for e in entries if e.num is not None]
             if not numeric:
                 continue
             # 只在同一单位内比极值：kW 不与 Ps 比大小（防止「1156 Ps > 850 kW」错选）
-            ref_unit = numeric[0][3]
-            same_unit = [e for e in numeric if e[3] == ref_unit] or numeric
+            ref_unit = numeric[0].unit
+            unit_matched = [e for e in numeric if e.unit == ref_unit]
+            same_unit = unit_matched or numeric
             best = same_unit[0]
             for entry in same_unit[1:]:
-                num = entry[1]
+                num = entry.num
                 # 评审 m11：生产路径不用 assert（python -O 下会被剥离），显式跳过无数值行
                 if num is None:
                     continue
-                if mode == "max" and num > best[1]:  # type: ignore[operator]
+                if mode == "max" and num > best.num:  # type: ignore[operator]
                     best = entry
-                elif mode == "min" and num < best[1]:  # type: ignore[operator]
+                elif mode == "min" and num < best.num:  # type: ignore[operator]
                     best = entry
-            out[label] = best[2]
+            # 区间优先于单值：N9 修法。极值**选择逻辑未变**，只在能证明同键同单位同口径时
+            # 把展示换成区间，取不到区间时 out[label] 与改动前逐字相同。
+            out[label] = _range_text(best, same_unit, bool(unit_matched)) or best.text
         out_map[sid] = out
     return out_map
+
 
 
 def series_headline(db: Session, series: VehicleSeries) -> dict[str, str]:

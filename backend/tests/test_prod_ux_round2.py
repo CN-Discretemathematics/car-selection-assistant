@@ -156,26 +156,34 @@ def test_highlights_counts_variants_not_fact_rows(db_session: Session):
     assert any("在售 3 款中 2 款配备" in x for x in out), f"重复行把 M 抬高了：{out}"
 
 
-# ── N6-B（拍板：核心参数标「最高配」+ 参数追问列全档）────────────────────────
-def test_single_series_marks_headline_as_top_trim(db_session: Session):
-    """核心参数行必须标「最高配」——否则它与下面「你问到的相关参数」的全档口径打架。
+# ── N6-B（拍板：核心参数标「全系极值」+ 参数追问列全档）──────────────────────
+def test_single_series_keeps_non_highlight_lines(db_session: Session):
+    """核心参数行不依赖 headline——这里断言的是**不带 headline 时不得凭空造行**。
 
-    `series_highlights` 产出的「亮点配置」行不依赖 headline，所以这里断言的是
-    **不带 headline 时不得凭空造行**；标题文案由下面那条 monkeypatch 用例钉死。
+    `series_highlights` 产出的「亮点配置」行不依赖 headline；标题文案由下面那条
+    monkeypatch 用例钉死。
     """
     s, brand = _seed(db_session, "口径车", ["310000", "410000", "480000"], [None] * 3)
     text = build_series_qa_answer(db_session, [(s, brand)], "口径车怎么样")
     assert "官方指导价 31.00-48.00 万元" in text, text[:300]
 
 
-def test_single_series_headline_has_trim_label(db_session: Session, monkeypatch):
-    """直接钉住那行标题的文案。"""
+def test_single_series_headline_has_series_extreme_label(db_session: Session, monkeypatch):
+    """直接钉住那行标题的文案。
+
+    2026-10-05 订正：N6-B 首版写的是「（最高配）」，被实测证伪——`rank_headlines`
+    的口径是逐 label 极值，油耗/加速取 min（最省/最快）恰恰通常是**低配**。
+    「汉」会说出「续航 705km（←3 款 EV）+ 油耗 0.67L（←5 款 DM-i）」这种库里不存在的车。
+    现按用户拍板改为「（全系极值）」，与极值口径一致且不再暗示单一配置。
+    """
     from app.agent import series_qa
 
-    monkeypatch.setattr(series_qa, "series_headline", lambda db, s: {"续航": "480 km（CLTC）"})
+    monkeypatch.setattr(series_qa, "series_headline", lambda db, s: {"续航": "310~480 km（CLTC）"})
     s, brand = _seed(db_session, "标注车", ["310000", "410000", "480000"], [None] * 3)
     text = build_series_qa_answer(db_session, [(s, brand)], "标注车续航多少")
-    assert "核心参数（最高配）" in text, text[:300]
+    assert "核心参数（全系极值）" in text, text[:300]
+    assert "310~480 km（CLTC）" in text, text[:300]
+    assert "最高配" not in text, text[:300]
 
 
 # ── N2（拍板：真的去比价格）─────────────────────────────────────────────────
@@ -312,7 +320,7 @@ def test_highlights_denominator_is_on_sale_variants(db_session: Session):
 
 
 def test_variant_label_in_comparison_path_is_marked(db_session: Session, monkeypatch):
-    """**对比路径**的「核心参数」也必须标「最高配」。
+    """**对比路径**的「核心参数」也必须标「全系极值」。
 
     首轮修复只改了单车系 `_describe`，对比路径原样保留，于是同一份数据在
     对比里仍然自相矛盾（审查实测：核心参数 480 km + 下方 310/410/480）。
@@ -327,7 +335,7 @@ def test_variant_label_in_comparison_path_is_marked(db_session: Session, monkeyp
     def _fake(facts_by_series):
         out = real(facts_by_series)
         for sid in out:
-            out[sid] = {**out[sid], "续航": "480 km（CLTC）"}
+            out[sid] = {**out[sid], "续航": "310~480 km（CLTC）"}
         return out
 
     monkeypatch.setattr(series_qa, "rank_headlines", _fake)
@@ -336,7 +344,8 @@ def test_variant_label_in_comparison_path_is_marked(db_session: Session, monkeyp
     a, ba = _seed(db_session, "对比标注车", ["64800", "94800"], ["●", "●"])
     b, bb = _seed(db_session, "对比参照车", ["65800", "86800"], ["●", "●"])
     text = build_series_qa_answer(db_session, [(a, ba), (b, bb)], "这两款怎么选")
-    assert "核心参数（最高配）" in text, text[:400]
+    assert "核心参数（全系极值）" in text, text[:400]
+    assert "最高配" not in text, text[:400]
 
 
 def test_priority_phrase_has_no_missing_space_before_enum():
