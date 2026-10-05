@@ -171,3 +171,38 @@ def test_collect_evidence_keeps_matching_variant(db_session, monkeypatch):
     profile.usage = ["家庭"]
     out = _FakeEngine()._collect_evidence(db_session, profile, top)
     assert len(out) == 1 and "19.79" in out[0]["text"]
+
+
+def test_collect_evidence_skips_leading_series_summary(db_session, monkeypatch):
+    """**回归锁定（2026-10-05 CI 红灯）**：召回条数必须是 3 而不是 1。
+
+    修复前用 `top_k=1`，检索常把**车系级摘要**（按定义不含款型名）排在第一，
+    `_mentions_variant` 判否 → 整条佐证被丢弃 → §13 的「官方资料佐证」消失
+    （`test_agent_recommendation_with_sources` 因此在 #65 合并后的 main 上变红）。
+
+    本用例把「第一条是车系级摘要、第二条才点名款型」钉死：
+    若有人把 top_k 改回 1，这里必然拿不到证据。
+    """
+    calls: list[int] = []
+    hits = [
+        {"text": "家用SUV 是一款紧凑型新能源SUV。官方指导价 12.98-15.98 万元。",
+         "kind": "series_summary", "source_url": None},
+        {"text": "家用SUV 2025款 标准版（纯电，指导价 12.98 万）核心参数与配置：级别 = 紧凑型SUV。",
+         "kind": "variant_spec", "source_url": None},
+    ]
+
+    def _fake_search(db, query, filters=None, top_k=1, **kw):
+        calls.append(top_k)
+        return hits[:top_k]
+
+    monkeypatch.setattr("app.agent.engine.retrieval_search", _fake_search)
+    top = [{
+        "variant_id": 1, "series_id": 7,
+        "series_name": "家用SUV",
+        "display_name": "测试品牌 家用SUV 2025款 标准版",
+    }]
+    profile = UserProfile()
+    profile.usage = ["家庭"]
+    out = _FakeEngine()._collect_evidence(db_session, profile, top)
+    assert calls and calls[0] >= 2, f"召回条数必须 >1，否则会被车系级摘要挤掉：{calls}"
+    assert out and "12.98" in out[0]["text"], f"应跳过车系级摘要、采用点名款型的那条：{out}"
