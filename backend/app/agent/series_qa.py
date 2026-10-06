@@ -576,13 +576,16 @@ def _dropped_note(
     again, dropped = resolve_series_with_dropped(db, message)
     if not dropped or [s.id for s, _ in again] != [s.id for s, _ in resolved]:
         return ""
-    total = len(resolved) + len(dropped)
     names = "、".join(f"「{n}」" for n in dropped[:_DROPPED_NAME_LIMIT])
     more = f"等共 {len(dropped)} 台" if len(dropped) > _DROPPED_NAME_LIMIT else ""
     tail = f"{names}{more}" if not more else f"{names}，{more}"
+    # 主语必须是**系统视角**，不能是「你一共提到 N 台」——独立审查实测（2026-10-07）：
+    # 用户点 9 个名字、其中一个库里没有（「途观」只有「途观L插电混动」）时，
+    # `total = len(resolved) + len(dropped)` 数的是**匹配上且去重后**的车系，
+    # 会说出「你一共提到 8 台」——用户点的是 9 个，一对就发现是假话。
     return (
-        f"\n你一共提到 {total} 台车，上面放在一起看的是前 {len(resolved)} 台；"
-        f"没有放进来的有 {tail}，可以单独问我。"
+        f"\n下面放在一起看的是我认出的 {len(resolved)} 台车；"
+        f"没有放进来的有{tail}，可以单独问我。"
     )
 
 
@@ -774,7 +777,7 @@ def build_series_qa_answer(
 
     # 逐项对比（双方都有数据的量纲）
     # 尺寸必须走 `size_line`（众数+覆盖率）而不是 `heads_map` 的首值，否则
-    # 上面那一块写「5050*1960*1505 mm（在售 6 款中 4 款为此尺寸）」、
+    # 上面那一块写「5050*1960*1505 mm（6 款有尺寸数据，其中 4 款为此尺寸）」、
     # 下面这行写「4995*1910*1495 mm」——**同一条回答里自相矛盾**。
     heads = [
         head_with_size(size_map.get(series.id), heads_map.get(series.id, {}))
@@ -784,7 +787,7 @@ def build_series_qa_answer(
     for label in HEADLINE_ORDER:
         values = [h.get(label) for h in heads]
         # 2026-10-05：此前是 `values[0] vs values[1]`——三个及以上车系时
-        # **后面的被静默丢掉**（`resolve_series` 明确最多 4 个）。
+        # **后面的被静默丢掉**（`resolve_series` 上限是 `RESOLVE_SERIES_LIMIT`，当前 6）。
         # 用户问「汉、汉L、秦PLUS 怎么选」，对比行里只有秦PLUS vs 汉，汉L 消失，
         # 而上文三个车系块都在，用户看不出第三个没被比。
         if all(values):
