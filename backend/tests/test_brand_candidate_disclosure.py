@@ -1,22 +1,24 @@
 """裸品牌作为比较候选时的反问：什么该报、什么**绝对不能**报（2026-10-06）。
 
-用户拍板的口径只有一条：**品牌词紧邻比较连接词（和/跟/与/及/或/对比）时才算
-「用户点名了一个品牌」**。其余一律不报——少一句提示的代价，远小于对着问奔驰
-AMG 的用户推销 MG4/MG5/MG6。
+用户拍板的口径只有一条：**按比较连接词切段、剥掉每段末尾的问句尾巴之后，品牌词与
+整段完全相等**。其余一律不报——少一句提示的代价，远小于对着问奔驰 AMG 的用户推销
+MG4/MG5/MG6。
 
-这个文件是四轮审查的产物。四轮都在**同一个问题**上出新洞，于是口径从
-「重建用户写了什么、建区间、看品牌词是否落在所有区间之外」换成现在这条
-「肯定证据」。换的根因写在 `app/catalog/brands.py::brand_candidates_in_message`
-的 docstring 里，这里只记**这个口径在真实库上守不守得住**。
+这个文件是五轮审查的产物。前四轮都在**同一个问题**上出新洞，第五轮换掉了整个抽象：
+从「重建用户写了什么、建区间、看品牌词是否落在所有区间之外」换成现在的
+「遮蔽 + 切段 + 剥尾巴 + 整段相等」。换的根因写在
+`app/catalog/brands.py::brand_candidates_in_message` 的 docstring 里，这里只记
+**这个口径在真实库上守不守得住**。
 
 关键点，缺一个都不算修好：
 
 1. **追加，不是替换**。第一版做成替换，朗逸的 807 字参数卡被整段丢掉只剩一句
    反问——用户点名两台，一台数据也没了。所以每条正例都断言「已答对的那台车仍在」。
-2. **三处调用点都要追加**。单车系 / 双车系 / ≥3 车系。早先双车系那处的三行缩进
-   在 `if same_class: ... else: ...` 的 `else` 里，同级时整段被跳过，而现有种子
-   全部 `positioning=None` → `same_class` 恒假 → 那条分支走不到。
-3. **不该报的一串，一个都不能报**。见 `test_*_is_not_reported`。
+2. **三处调用点都要追加**。单车系 / 双车系 / ≥3 车系。
+3. **切段字符不能劈进品牌词**。「比亚迪」含「比」（「对比」贡献的单字）——不遮蔽的话
+   它被切成 `['比','亚迪','汉']`，库里车系最多的品牌之一（34 款在售）**永久不可达**。
+   见 `test_brand_name_containing_link_char_stays_reachable`。
+4. **不该报的一串，一个都不能报**。见 `test_must_not_report`。
 """
 from __future__ import annotations
 
@@ -79,14 +81,59 @@ def test_single_series_appends_brand_ask(db_session: Session) -> None:
     assert "朗逸" in text, f"查得到的那台车不能被这段反问吞掉。实际末尾：{text[-160:]}"
 
 
-def test_second_candidate_brand_is_detected_by_left_neighbour(db_session: Session) -> None:
-    """品牌排在**第二个**时靠左边那个连接词认定：「汉和大众哪个好」。
+def test_second_candidate_brand_is_detected_by_own_segment(db_session: Session) -> None:
+    """品牌排在**第二个**时，它自己独占一段：「朗逸和传祺哪个好」。
 
-    只看右边会漏掉这一类——问句的末尾通常跟着「哪个好」，右边不是连接词。
+    问句末尾通常跟着「哪个好」，所以第二个候选判不出来不是因为「右边不是连接词」，
+    而是因为整段里混着别的东西——整段相等要求它单独成段。
     """
     _seed(db_session)
     _, text = _ask(db_session, "朗逸和传祺哪个好")
     assert "款在售车" in text, f"第二个候选的品牌也该反问。实际末尾：{text[-160:]}"
+
+
+def test_brand_name_containing_link_char_stays_reachable(db_session: Session) -> None:
+    """品牌名里含切段字符时，**必须仍然可达**。
+
+    真实库：「比亚迪」含「比」——「对比」贡献了两个单字切段字符。不遮蔽的话
+    「比亚迪和汉哪个好」被切成 `['比', '亚迪', '汉']`，**库里车系最多的品牌之一
+    （34 款在售）永久不可达**，而且没有任何测试或文档提到它。
+
+    构造同构数据：品牌「星比」含切段字「比」，车系挂在它名下。
+    """
+    src = make_source(db_session, name="汽车之家")
+    vw = make_brand(db_session, name="大众", source=src)
+    holder = make_brand(db_session, name="远望", source=src)
+    weird = make_brand(db_session, name="星比", source=src)   # 品牌名含切段字「比」
+    s = make_series(db_session, weird, name="星比007", source=src, positioning="轿车")
+    langyi = make_series(db_session, vw, name="朗逸", source=src, positioning="紧凑型车")
+    for x in (s, langyi):
+        year = make_year(db_session, x)
+        make_variant(db_session, x, year, config_version="旗舰", energy_type="BEV",
+                     price_cny="150000", source=src)
+    db_session.commit()
+
+    assert brand_candidates_in_message(db_session, "星比和朗逸哪个好") == {"星比"}
+    _, text = _ask(db_session, "星比和朗逸哪个好")
+    assert "款在售车" in text, f"品牌名含切段字时不该失能。实际末尾：{text[-160:]}"
+    assert "朗逸" in text
+    del holder
+
+
+def test_comma_separated_candidates_are_detected(db_session: Session) -> None:
+    """逗号也是切段字符：「预算20万，大众和汉哪个好」这类写法非常常见。
+
+    此前刻意把「，」排除在切段字符之外，理由写的是「汉的油耗怎么样，理想一点吗」
+    里的「理想」会误报——那是推演没实测。实测：加逗号后该句切出
+    `['汉的油耗怎么样', '理想一点吗']`，剥掉「吗」是「理想一点」≠「理想」，不报。
+    见 `test_must_not_report` 里那条反例。
+    """
+    _seed(db_session)
+    # 用传祺而不是大众：朗逸本身就是大众的车，会被 resolved_brands 相减挡掉
+    for msg in ("预算20万，传祺和朗逸哪个好", "朗逸，传祺哪个好", "朗逸,传祺哪个好"):
+        _, text = _ask(db_session, msg)
+        assert "款在售车" in text, f"「{msg}」该反问却漏了。实际末尾：{text[-160:]}"
+        assert "朗逸" in text
 
 
 @pytest.mark.parametrize(

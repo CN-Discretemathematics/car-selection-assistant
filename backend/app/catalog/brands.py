@@ -93,14 +93,15 @@ def brand_entries(db: Session) -> tuple[tuple[str, int, str], ...]:
     return _load_entries(db)
 
 
-#: 品牌词**独立作为一个比较候选**时的邻接字：归一化后紧邻品牌词左边或右边的那一个字。
-#: 取自 `answer_contract._NAME_SHAPE_RE` 已有的连接/语气字集合（那里是拿它们**排除**，
-#: 这里反过来拿它们**认定**），只留真正表示「两个对象并列」的那几个。
+#: 切段用的字符：归一化消息里，这些字把句子分成「几个比较候选」。
 #:
-#: ⚠️ 刻意**不含**「，」：`normalize_name` 剥掉「、」但保留「，」，
-#: 而「汉的油耗怎么样，理想一点吗」里的「理想」前面正是「，」——把它当连接词，
-#: 就会对着一个问油耗的用户说「理想是品牌，库里有 5 款」。
-COMPARISON_LINK_CHARS = frozenset("和跟与及或对比")
+#: ⚠️ 2026-10-06 更正过一次方向。此前刻意**不含**「，」，理由写的是
+#: 「汉的油耗怎么样，理想一点吗」里的「理想」前面正是「，」，会误报成品牌。
+#: 那是**推演，没实测**。实测：加上逗号后该句切出 `['汉的油耗怎么样', '理想一点吗']`，
+#: 剥掉尾巴「吗」后是「理想一点」≠「理想」，**那条误报根本不会发生**；
+#: 而代价是实打实的——「预算20万，大众和汉哪个好」「汉，大众哪个好」这类
+#: 非常自然的写法在原方案下 **100% 漏报**。于是加回逗号（全半角都加）。
+COMPARISON_LINK_CHARS = frozenset("和跟与及或对比，,")
 
 #: 问句尾巴。从每段**末尾**剥掉，直到剥不动为止。
 #: 这份清单**不需要完备**——缺一项的后果是「本该报却没报」（漏报），而不是误报。
@@ -116,6 +117,13 @@ def brand_candidates_in_message(db: Session, message: str) -> set[str]:
 
     判据只有一条：**按比较连接词切段、剥掉每段末尾的问句尾巴之后，品牌词与整段
     完全相等**。
+
+    ## 三步，缺一不可
+
+    1. **遮蔽品牌词**（见函数体）。不遮蔽的话切段字符会劈进品牌词：
+       「比亚迪」含「比」，「比亚迪和汉哪个好」被切成 `['比','亚迪','汉']`。
+    2. 按比较连接词切段（全半角逗号也算）。
+    3. 剥掉每段末尾的问句尾巴，要求品牌词与整段**完全相等**。
 
     ## 为什么不是「重建用户写了什么再建区间」
 
@@ -146,25 +154,45 @@ def brand_candidates_in_message(db: Session, message: str) -> set[str]:
         「汉和大众哪个好」            → 段 [汉, 大众]        → 大众 ✅
         「北京现代ix35和北京哪个好」   → 段 [北京现代ix35, 北京] → 北京 ✅
         「朗逸和北京现代ix35哪个好」   → 段 [朗逸, 北京现代ix35] → 不报 ✅
-        「五菱和缤果Pro哪个好」        → 段 [五菱, 缤果Pro]    → 五菱（由调用方相减挡掉）
         「MG和汉哪个好」              → 段 [MG, 汉]          → MG ✅
-        「AITO问界和汉哪个好」         → 段 [AITO问界, 汉]     → 问界 ✅（AITO问界 是它的别名）
+        「比亚迪和汉哪个好」          → 段 [比亚迪, 汉]      → 比亚迪 ✅（不遮蔽会被切成 [比, 亚迪, 汉]）
+        「预算20万，大众和汉哪个好」    → 段 [预算20万, 大众, 汉] → 大众 ✅（逗号也是切段字）
+        「五菱和缤果Pro哪个好」        → 段 [五菱, 缤果Pro]    → 五菱（由调用方相减挡掉）
+        「AITO问界和汉哪个好」         → 段 [AITO问界, 汉]     → **命中「AITO 问界」这个空品牌行**，
+                                              而它旗下 0 款在售 → 最终不报（见调用方「0 款不反问」）
         「奔驰C级AMG值得买吗」         → 段 [奔驰C级AMG]       → 不报 ✅
         「C级AMG值得买吗」             → 段 [C级AMG]           → 不报 ✅
         「AMG GT值得买吗」            → 段 [AMG GT]          → 不报 ✅
         「2025款 熊猫mini 210km 元气熊值得买吗」→ 段 [2025款 熊猫mini…] → 不报 ✅
         「朗逸适合大众家用吗」          → 段 [朗逸适合大众家用]   → 不报 ✅
-        「汉的油耗怎么样，理想一点吗」    → 段 [汉的油耗…]      → 不报 ✅
+        「汉的油耗怎么样，理想一点吗」    → 段 [汉的油耗怎么样, 理想一点吗] → 剥「吗」后是
+                                              「理想一点」≠「理想」→ 不报 ✅
     """
     normalized = normalize_name(message)
     if not normalized:
         return set()
+    entries = _load_entries(db)
     labels: dict[str, str] = {}
-    for name, _brand_id, label in _load_entries(db):
+    for name, _brand_id, label in entries:
         labels.setdefault(name, label)
 
+    # **先遮蔽品牌词，再切段。** 这是本函数最容易漏掉的一步：
+    # 切段字符会劈进品牌词里。「比亚迪」含「比」（「对比」贡献的单字），
+    # 于是「比亚迪和汉哪个好」被切成 ['比', '亚迪', '汉']——库里车系最多的品牌之一
+    # （34 款在售）**永久不可达**，而且没有任何测试或文档提到它。
+    # 遮蔽成不含切段字符的占位符，这一整类冲突就不存在了：
+    # 品牌词表与切段字符集共用字母表，而遮蔽让两者不再互相干扰。
+    # `_load_entries` 已按长度降序，长名先遮，短名不会被长名内部的碎片顶掉。
+    masked = normalized
+    marks: list[str] = []
+    for name, _brand_id, _label in entries:
+        if name in masked:
+            marks.append(name)
+            masked = masked.replace(name, f"\x00{len(marks) - 1}\x00")
+    tokens = {f"\x00{i}\x00": name for i, name in enumerate(marks)}
+
     found: set[str] = set()
-    for segment in re.split(f"[{re.escape(''.join(sorted(COMPARISON_LINK_CHARS)))}]", normalized):
+    for segment in re.split(f"[{re.escape(''.join(sorted(COMPARISON_LINK_CHARS)))}]", masked):
         seg = segment.strip()
         while seg:
             for tail in _QUESTION_TAILS:
@@ -173,8 +201,9 @@ def brand_candidates_in_message(db: Session, message: str) -> set[str]:
                     break
             else:
                 break
-        if seg and seg in labels:
-            found.add(labels[seg])
+        name = tokens.get(seg)
+        if name is not None:
+            found.add(labels[name])
     return found
 
 
