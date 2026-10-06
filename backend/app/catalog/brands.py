@@ -166,6 +166,64 @@ def resolve_brand_mentions(
     return result
 
 
+#: 品牌词后面若紧跟这些字符，说明它是**独立**出现的候选（后面接着另一台车），
+#: 而不是一个车系名的前缀。
+
+
+def brand_names_in_message(
+    db: Session,
+    message: str,
+    series_names: list[str] | None = None,
+    *,
+    require_model_suffix: bool = True,
+    exclude_owned: bool = True,
+) -> set[str]:
+    """消息里出现的**库内品牌名**（只判「出现」，不判是否构成约束）。
+
+    与 `resolve_brand_mentions` 的区别：那个要「明确约束语气」才收，返回的是
+    要写进画像的硬约束；这里只回答「用户提到了哪些我们认识的品牌」。
+
+    `require_model_suffix=True`（默认）时，**只收「品牌 + 紧跟字母数字」的写法**，
+    因为只有这种才算「点名了某品牌下的某一台车」：
+
+        「传祺M6值得买吗」→ 传祺 + `M6`  → 是点名一台车 ✅
+        「大众和汉哪个好」 → 大众 + `和`  → 只是比较候选方之一 ❌
+
+    `exclude_owned=False` 时**不做**「品牌词属于已解析车系名」的排除。
+    ⚠️ 两个开关会互相干扰，2026-10-06 的独立审查 P1-2 就是这么踩的：
+    「五菱**和**缤果Pro哪个好」里「五菱」是「五菱缤果Pro」的子串，被 `exclude_owned`
+    排除掉，于是「这个候选其实是个品牌」这条守卫**看不到它**，结果两台都在库
+    （五菱 47 款）却说「其余库里没有收录」。要判「品牌是否被当成一辆车点名」，
+    必须**关掉**这个排除；真正的位置判断交给
+    的车系名」来决定，避免把 `大众朗逸` 里的「大众」也算成一辆车。
+    """
+    normalized = normalize_name(message)
+    if not normalized:
+        return set()
+    owned = {normalize_name(n) for n in (series_names or []) if n}
+    found: set[str] = set()
+    for name, _brand_id, label in _load_entries(db):
+        if name not in normalized:
+            continue
+        if exclude_owned and any(name in s for s in owned):
+            continue  # 该品牌词属于被点名的车系名本身
+        # 2026-10-06（独立审查 P0-1）：只在品牌词**紧跟**一个字母/数字串时才算
+        # 「点名了某品牌下的某台车」。
+        #
+        # 「你提到的品牌在消息里出现过」≠「你点名了那个品牌的一台车」：
+        #     「传祺M6值得买吗」→ 传祺 + `M6`  → 是点名一台车 ✅
+        #     「大众和汉哪个好」 → 大众 + `和`  → 只是比较候选方之一 ❌
+        # 少了这条，紧随其后的一轮修复把 **39 个在库品牌**（奔驰 56 款、
+        # 大众 29 款、丰田 27 款…）判成「库里没有车系资料」并替换掉整段回答——
+        # 比它要修的缺陷更严重，且更难被察觉（用户只会以为这车没数据）。
+        if require_model_suffix:
+            tail = normalized.split(name, 1)[1]
+            if not tail or not (tail[0].isascii() and tail[0].isalnum()):
+                continue  # 品牌词独立出现（后面跟的是「和」「的」等），不是车型前缀
+        found.add(label)
+    return found
+
+
 def catalog_overview(
     db: Session,
     *,

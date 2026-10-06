@@ -549,6 +549,81 @@ def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
     return "\n".join(parts)
 
 
+def _brand_disclosure(
+    db: Session,
+    resolved: list[tuple[VehicleSeries, Brand | None]],
+    message: str,
+) -> str:
+    """比较候选里出现**品牌**时的一段补充说明（无则空串）。
+
+    2026-10-06 用户拍板方案 B：「大众和汉哪个好」——大众有 29 款在售，它不是一款车。
+    此前系统答「我只查到 1 台（汉）」，把汉的参数也一起藏起来；再往前一版答
+    「大众库里没有收录」，那是**假话**。两次都错在把提示当成结论。
+
+    这里之所以能稳定判准，是因为**查库**：`brands` 与 `vehicle_series` 是两张表。
+    四轮审查反复翻车的那类启发式（品牌前缀判断、子串排除、连接词计数）这里一个
+    都不需要。
+
+    返回的是**补充**，不是替代——调用方必须把它追加在正常回答**之后**。
+    """
+    from app.catalog.brands import brand_names_in_message
+
+    if not resolved:
+        return ""
+    resolved_brands = {brand.name for _s, brand in resolved if brand is not None}
+    owned = [
+        name
+        for series, brand in resolved
+        for name in (series.name, f"{brand.name}{series.name}" if brand else series.name)
+    ]
+    brand_only = brand_names_in_message(
+        db, message, owned, require_model_suffix=False, exclude_owned=False
+    ) - resolved_brands
+    if not brand_only:
+        return ""
+    detail = "；".join(
+        f"「{label}」是品牌，库里有 {_brand_series_count(db, label)} 款在售车"
+        for label in sorted(brand_only)
+    )
+    samples = _sample_series_names(db, sorted(brand_only))
+    return (
+        f"\n{detail}——它不是一款车。想比哪一款？把车系名给我"
+        f"（比如{'、'.join(samples)}），我就能比。"
+    )
+
+
+def _brand_series_count(db: Session, brand_name: str) -> int:
+    """某品牌在售车系数（查库，不用字符串猜）。"""
+    from sqlalchemy import func, select
+
+    from app.common.models import Brand, VehicleSeries
+
+    return int(
+        db.execute(
+            select(func.count(VehicleSeries.id))
+            .join(Brand, VehicleSeries.brand_id == Brand.id)
+            .where(Brand.name == brand_name, VehicleSeries.active_status == "active")
+        ).scalar()
+        or 0
+    )
+
+
+def _sample_series_names(db: Session, brand_names: list[str], limit: int = 3) -> list[str]:
+    """给反问配几个可点的车系样例，让用户知道「说车系名」具体指什么。"""
+    from sqlalchemy import select
+
+    from app.common.models import Brand, VehicleSeries
+
+    rows = db.execute(
+        select(VehicleSeries.name)
+        .join(Brand, VehicleSeries.brand_id == Brand.id)
+        .where(Brand.name.in_(brand_names), VehicleSeries.active_status == "active")
+        .order_by(VehicleSeries.id)
+        .limit(limit)
+    ).all()
+    return [r[0] for r in rows] or ["朗逸"]
+
+
 def build_series_qa_answer(
     db: Session,
     resolved: list[tuple[VehicleSeries, Brand | None]],
@@ -578,6 +653,11 @@ def build_series_qa_answer(
         key_note = asked_missing_param_note(facts, message, missing_dims)
         if key_note:
             parts.append("你问到的" + key_note)
+        # 比较候选里出现品牌时的补充（2026-10-06 方案 B）。**追加**而非替换——
+        # 替换会把已答对的那台车的参数整段丢掉。
+        brand_note = _brand_disclosure(db, resolved, message)
+        if brand_note:
+            parts.append(brand_note.strip())
         parts.append(footer)
         return "\n".join(parts)
 
@@ -649,6 +729,9 @@ def build_series_qa_answer(
     # 而且只依据实际算出的结论选择措辞；算不出（价格未披露）时**什么都不说**。
     if len(resolved) >= 3:
         blocks.append(_summary_for_many(db, resolved))
+        brand_note = _brand_disclosure(db, resolved, message)
+        if brand_note:
+            blocks.append(brand_note)
         blocks.append("\n" + footer)
         return "\n".join(blocks)
 
@@ -668,6 +751,9 @@ def build_series_qa_answer(
             + price_verdict + "，直接比「谁更好」意义不大；"
             "更合适的做法是按预算与用途缩小范围——告诉我预算和主要用途，我可以帮你筛真正同档的候选。"
         )
+        brand_note = _brand_disclosure(db, resolved, message)
+        if brand_note:
+            blocks.append(brand_note)
     blocks.append("\n" + footer)
     return "\n".join(blocks)
 
