@@ -257,20 +257,59 @@ def test_brand_word_appearing_both_inside_and_outside_is_disclosed(db_session: S
     **而全量测试照样全绿**。这条用例就是防这个的。
     """
     src = make_source(db_session, name="汽车之家")
-    bj_modern = make_brand(db_session, name="北京现代", source=src)
+    modern = make_brand(db_session, name="现代", source=src)
     bj = make_brand(db_session, name="北京", source=src)
-    s = make_series(db_session, bj_modern, name="现代ix35", source=src, positioning="紧凑型SUV")
+    # 真实库里就是这两个品牌行：车系名本身带「北京现代」，品牌行却叫「现代」，
+    # 另有独立的「北京」品牌行挂着北京越野系列。夹具必须照此构造——早先写成
+    # 「品牌行=北京现代 + 车系名=现代ix35」，于是「北京现代现代ix35」这个拼接项
+    # 天然含「北京」，子串排除踩的是它，不是生产里那个真实字面「北京现代ix35」。
+    # 后果：把逐次扫描改成只看第一次出现，全套测试照样全绿（第三次审查变异 F）。
+    make_series(db_session, modern, name="北京现代ix35", source=src, positioning="紧凑型SUV")
     make_series(db_session, bj, name="北京越野BJ40", source=src, positioning="中型SUV")
     db_session.commit()
 
     resolved, text = _ask(db_session, "北京现代ix35和北京哪个好")
-    assert len(resolved) == 1 and resolved[0][0].name == "现代ix35", (
+    assert len(resolved) == 1 and resolved[0][0].name == "北京现代ix35", (
         f"前提是只解析出北京现代ix35，实际 {[s.name for s, _ in resolved]}"
     )
     assert "款在售车" in text and "想比哪一款" in text, (
         f"「北京」在「北京现代ix35」之外独立出现了一次，必须反问。实际末尾：{text[-200:]}"
     )
-    assert s.name in text or "ix35" in text, "已答对的那台车不能被吞掉"
+    assert "ix35" in text, "已答对的那台车不能被吞掉"
+
+
+def test_bare_model_designation_is_not_read_as_a_brand(db_session: Session):
+    """用户写**裸型号**而不是库里完整车系名时，不该被判成在问品牌。
+
+    真实库（2026-10-06 第三次审查实测）：19 个奔驰 AMG 车系、95 种问法中招。
+    根因是位置判定拿库里那个完整名去对齐用户写的字面——
+    库名「奔驰C级AMG」，用户写「C级AMG」，一个区间都建不出来，
+    品牌词「MG」就被当成用户独立点名的品牌，回答末尾多出
+    「MG 是品牌，库里有 7 款…（比如MG4、MG5、MG6）」。
+
+    这个问题此前被「MG 算出来 0 款所以不反问」**恰好挡住**；把 MG 的计数修对之后
+    挡板没了，缺陷第一次露出来。修法是 `owned` 里额外登记「去掉品牌前缀的短名」。
+    """
+    src = make_source(db_session, name="汽车之家")
+    benz = make_brand(db_session, name="奔驰", source=src)
+    s = make_series(db_session, benz, name="奔驰C级AMG", source=src, positioning="紧凑型车")
+    # 「MG」行在真实库是空的、车系挂在「名爵」下；这里照搬，好让品牌反问真的会被触发
+    make_brand(db_session, name="MG", source=src)
+    make_series(db_session, make_brand(db_session, name="名爵", source=src),
+                name="MG4", source=src, positioning="紧凑型车")
+    year = make_year(db_session, s)
+    make_variant(db_session, s, year, config_version="旗舰", energy_type="BEV",
+                 price_cny="500000", source=src)
+    db_session.commit()
+
+    for msg in ("C级AMG值得买吗", "奔驰C级AMG值得买吗"):
+        resolved, text = _ask(db_session, msg)
+        assert len(resolved) == 1 and resolved[0][0].name == "奔驰C级AMG", (
+            f"前提是解析出奔驰C级AMG，实际（{msg}）{[x.name for x, _ in resolved]}"
+        )
+        assert "想比哪一款" not in text, (
+            f"「{msg}」不该出现品牌反问——用户问的是一台奔驰。实际末尾：{text[-200:]}"
+        )
 
 
 def test_phantom_brand_row_falls_back_to_series_name_prefix(db_session: Session):

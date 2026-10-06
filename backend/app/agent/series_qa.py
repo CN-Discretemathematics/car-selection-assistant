@@ -579,11 +579,24 @@ def _brand_disclosure(
     if not resolved:
         return ""
     resolved_brands = {brand.name for _s, brand in resolved if brand is not None}
-    owned = [
-        name
-        for series, brand in resolved
-        for name in (series.name, f"{brand.name}{series.name}" if brand else series.name)
-    ]
+    owned: list[str] = []
+    for series, brand in resolved:
+        owned.append(series.name)
+        if brand is None:
+            continue
+        owned.append(f"{brand.name}{series.name}")
+        # **裸型号**也要登记。用户问车时写的是「C级AMG」「GLB AMG」，不是库里
+        # 那个「奔驰C级AMG」；只登记完整名的话字面对不上，一个区间都建不出来，
+        # 品牌词「MG」就被当成用户独立点名的品牌——2026-10-06 第三次审查实测
+        # 19 个奔驰 AMG 车系、95 种问法中招，回答末尾多出
+        # 「MG 是品牌，库里有 7 款…（比如MG4、MG5、MG6）」。
+        # 判据与 `series_index._load_name_entries` 一致：车系名以品牌名开头时额外
+        # 登记去掉品牌名的短名。纯数字短名不进（领克20→20，中文购车语里裸数字
+        # 几乎总是预算或年份，见该处注释）。
+        if series.name.startswith(brand.name) and len(series.name) > len(brand.name):
+            short = series.name[len(brand.name):]
+            if short and not short.isdigit():
+                owned.append(short)
     # `brand_names_in_message` 按**位置**判：品牌词落在已解析车系名的字面范围内
     # （「AMG GT」里的「MG」、「宏光MINIEV」里的「MINI」）不算用户在问品牌。
     brand_only = brand_names_in_message(db, message, owned) - resolved_brands
@@ -592,16 +605,31 @@ def _brand_disclosure(
     # 库里 0 款在售的品牌**不反问**（用户 2026-10-06 拍板）。说「库里有 0 款在售车」
     # 再附几个样例，本身就是一句自相矛盾的话——MG / 长安启源 / 理想汽车都会走到这句，
     # 而它们触发的根因是品牌词嵌在别的品牌车系名里（上一段已挡掉），这里兜第二层。
-    counts = {label: _brand_series_count(db, label) for label in sorted(brand_only)}
-    brand_only = [label for label, c in counts.items() if c > 0]
+    # 一次取数，计数与样例共用（此前两者各查一遍）。
+    # 库里 0 款在售的品牌**不反问**（用户 2026-10-06 拍板）。说「库里有 0 款在售车」
+    # 再附几个样例，本身就是一句自相矛盾的话。
+    series_by_brand = {label: _brand_active_series(db, label) for label in sorted(brand_only)}
+    brand_only = [label for label, names in series_by_brand.items() if names]
     if not brand_only:
         return ""
     detail = "；".join(
-        f"「{label}」是品牌，库里有 {counts[label]} 款在售车" for label in brand_only
+        f"「{label}」是品牌，库里有 {len(series_by_brand[label])} 款在售车" for label in brand_only
     )
-    samples = _sample_series_names(db, brand_only)
+    samples: list[str] = []
+    for label in brand_only:
+        for series_name in series_by_brand[label]:
+            if series_name not in samples:
+                samples.append(series_name)
+            if len(samples) >= _BRAND_SAMPLE_LIMIT:
+                break
+        if len(samples) >= _BRAND_SAMPLE_LIMIT:
+            break
     hint = f"（比如{'、'.join(samples)}）" if samples else ""
     return f"\n{detail}——它不是一款车。想比哪一款？把车系名给我{hint}，我就能比。"
+
+
+#: 品牌反问里最多给几个可点的车系样例。
+_BRAND_SAMPLE_LIMIT = 3
 
 
 def _brand_active_series(db: Session, brand_name: str) -> list[str]:
@@ -620,6 +648,10 @@ def _brand_active_series(db: Session, brand_name: str) -> list[str]:
 
     兜底只对**按 brand_id 算出来是 0** 的品牌生效，所以「长安」仍报 26 款，
     不会把启源那 8 款重复算进去。
+
+    兜底**还要求命中的车系全部挂在同一个品牌行下**。真实库上 MG/名爵、长安启源/启源
+    都满足（同一家公司的两条品牌行）。这一条是防御性的：万一将来出现一个空品牌行 A，
+    而**别的厂商** B 恰好有个车系名以 A 开头，不该把 B 的车算成 A 的。
     """
     from sqlalchemy import select
 
@@ -636,40 +668,20 @@ def _brand_active_series(db: Session, brand_name: str) -> list[str]:
     head = normalize_name(brand_name)
     if not head:
         return []
+    # 归一化后判定，SQL 只做粗筛。注意 SQLite 的 LIKE 对 ASCII 不区分大小写、
+    # 生产 PostgreSQL 区分，所以真正的判据是下面这行 startswith，不是 SQL。
     cands = db.execute(
-        select(VehicleSeries.name)
+        select(VehicleSeries.name, VehicleSeries.brand_id)
         .where(
             VehicleSeries.active_status == "active",
             VehicleSeries.name.like(f"{brand_name}%"),
         )
         .order_by(VehicleSeries.id)
     ).all()
-    return [r[0] for r in cands if normalize_name(r[0]).startswith(head)]
-
-
-def _brand_series_count(db: Session, brand_name: str) -> int:
-    """某品牌在售车系数（查库，不用字符串猜）。见 `_brand_active_series` 的兜底说明。"""
-    return len(_brand_active_series(db, brand_name))
-
-
-def _sample_series_names(db: Session, brand_names: list[str], limit: int = 3) -> list[str]:
-    """给反问配几个可点的车系样例，让用户知道「说车系名」具体指什么。
-
-    与计数同源（`_brand_active_series`），否则会出现「库里有 7 款在售车」却
-    一个样例都列不出来的句子。
-
-    查不到就返回空列表——调用方据此省掉「比如…」那半句。此前这里兜底硬编码
-    「朗逸」，于是「库里有 **0 款**在售车……（比如**朗逸**）」这种自相矛盾的话
-    会被原样说给用户。
-    """
-    out: list[str] = []
-    for name in brand_names:
-        for series_name in _brand_active_series(db, name):
-            if series_name not in out:
-                out.append(series_name)
-            if len(out) >= limit:
-                return out
-    return out
+    hits = [(name, bid) for name, bid in cands if normalize_name(name).startswith(head)]
+    if len({bid for _name, bid in hits}) > 1:
+        return []  # 命中车系分属不同品牌行 → 不能算这个品牌的
+    return [name for name, _bid in hits]
 
 
 def build_series_qa_answer(
