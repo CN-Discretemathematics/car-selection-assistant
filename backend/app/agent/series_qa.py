@@ -46,11 +46,6 @@ _ENERGY_LABEL = {"BEV": "纯电", "PHEV": "插混", "EREV": "增程", "HEV": "�
 _SERIES_QA_RE = re.compile(
     r"(优点|优势|亮点|卖点|缺点|怎么样|好不好|值得|值不值|性价比|推荐吗|对比|相比|比较|"
     r"区别|差别|哪个好|怎么选|选哪个|选哪款|选什么|介绍|了解|讲下|说下|看看|"
-    # 2026-10-06（真实语料实测）：真实用户的主句式是「X和Y**哪个更**好/更适合/更划算」，
-    # 而表里只有「哪个好」——「哪个更好」不是它的子串，于是这类问法 `should_answer`
-    # 返回 False，**明明解析出了车系却掉进推荐链去追问预算**。
-    # 实拍：「大众朗逸和明锐哪个更好」→ 只解析出朗逸 → 答「可以告诉我你的预算吗？」。
-    r"更(好|强|划算|合适|适合|便宜|贵|值得)|"
     r"想买|准备买|打算买|就要|关注|看中|"
     r"多少|多少钱|多大|多长|几升|几款|有没有|有没|带不带|带吗|配不配|配备|配了|支持吗|支持不|"
     r"价格|指导价|配置|参数|"
@@ -554,138 +549,6 @@ def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
     return "\n".join(parts)
 
 
-def _absent_series_note(
-    db: Session,
-    resolved: list[tuple[VehicleSeries, Brand | None]],
-    message: str,
-) -> str | None:
-    """用户点名的车库里没有 → 必须明说，**绝不用名字相近的另一台顶替**。
-
-    2026-10-06 实测（真实语料，2026-10-05 采自懂车帝「提问」帖与汽车之家问答区）：
-
-        用户：传祺M6值得买吗?
-        库里：没有传祺M6（传祺有 ES9 / E8 / 影豹 / GS3 / GS4 / GS8）
-        实际：把「M6」命中到 **问界M6**，输出问界 M6 的尺寸/轴距/动力/续航/油耗
-
-    数据全是真的，只是车不是用户问的那台。**这比崩溃更坏**——崩溃用户会重试，
-    自信的错答案用户会照着买。
-
-    判据是**品牌对不上**：消息里出现了库内品牌 A，而解析出的车系都属于品牌 B，
-    那么 A 名下的那台车多半不存在。与其猜它该是什么（要靠别名词典，且必然不全），
-    不如如实说「我们库里没有」。这里不需要知道传祺M6 长什么样。
-
-    第二条：点名多台只查到一部分时也要说。「大众朗逸和明锐哪个更好」——明锐不在
-    库里，不能只答朗逸就让用户以为看全了。
-    """
-    from app.catalog.brands import brand_names_in_message
-
-    if not resolved:
-        return None
-    resolved_brands = {brand.name for _s, brand in resolved if brand is not None}
-    # ⚠️ 排除用的名字与**展示用的名字必须是两个列表**（2026-10-06 独立审查 P1-1 实测）。
-    # 上一版把「品牌+车系」组合形式塞进同一个 `series_names`，而该列表同时被拿去
-    # 拼用户可见文案，于是库里 **541/908（60%）以品牌名开头**的车系被拼成重影：
-    #     真实库答：…（奔驰GLC、奔驰奔驰GLC、宝马X3、宝马宝马X3）
-    # 排除只需要知道「哪些品牌词属于已解析车系」，展示则必须是干净的车系名。
-    owned_names = [
-        name
-        for series, brand in resolved
-        for name in (series.name, f"{brand.name}{series.name}" if brand else series.name)
-    ]
-    display_names = [series.name for series, _b in resolved]
-    mentioned = brand_names_in_message(db, message, series_names=owned_names)
-
-    if mentioned and not (mentioned & resolved_brands):
-        names = "、".join(sorted(mentioned))
-        got = "、".join(sorted(resolved_brands))
-        return (
-            f"你提到的「{names}」，我们库里目前**没有**对应的车系资料"
-            f"（库里能查到的是 {got}），所以先不拿别的车来代替回答——"
-            "换一台你说得出来的在售车型，或者把车系全名给我，我再查。"
-        )
-
-    # 点名多台、只查到一部分：用对比连接词估一个**下界**，不足就披露（不猜缺哪台）。
-    # ⚠️ 但**必须先有显式的比较/列举信号**，否则会把「油耗**和**续航」这种
-    # 属性并列当成两台车（2026-10-06 独立审查 P1-1 实测）：
-    #     「汉的油耗和续航分别是多少」→ 曾答「你问的 2 台里只查到 1 台」，
-    #     **一个参数都不给**。中文里「和」绝大多数时候连的是属性，不是车。
-    if not _has_comparison_signal(message):
-        return None
-    # ⚠️ 2026-10-06 第三轮审查后定下的**单向默认**：宁可多披露，绝不静默漏答。
-    #
-    # 这里原先还有一个守卫——「若候选里出现的是品牌，就别披露」，用来避免把
-    # 「五菱和五菱缤果」说成缺车。但它制造了**更糟的错误**：库里 59.6% 的车系名
-    # 本身就以品牌名开头（541/908），于是「五菱之光**和**五菱祥运」这类句式被
-    # 静默吞掉——用户问两台、系统只答一台还一声不吭。**已删。**
-    #
-    # 代价是「五菱和五菱缤果」会多一句提示。但那是**多一句话**，
-    # 而静默漏答是**骗人**——这个项目最该避免的失败模式。
-    # 文案因此只陈述**我做了什么**（永远为真），不断言目录里没有：
-    #   旧：…其余**库里没有收录**        ← 对目录的断言，可能为假
-    #   新：…你提到的另外 1 台我没找到     ← 对我自己的行为陈述，必然为真
-    if not _has_comparison_signal(message):
-        return None
-    implied = _implied_candidate_count(message)
-    if implied > len(resolved):
-        got_names = "、".join(display_names)
-        missing = implied - len(resolved)
-        return (
-            f"你一共提到 {implied} 台，我只查到 {len(resolved)} 台（{got_names}）；"
-            f"另外 {missing} 台我没能在库里找到，所以下面只列查得到的这部分"
-            "——不是全部对比结果。"
-        )
-    return None
-
-
-#: 显式的**比较/列举**信号。没有它们就不要用连接词去猜「提到了几台车」——
-#: 「油耗和续航」里的「和」连的是属性。命中任何一个即认为用户在并列候选。
-#:
-#: `哪个` 必须带**后缀**才算：「油耗和续航**哪个重要**」是属性比较，
-#: 「朗逸和明锐**哪个好**」才是选车（2026-10-06 实测两者都会命中光秃秃的「哪个」）。
-_COMPARISON_SIGNALS_RE = re.compile(
-    r"(哪个(更|好|强|划算|值得|贵|合适|适合|车|款)|哪款(更|好|值得|划算|适合)|"
-    r"怎么选|如何选|选哪|对比|相比|比较|区别|差别|"
-    r"还是|或者|以及|vs|VS|、)"
-)
-
-
-#: 比较/并列句式里表示「还有下一台」的连接词。数它们是为了估出**候选台数下界**，
-#: 不做语义判断——宁可少报也不能报错数（多报会让正常的一句话平白多出一段披露）。
-#:
-#: ⚠️ 用 `findall` **整体匹配**，**不要逐项 `count()` 相加**：`或者` 含 `或`，
-#: 求和会让「买A或者B」数成 **3 台**（`或` 算 1 + `或者` 算 1 + 基数 1），
-#: 于是一个正常的两车问题**误报缺车**——披露逻辑自己的误报。
-#: 2026-10-06 自查时发现。
-#:
-#: 注：**交替项的书写顺序在计数场景下不影响结果**——`或|或者` 与 `或者|或` 对
-#: 「买A或者B」都只产生 1 个匹配。我一度以为必须「最长优先」并写进了注释，
-#: 变异测试（把 `或` 排到 `或者` 前面）打脸：17 条全绿。真正的关键是**用 findall**。
-#: 别被「最长优先」这个说法误导。
-#:
-#: 另含 `、`：中文枚举首选，实拍真实问句就是这种写法
-#: （「目前看了海豹、极氪007、小米su7」，2026-10-05 采自懂车帝提问帖）。
-#: **不含 `，`**：它在正常句子里只是停顿（「汉的续航是多少，油耗呢」），
-#: 计入会让每个逗号句都被当成并列而误报缺车——逗号的代价远大于收益。
-_CANDIDATE_CONNECTORS_RE = re.compile(r"还是|或者|以及|VS|vs|跟|和|与|或|、")
-
-
-def _has_comparison_signal(message: str) -> bool:
-    """消息里有没有**显式的比较/列举**信号（哪个/对比/还是/、…）。
-
-    没有它就不要用「和」去猜候选台数——中文里「和」绝大多数连的是属性
-    （「油耗和续航」），不是车。见 `_absent_series_note` 里的实测。
-    """
-    return bool(_COMPARISON_SIGNALS_RE.search(message))
-
-
-def _implied_candidate_count(message: str) -> int:
-    """从并列连接词估「用户提到了几台车」的下界；没有并列信号时返回 1。
-
-    必须用 `findall` 整体匹配，**不要**逐项 `count()` 求和（见上面常量处的注释）。
-    """
-    return min(len(_CANDIDATE_CONNECTORS_RE.findall(message)) + 1, 5)
-
-
 def build_series_qa_answer(
     db: Session,
     resolved: list[tuple[VehicleSeries, Brand | None]],
@@ -693,12 +556,6 @@ def build_series_qa_answer(
 ) -> str:
     """生成车系问答的确定性回答文本（所有内容来自数据库事实）。"""
     footer = "以上基于汽车之家参数配置页与官方指导价整理（动态驾驶感受、车主口碑与优惠信息不在数据范围内），具体以品牌官网为准。"
-
-    # 2026-10-06：先判「用户点名的车库里到底有没有」，有则直接说没有，
-    # **绝不落到后面的渲染**——那条路会用名字相近的另一台车编出一张自信的参数卡。
-    absent_note = _absent_series_note(db, resolved, message)
-    if absent_note:
-        return absent_note
 
     if len(resolved) == 1:
         series, brand = resolved[0]

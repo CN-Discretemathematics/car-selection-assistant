@@ -346,67 +346,6 @@ def test_pii_rules_have_digit_boundaries(log_enabled):
     assert _mask_text("电话13800138000，预算150000") == "电话***，预算150000"
 
 
-def test_disclosure_text_has_no_ghost_names(db_session: Session):
-    """P1-1 回归：排除用的名字与**展示用的名字必须是两个列表**。
-
-    上一版把「品牌+车系」组合形式塞进同一个列表，而它同时被拿去拼用户可见文案，
-    于是库里 541/908（60% 以品牌名开头）的车系被拼成「奔驰奔驰GLC」这类重影。
-    """
-    from app.agent.series_qa import build_series_qa_answer
-    from app.catalog.series_index import resolve_series
-    from tests.seed import make_brand, make_series, make_source, make_variant, make_year
-
-    src = make_source(db_session, name="汽车之家")
-    brand = make_brand(db_session, name="奔驰", source=src)
-    s1 = make_series(db_session, brand, name="奔驰GLC", body_type="suv",
-                     energy_types=("ICE",), source=src)
-    brand2 = make_brand(db_session, name="宝马", source=src)
-    s2 = make_series(db_session, brand2, name="宝马X3", body_type="suv",
-                     energy_types=("ICE",), source=src)
-    for s in (s1, s2):
-        year = make_year(db_session, s)
-        make_variant(db_session, s, year, config_version="旗舰", energy_type="ICE",
-                     price_cny="400000", source=src,
-                     facts=[("参数信息", "轴距(mm)", "2890", None, None)])
-    db_session.commit()
-
-    msg = "奔驰GLC和宝马X3哪个好"
-    resolved = resolve_series(db_session, msg)
-    text = build_series_qa_answer(db_session, resolved, msg)
-    assert "奔驰奔驰" not in text and "宝马宝马" not in text, f"披露文案出现重影车名：{text[:200]}"
-    assert "奔驰GLC" in text and "宝马X3" in text, f"应正常列出两台车：{text[:200]}"
-
-
-def test_same_brand_self_comparison_is_not_declared_missing(db_session: Session):
-    """P1-2 回归：「五菱**和**缤果Pro哪个好」两台都在库，不能说「库里没有收录」。
-
-    根因：品牌子串排除（「五菱」∈「五菱缤果Pro」）把**正要被检测的品牌藏了起来**。
-    改为按**位置**判断——品牌后面直接跟着已解析车系名 → 它是那台车的前缀（大众朗逸）；
-    后面是连接词 → 它确实被当成一辆车点名了（五菱**和**缤果Pro）。
-    """
-    from app.agent.series_qa import build_series_qa_answer
-    from app.catalog.series_index import resolve_series
-    from tests.seed import make_brand, make_series, make_source, make_variant, make_year
-
-    src = make_source(db_session, name="汽车之家")
-    brand = make_brand(db_session, name="五菱", source=src)
-    for nm in ("五菱缤果", "五菱宏光"):
-        s = make_series(db_session, brand, name=nm, body_type="hatchback",
-                        energy_types=("BEV",), source=src)
-        year = make_year(db_session, s)
-        make_variant(db_session, s, year, config_version="旗舰", energy_type="BEV",
-                     price_cny="60000", source=src,
-                     facts=[("参数信息", "CLTC纯电续航里程(km)", "410", "km", "CLTC")])
-    db_session.commit()
-
-    for msg in ("五菱和五菱缤果哪个好", "五菱缤果和五菱宏光哪个好"):
-        resolved = resolve_series(db_session, msg)
-        text = build_series_qa_answer(db_session, resolved, msg)
-        assert "库里没有收录" not in text and "没有**对应的车系资料" not in text, (
-            f"「{msg}」两台都在库却被告缺失：{text[:160]}"
-        )
-
-
 def test_multi_turn_session_logs_every_turn(log_enabled, client, db_session: Session):
     """多轮上下文型缺陷（「第2轮突然跑偏」）只有留全每一轮才查得出来。"""
     sid = client.post("/api/v1/agent/sessions").json()["session_id"]
