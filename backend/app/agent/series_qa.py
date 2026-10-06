@@ -549,6 +549,121 @@ def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
     return "\n".join(parts)
 
 
+#: 品牌反问里最多给几个可点的车系样例。
+_BRAND_SAMPLE_LIMIT = 3
+
+
+def _brand_active_series(db: Session, brand_name: str) -> list[str]:
+    """某品牌名对应的在售车系名（按车系 id 升序）。
+
+    先按 `brand_id` 精确取。**取不到时才**用「车系名以该品牌词开头」兜一次——
+    真实库里有**空的重复品牌行**：
+
+        「MG」   → 在售车系 = []            ← 空行
+        「名爵」 → 在售车系 = [MG4, MG5, MG6, MG7, MG 4X, MG ES5, MG Cyberster]
+
+    MG 与名爵是两个 `brand_id`，MG 的 7 款车全挂在名爵下。只按 `brand_id` 数，
+    「MG」算出 0 款，于是「MG 和汉哪个好」会**一个字不提 MG**——而用户明明点名了它。
+
+    兜底**额外要求命中的车系全部挂在同一个品牌行下**。真实库上 MG/名爵、
+    长安启源/启源都满足；这条限制是防御性的：万一将来出现一个空品牌行 A，而
+    **别的厂商** B 恰好有个车系名以 A 开头，不该把 B 的车算成 A 的。
+    """
+    from sqlalchemy import select
+
+    from app.common.models import Brand, VehicleSeries
+
+    rows = db.execute(
+        select(VehicleSeries.name)
+        .join(Brand, VehicleSeries.brand_id == Brand.id)
+        .where(Brand.name == brand_name, VehicleSeries.active_status == "active")
+        .order_by(VehicleSeries.id)
+    ).all()
+    if rows:
+        return [r[0] for r in rows]
+    head = normalize_name(brand_name)
+    if not head:
+        return []
+    # 归一化后判定，SQL 只做粗筛。SQLite 的 LIKE 对 ASCII 不区分大小写、
+    # 生产 PostgreSQL 区分，所以真正的判据是下面这行 startswith，不是 SQL。
+    cands = db.execute(
+        select(VehicleSeries.name, VehicleSeries.brand_id)
+        .where(
+            VehicleSeries.active_status == "active",
+            VehicleSeries.name.like(f"{brand_name}%"),
+        )
+        .order_by(VehicleSeries.id)
+    ).all()
+    hits = [(name, bid) for name, bid in cands if normalize_name(name).startswith(head)]
+    if len({bid for _name, bid in hits}) > 1:
+        return []  # 命中车系分属不同品牌行 → 不能算这个品牌的
+    return [name for name, _bid in hits]
+
+
+def _brand_disclosure(
+    db: Session,
+    resolved: list[tuple[VehicleSeries, Brand | None]],
+    message: str,
+) -> str:
+    """比较候选里出现**品牌**时的一段补充说明（无则空串）。
+
+    2026-10-06 用户拍板的方案：用户点名的比较对象其实是品牌时，别装看不见，
+    查库告诉他那个品牌有几款在售车，请他把车系名说清楚。真实库：
+
+        用户：大众和汉哪个好
+        库里：大众有 29 款在售，它不是一款车；汉在库里且参数完整
+        回法：先正常回答汉，再在**末尾追加**一段说明
+
+    两个决定性取舍（都是四轮审查逼出来的）：
+
+    1. **只处理一种情形**：品牌词与「按连接词切段、剥掉问句尾巴后的整段」**完全相等**。
+       裸型号、款型名、别名一律**不报**——少一句提示的代价，远小于对着问奔驰 GLB AMG
+       的用户推销 MG4。判定实现见 `brands.brand_candidates_in_message`，那里记了
+       为什么不能用「重建用户写了什么再建区间」那条路。
+    2. **追加，不是替代**：调用方必须把它追加在正常回答**之后**。第一版做成替换，
+       朗逸的 807 字参数卡被整段丢掉只剩一句反问，用户点名两台一台数据也没有。
+
+    三处调用点（单车系 / 双车系 / ≥3 车系）都要追加，一条都不能漏。
+    """
+    from app.catalog.brands import brand_candidates_in_message
+
+    if not resolved:
+        return ""
+    # 品牌是**已解析车系自己的**品牌 → 用户已经点名到车系了，再问一遍是废话
+    # （「大众和朗逸哪个好」：朗逸就是大众的车，反问等于把用户刚给的车型名推荐回去）
+    resolved_brands = {brand.name for _s, brand in resolved if brand is not None}
+    # 品牌词**恰好等于某个已解析车系名**时同样不报。真实库有个车系就叫「MINI」，
+    # 它恰好挂在品牌「MINI」下——那是数据巧合，代码里没有任何东西保证它。
+    # 合成库里把「MINI」车系挂到别的品牌下，问「MINI值得买吗」就会得到
+    # 「MINI 是品牌…它不是一款车」——用户只问了一台车，却被告知它不是车。
+    # 遮蔽让「车系名」和「品牌词」在文本层完全不可区分，挡住它的只有这里。
+    resolved_brands |= {series.name for series, _b in resolved}
+    candidates = sorted(brand_candidates_in_message(db, message) - resolved_brands)
+    if not candidates:
+        return ""
+    # 库里 0 款在售的品牌不反问：说「库里有 0 款在售车」再附几个样例，
+    # 本身就是一句自相矛盾的话。
+    series_by_brand = {label: _brand_active_series(db, label) for label in candidates}
+    candidates = [label for label in candidates if series_by_brand[label]]
+    if not candidates:
+        return ""
+    detail = "；".join(
+        f"「{label}」是品牌，库里有 {len(series_by_brand[label])} 款在售车"
+        for label in candidates
+    )
+    samples: list[str] = []
+    for label in candidates:
+        for series_name in series_by_brand[label]:
+            if series_name not in samples:
+                samples.append(series_name)
+            if len(samples) >= _BRAND_SAMPLE_LIMIT:
+                break
+        if len(samples) >= _BRAND_SAMPLE_LIMIT:
+            break
+    hint = f"（比如{'、'.join(samples)}）" if samples else ""
+    return f"\n{detail}——它不是一款车。想比哪一款？把车系名给我{hint}，我就能比。"
+
+
 def build_series_qa_answer(
     db: Session,
     resolved: list[tuple[VehicleSeries, Brand | None]],
@@ -578,6 +693,9 @@ def build_series_qa_answer(
         key_note = asked_missing_param_note(facts, message, missing_dims)
         if key_note:
             parts.append("你问到的" + key_note)
+        brand_note = _brand_disclosure(db, resolved, message)
+        if brand_note:
+            parts.append(brand_note.strip())
         parts.append(footer)
         return "\n".join(parts)
 
@@ -649,6 +767,9 @@ def build_series_qa_answer(
     # 而且只依据实际算出的结论选择措辞；算不出（价格未披露）时**什么都不说**。
     if len(resolved) >= 3:
         blocks.append(_summary_for_many(db, resolved))
+        brand_note = _brand_disclosure(db, resolved, message)
+        if brand_note:
+            blocks.append(brand_note)
         blocks.append("\n" + footer)
         return "\n".join(blocks)
 
@@ -668,6 +789,10 @@ def build_series_qa_answer(
             + price_verdict + "，直接比「谁更好」意义不大；"
             "更合适的做法是按预算与用途缩小范围——告诉我预算和主要用途，我可以帮你筛真正同档的候选。"
         )
+    # 与单车系、≥3 车系两处对齐：**同级/异级都要追加**。
+    brand_note = _brand_disclosure(db, resolved, message)
+    if brand_note:
+        blocks.append(brand_note)
     blocks.append("\n" + footer)
     return "\n".join(blocks)
 
