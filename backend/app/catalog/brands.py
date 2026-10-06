@@ -105,11 +105,63 @@ COMPARISON_LINK_CHARS = frozenset("和跟与及或对比，,")
 
 #: 问句尾巴。从每段**末尾**剥掉，直到剥不动为止。
 #: 这份清单**不需要完备**——缺一项的后果是「本该报却没报」（漏报），而不是误报。
-#: 方向是安全的那一侧：先按连接词切段，品牌词必须与整段**完全相等**才认。
-_QUESTION_TAILS = (
-    "值得买吗", "值不值", "能买吗", "是不是", "好不好", "怎么样", "哪个好",
-    "哪个", "好吗", "有吗", "是吗", "吗", "呢", "吧", "啊", "的", "好", "？", "?",
+#: 切段用的字符集。**在原始消息上切**，不用 `normalize_name` 的结果——
+#: `_SEP_RE` 会在归一化阶段把「、」空格 `-` `.` `/` 括号等 15 种写法直接删掉，
+#: 切段根本看不到（实测「大众、丰田和本田哪个好」只报得出「本田」，
+#: 而**只把顿号加进切段集是彻底 no-op**——归一化后已无顿号）。
+#:
+#: **刻意不含单字「对」「比」**：它们是「对比」两字连写时贡献的切点，单独切会把
+#: 品牌词「比亚迪」（库里车系最多的品牌之一，34 款在售）劈成「比」「亚迪」。
+#: 改用两字连写的 `对比` 排在交替分支最前——`re.split` 逐位置按分支顺序试。
+_BRAND_SEGMENT_CUT_RE = re.compile(
+    r"对比|和|跟|与|及|或|、|，|,|[\s\-—–·。.:：/／()\\]"
 )
+
+#: 段**开头**的提问前缀。切段后「我想买大众」这一段里，品牌词前面粘着「我想买」，
+#: 整段不相等就白切了（实测「我想买/想买/要买/打算买/请问/那/预算N万」+ 品牌 +
+#: 和 + 车系 + 哪个好 → 全部不报）。
+_QUESTION_PREFIXES = (
+    "我想买", "想买辆", "想买", "打算买", "准备买", "要买", "请帮", "帮我",
+    "请问", "我想", "那", "我",
+)
+#: 「预算20万」这类**带数字**的前缀，正则剥（词表剥不动）。
+_BUDGET_PREFIX_RE = re.compile(r"^预算\s*\d+(?:\.\d+)?\s*万?")
+
+#: 方向是安全的那一侧：先按连接词切段，品牌词必须与整段**完全相等**才认。
+#: 这份清单**不需要完备**——缺一项的后果是「本该报却没报」（漏报），不是误报。
+#:
+#: ⚠️ **只收「问句形态」的尾巴，不收裸的程度副词。** 加过「一些/一点/更」三个，
+#: 实测立刻造出误报：段「理想一点」剥掉「一点」就塌成「理想」——
+#: 「汉的油耗怎么样，理想一点吗」从 `[]` 变成 `['理想']`；同理「我想买理想一些吗」。
+#: 那是拿误报换漏报，方向错了。改成收**复合**问句尾巴（「哪个好一些」而不是
+#: 「一些」），于是「大众哪个好一些」能剥成「大众」，而「理想一点」剥不动。
+_QUESTION_TAILS = (
+    # 复合问句尾巴
+    "哪个好一些", "哪个好一点", "哪个更好", "哪种好", "哪款好", "哪台好",
+    "哪款更好", "哪台更好", "哪一种", "最好的是", "哪个牌子", "哪些车",
+    "值得买吗", "值不值", "能买吗", "是不是", "好不好", "怎么样",
+    "哪个好", "哪些", "哪个", "哪款", "哪台", "哪辆", "哪种",
+    "好吗", "有吗", "是吗",
+    # 单字语气/后缀
+    "吗", "呢", "吧", "啊", "呗", "么", "的", "好", "？", "?",
+)
+
+
+def _strip_leading_prompt(seg: str) -> str:
+    """剥掉段开头的提问前缀：「我想买大众」→「大众」。
+
+    反复剥（可能叠着「我想买」+「那」）。剥不动就停。
+    """
+    seg = _BUDGET_PREFIX_RE.sub("", seg)
+    changed = True
+    while changed and seg:
+        changed = False
+        for prefix in _QUESTION_PREFIXES:
+            if seg.startswith(prefix) and len(seg) > len(prefix):
+                seg = seg[len(prefix):]
+                changed = True
+                break
+    return seg
 
 
 def brand_candidates_in_message(db: Session, message: str) -> set[str]:
@@ -155,8 +207,10 @@ def brand_candidates_in_message(db: Session, message: str) -> set[str]:
         「北京现代ix35和北京哪个好」   → 段 [北京现代ix35, 北京] → 北京 ✅
         「朗逸和北京现代ix35哪个好」   → 段 [朗逸, 北京现代ix35] → 不报 ✅
         「MG和汉哪个好」              → 段 [MG, 汉]          → MG ✅
-        「比亚迪和汉哪个好」          → 段 [比亚迪, 汉]      → 比亚迪 ✅（不遮蔽会被切成 [比, 亚迪, 汉]）
-        「预算20万，大众和汉哪个好」    → 段 [预算20万, 大众, 汉] → 大众 ✅（逗号也是切段字）
+        「比亚迪和汉哪个好」          → 段 [比亚迪, 汉]      → 比亚迪 ✅
+        「大众、丰田和本田哪个好」     → 段 [大众, 丰田, 本田] → 三者 ✅（**用原始消息切段**才切得出顿号）
+        「我想买大众和汉哪个好」       → 段 [我想买大众, 汉]   → 大众 ✅（**剥提问前缀**后才整段相等）
+        「汉和大众哪个好一些」         → 段 [汉, 大众哪个好一些] → 大众 ✅（**尾巴清单含「一些」**）
         「五菱和缤果Pro哪个好」        → 段 [五菱, 缤果Pro]    → 五菱（由调用方相减挡掉）
         「AITO问界和汉哪个好」         → 段 [AITO问界, 汉]     → **命中「AITO 问界」这个空品牌行**，
                                               而它旗下 0 款在售 → 最终不报（见调用方「0 款不反问」）
@@ -168,45 +222,19 @@ def brand_candidates_in_message(db: Session, message: str) -> set[str]:
         「汉的油耗怎么样，理想一点吗」    → 段 [汉的油耗怎么样, 理想一点吗] → 剥「吗」后是
                                               「理想一点」≠「理想」→ 不报 ✅
     """
-    normalized = normalize_name(message)
-    if not normalized:
+    if not message or not message.strip():
         return set()
-    entries = _load_entries(db)
     labels: dict[str, str] = {}
-    for name, _brand_id, label in entries:
+    for name, _brand_id, label in _load_entries(db):
         labels.setdefault(name, label)
 
-    # **先遮蔽品牌词，再切段。** 这是本函数最容易漏掉的一步：
-    # 切段字符会劈进品牌词里。「比亚迪」含「比」（「对比」贡献的单字），
-    # 于是「比亚迪和汉哪个好」被切成 ['比', '亚迪', '汉']——库里车系最多的品牌之一
-    # （34 款在售）**永久不可达**，而且没有任何测试或文档提到它。
-    # 遮蔽成不含切段字符的占位符，这一整类冲突就不存在了：
-    # 品牌词表与切段字符集共用字母表，而遮蔽让两者不再互相干扰。
-    # `_load_entries` 已按长度降序，长名先遮，短名不会被长名内部的碎片顶掉。
-    # ⚠️ 用**单次扫描替换**，不是循环 `str.replace`。循环版有个隐蔽的坑：
-    # 占位符里带十进制序号，一旦品牌词表里出现纯数字品牌名（哪怕叫「0」），
-    # 后面那轮的 `replace` 会把**前面已经放好的占位符**里的数字一起吃掉，
-    # 于是排在它前面的所有品牌**同时静默失能**。第六轮审查在合成库里逼出了这个，
-    # 真实库当前没有这类品牌——但那纯属运气。
-    # `re.sub` 在**原串**上匹配、只输出替换结果，天然没有这个问题。
-    # `_load_entries` 已按长度降序，正则的交替分支因此「长名优先」。
-    pattern = re.compile("|".join(re.escape(n) for n, _b, _l in entries))
-    marks: dict[str, str] = {}
-
-    def _mark(match: re.Match) -> str:
-        word = match.group()
-        if word not in marks:
-            # \x00 不可能出现在品牌名里（品牌名来自用户可见文本）；
-            # 序号从 1 起，前后各包一个 \x00，多位数也不会与品牌名里的数字混读
-            marks[word] = f"\x00{len(marks) + 1}\x00"
-        return marks[word]
-
-    masked = pattern.sub(_mark, normalized)
-    tokens = {token: word for word, token in marks.items()}
-
+    # 逐段：先归一化（品牌名里可能有空格，如「AITO 问界」），再剥问句尾巴与提问
+    # 前缀，最后要求与品牌词**完全相等**。
     found: set[str] = set()
-    for segment in re.split(f"[{re.escape(''.join(sorted(COMPARISON_LINK_CHARS)))}]", masked):
-        seg = segment.strip()
+    for raw_segment in _BRAND_SEGMENT_CUT_RE.split(message):
+        seg = normalize_name(raw_segment)
+        if not seg:
+            continue
         while seg:
             for tail in _QUESTION_TAILS:
                 if seg.endswith(tail) and len(seg) > len(tail):
@@ -214,9 +242,10 @@ def brand_candidates_in_message(db: Session, message: str) -> set[str]:
                     break
             else:
                 break
-        name = tokens.get(seg)
-        if name is not None:
-            found.add(labels[name])
+        seg = _strip_leading_prompt(seg)
+        label = labels.get(seg)
+        if label is not None:
+            found.add(label)
     return found
 
 
