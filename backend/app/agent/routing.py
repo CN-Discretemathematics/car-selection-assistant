@@ -315,6 +315,82 @@ class RouteDecision:
     signals: dict = field(default_factory=dict)
 
 
+def _car_context(
+    message: str, profile: UserProfile, resolved: list, db: Session
+) -> bool:
+    """是否处在汽车语境（工具循环只接管与车相关的问法）。
+
+    单独抽出来是因为 0.65 的对比守卫也要用它——原先守卫与 0.75 各写一份判定，
+    两份条件一旦漂移就没有任何东西能发现（见 `_tool_loop_eligible`）。
+    """
+    return bool(
+        resolved
+        or profile.brand_ids
+        or profile.locked_series_ids
+        or _CAR_CONTEXT_RE.search(message)
+        or has_car_intent(message)
+        or mentions_known_brand(db, message)   # 本条消息提到库内品牌（如「解释一下比亚迪的销量」）
+    ) and not _NON_CAR_RE.search(message)
+
+
+def _tool_loop_eligible(
+    message: str,
+    hints: dict,
+    profile: UserProfile,
+    resolved: list,
+    db: Session,
+    *,
+    car_context: bool | None = None,
+) -> bool:
+    """规则 0.75（工具循环咨询）的**全部**前置条件，唯一实现。
+
+    为什么必须和 0.65 的对比守卫共用一份（2026-10-05 实测缺陷）：
+    守卫 `not (_CONTRAST_ASK_RE.search(m) and len(resolved) >= 2)` 的语义是
+    「对比问题让给工具循环」——它**假定** 0.75 一定接得住。但 0.75 还要求
+    `not profile_core`（画像无预算/人数/用途），守卫没算这一条，于是：
+
+        第1轮「预算20万，汉怎么样」 → 锁定汉
+        第2轮「对比一下汉L」        → 并入后 resolved=2，守卫让出车系问答
+                                    → 0.75 被 profile_core 拦下
+                                    → 一路掉到 4:recommendation_fallback
+                                    → 答「预算大概多少？」
+
+    **用户第 1 轮就把预算说过了**，第 2 轮反而被再问一次。实测（真库真 decide_route）：
+    该缺口只影响含「对比」二字的消息；「哪个好 / 比呢 / 比一下」等说法不受影响，
+    因为 `_CONTRAST_ASK_RE` 只认字面「对比」。
+
+    修法不是给守卫补条件（那只是把同一个 bug 抄第三遍），而是让守卫问一个和
+    0.75 **完全同源**的问题：「0.75 真的会接住吗」。接不住就不让出，留在车系问答
+    ——它本来就支持多车系对比（`build_series_qa_answer` 的 `" vs "` 拼接）。
+    条件收敛到一处后，两边不可能再漂移。
+
+    `car_context` 可由调用方传入已算好的值，避免同一轮里重复查库
+    （`mentions_known_brand` 是一次 DB 查询）。
+    """
+    if car_context is None:
+        car_context = _car_context(message, profile, resolved, db)
+    core_hint_keys = {"budget", "passengers", "usage"} & set(hints)
+    # 画像层只看预算/人数/用途：不能用 profile_has_core_constraints（它把 body_type
+    # 也算核心约束，而 merge_profile 已把本轮消息里的「SUV」写进画像 → 自己把自己拦掉，
+    # 2026-09-15 实测「有哪些增程SUV…」因此落回追问预算）。
+    profile_core = (
+        profile.budget.min is not None
+        or profile.budget.max is not None
+        or bool(profile.usage)
+        or profile.passengers is not None
+    )
+    return (
+        asks_tool_assist(message)
+        and car_context
+        and not core_hint_keys
+        and not profile_core
+        # 2026-10-04：用户表达了**可执行**的排序偏好时，本分支是错的去向。
+        # 「有哪些车推荐」问的是**一批车**，但既然说了看重什么，就该走推荐链按其加权，
+        # 而不是丢进工具循环给一段聊天回答。与规则 2 的 general_advice 否决同源。
+        and not _ranking_intent_skips_consultation(hints, resolved, profile)
+    )
+
+
 def decide_route(
     message: str,
     hints: dict,
@@ -347,9 +423,16 @@ def decide_route(
 
     # 车系档案问答（原内联：if resolved and should_answer(resolved, message)）
     if resolved and should_answer(resolved, message):
-        # 0.65) 对比措辞守卫：「对比」动词 + ≥2 个解析车系 → 落 0.75 工具循环（见
-        # _CONTRAST_ASK_RE 注），不进车系问答。
-        if not (_CONTRAST_ASK_RE.search(message) and len(resolved) >= 2):
+        # 0.65) 对比措辞守卫：「对比」动词 + ≥2 个解析车系 → 落 0.75 工具循环，不进车系问答。
+        #      **仅当 0.75 确实接得住时才让出**（2026-10-05 实测缺陷，见 `_tool_loop_eligible`
+        #      docstring）：原先无条件让出，而 0.75 还要求 `not profile_core`，
+        #      于是「第1轮说过预算 → 第2轮对比一下汉L」被反问「预算大概多少？」。
+        diverts_to_tool_loop = (
+            bool(_CONTRAST_ASK_RE.search(message))
+            and len(resolved) >= 2
+            and _tool_loop_eligible(message, hints, profile, resolved, db)
+        )
+        if not diverts_to_tool_loop:
             return RouteDecision(
                 intent="series_qa",
                 matched_rule="series_qa:resolved+should_answer",
@@ -422,40 +505,15 @@ def decide_route(
         )
 
     # 0.75) 盘点/对比/解释类自由提问 → LLM 工具调用循环（步数受限、全程审计）。
-    #       两个前置条件（第二轮审查）：
-    #       a) 必须有「汽车语境」（命中车系/品牌/锁定车系/购车词/汽车名词），
-    #          防「量子纠缠」「华为 vs 苹果」这类通用问题被劫持；
-    #       b) 不得带核心约束（预算/人数/用途）——带约束的继续走推荐链；
-    #          车身类型（如「有哪些增程SUV」）不算核心约束：那正是要「列一批」的问法，
-    #          实测把它算作核心线索会把这类问题错误地交给追问预算的推荐链（2026-09-15）。
-    #       判定表达式与原实现逐字符等价（含 or 短路：mentions_known_brand 只在
-    #       前面全部为假时才查库，与原赋值语句的求值顺序一致）。
-    car_context = bool(
-        resolved
-        or profile.brand_ids
-        or profile.locked_series_ids
-        or _CAR_CONTEXT_RE.search(message)
-        or has_car_intent(message)
-        or mentions_known_brand(db, message)   # 本条消息提到库内品牌（如「解释一下比亚迪的销量」）
-    ) and not _NON_CAR_RE.search(message)
-    # 画像层同样只看预算/人数/用途：不能直接用 profile_has_core_constraints（它把 body_type
-    # 也算核心约束，而 merge_profile 已把本轮消息里的「SUV」写进画像 → 自己把自己拦掉，
-    # 2026-09-15 实测「有哪些增程SUV…」因此落回追问预算）。
-    profile_core = (
-        profile.budget.min is not None
-        or profile.budget.max is not None
-        or bool(profile.usage)
-        or profile.passengers is not None
-    )
-    if (
-        asks_tool_assist(message)
-        and car_context
-        and not core_hint_keys
-        and not profile_core
-        # 2026-10-04：用户表达了**可执行**的排序偏好时，本分支是错的去向。
-        # 「有哪些车推荐」问的是**一批车**，但既然说了看重什么，就该走推荐链按其加权，
-        # 而不是丢进工具循环给一段聊天回答。与规则 2 的 general_advice 否决同源。
-        and not _ranking_intent_skips_consultation(hints, resolved, profile)
+    #       前置条件（第二轮审查）：必须有「汽车语境」（防「量子纠缠」「华为 vs 苹果」
+    #       被劫持）；不得带核心约束（预算/人数/用途）——带约束的继续走推荐链；
+    #       车身类型（如「有哪些增程SUV」）不算核心约束：那正是要「列一批」的问法，
+    #       实测把它算作核心线索会把这类问题错误地交给追问预算的推荐链（2026-09-15）。
+    #       条件本体已抽到 `_tool_loop_eligible`（与 0.65 对比守卫共用同一份判定，
+    #       2026-10-05 起），这里只负责把它和 car_context 算给下游 signals 用。
+    car_context = _car_context(message, profile, resolved, db)
+    if _tool_loop_eligible(
+        message, hints, profile, resolved, db, car_context=car_context
     ):
         return RouteDecision(
             intent="tool_loop",
@@ -595,16 +653,78 @@ def llm_intent_executable(
 # 路由日志的轻量 PII 掩码：手机号（CN）/邮箱/身份证等长数字串 → ***
 # （utterance 是用户原话，可能带个人信息；日志一旦真正落盘就不能原文跟着进去）
 _PII_PATTERNS = (
-    re.compile(r"1[3-9]\d{9}"),
+    # ⚠️ 三条都要**数字边界**（2026-10-06 独立审查 P1-5 实测）：无边界的 `1[3-9]\d{9}`
+    # 会在一段更长的数字串**中间**匹配到 11 位并把它替换掉：
+    #     110101199001011234（18 位身份证） -> 110101***4
+    # 边界让它只在「恰好 11 位、且左右都不是数字」时才命中。
+    re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),
     re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
-    re.compile(r"\d{15,18}"),
+    re.compile(r"(?<!\d)\d{15,18}(?!\d)"),
+    # 2026-10-06（独立审查实测补齐）：上面那条只认「≥15 位**连续**数字」，于是
+    # **身份证分段写**（前 6 位地区码 + 生日 8 位，分两三次打进对话）
+    # 完全漏掉——完整 18 位反而会被命中，拆开写就漏。汽车问答里「我身份证号是
+    # 110101 和 19900101 这样的」并不罕见，故补分段模式。
+    #
+    # ⚠️ 但**不能**靠两条前瞻式正则按顺序逐条 sub：第一段被换成 `***` 之后，
+    # 第二段就找不到它的参照物了（第一版就是这样：地区码被掩、生日段漏）。
+    # 故分段身份证改由 `_mask_split_id` **一次扫完整对**再替换。
+)
+
+#: 身份证**分段**：6 位地区码 + 8 位生日，顺序不定，中间可隔 0~8 个非数字字符。
+_SPLIT_ID_RE = re.compile(
+    r"(\d{6})([\s\S]{0,8}?)(\d{8})|(\d{8})([\s\S]{0,8}?)(\d{6})"
 )
 
 
+def _mask_split_id(text: str) -> str:
+    """一次扫完整对再替换（见 `_SPLIT_ID_RE` 处的说明）。"""
+
+    def _repl(m: re.Match) -> str:
+        return "***" + (m.group(2) or m.group(5) or "") + "***"
+
+    return _SPLIT_ID_RE.sub(_repl, text)
+
+
+#: 车牌（苏A12345 / 京A·88888）——**必须带上下文词**才脱敏。
+#:
+#: 2026-10-06（独立审查 P1-4，实测 8/8 真实车名被抹）：第一版直接用
+#: `[一-龥][A-Z][·]?[A-Z0-9]{5,6}`，而**车名的字面形状与车牌完全一样**：
+#:     长安CS75PLUS   → 长***S        五菱宏光MINIEV → 五菱宏***
+#:     赛那SIENNA     → 赛***          大双GW4D20M    → 大***
+#: 更糟的是 `_mask_text` 也用在**回复正文**上，于是用户看到的是被抹花的车型名——
+#: 为了脱敏反而**破坏了答案本身**。全库实测 **195 条**真实车系/版本/参数文本受损。
+#:
+#: 故改为**上下文触发**：只在「车牌/牌照/号牌」等词附近才认。
+#: 代价是裸写的「苏A12345」会漏——但在一门会把车型名当成 PII 的脱敏器里，
+#: **宁可漏也不许毁**。这是明确的取舍，不是疏漏。
+#:
+#: ⚠️ 2026-10-06 独立审查 P1-1：**分隔必须允许系动词「是/为」**，否则最自然的
+#: 中文说法全漏（实测）：
+#:     我的车牌苏A12345   -> 我的车牌***            ✅
+#:     我的车牌是苏A12345 -> 我的车牌是苏A12345     ❌ 漏（这才是真实说法）
+#:     车牌号是苏A12345   -> 车牌号是苏A12345       ❌ 漏
+#: 即：加了上下文闸却漏掉系动词，等于「用 102 条真实车名换了车牌明文入库」——
+#: **这不是可接受的取舍**，是第一版闸写得太窄。
+_PLATE_RE = re.compile(
+    r"(车牌号?|牌照|号牌)\s*(?:是|为)?\s*[:：]?\s*(?:是|为)?\s*[一-龥][A-Z][·]?[A-Z0-9]{5,6}"
+)
+
+
+def _mask_plate(text: str) -> str:
+    return _PLATE_RE.sub(lambda m: f"{m.group(1)}***", text)
+
+
 def _mask_pii(text: str) -> str:
+    # ⚠️ 顺序要紧（2026-10-06 独立审查 P1-5 实测）：`_mask_split_id` **必须放在最后**。
+    # 放在最前时它的 `\d{6}`/`\d{8}` 会先把长数字串切碎，后面的手机号与 ≥15 位规则
+    # 就再也匹配不到完整串了：
+    #     1234567890123456   ->  ******56    （本该全掩，泄漏尾 2 位）
+    #     13800138000        ->  ***000      （本该全掩，泄漏尾 3 位）
+    # 完整串交给通用规则，分段的那一对由 _mask_split_id 单独一趟收尾。
     for pattern in _PII_PATTERNS:
         text = pattern.sub("***", text)
-    return text
+    text = _mask_split_id(text)
+    return _mask_plate(text)
 
 
 def log_route_decision(

@@ -23,6 +23,15 @@ os.environ["SMTP_HOST"] = ""
 os.environ["SMTP_USER"] = ""
 os.environ["SMTP_PASSWORD"] = ""
 os.environ["SMTP_FROM"] = ""
+# 对话逐轮留档（2026-10-05）**显式置 false**，不能用 pop：
+# 它的默认值是 true（留档的价值在于「出事之后查得到」，默认关等于没有），
+# pop 只会退回默认 true，于是本机 .env / CI 一旦不同，测试就会开始往库里写行——
+# 既拖慢测试，又让「本机跑 == CI 跑」这条前提失效。测试不需要留档。
+#
+# ⚠️ 必须放在 `from app.main import app` **之前**：import 链里会调用 `get_settings()`，
+# 而它带 lru_cache——一旦在那之前缓存过默认值，之后再改 os.environ 已经晚了
+# （本轮就踩了这个：设在文件下半段时，测试里读到的仍是 True）。
+os.environ["AGENT_CONVERSATION_LOG_ENABLED"] = "false"
 
 import pytest
 from fastapi.testclient import TestClient
@@ -49,6 +58,7 @@ for _router_env in (
     "AGENT_SOFT_PREF_TIMEOUT_MS",
 ):
     os.environ.pop(_router_env, None)
+
 
 # 注意：本机受限沙箱会拒绝枚举 pytest 的 basetemp 目录，tmp_path fixture 不可用；
 # 需要临时文件时请写到 tests/.tmp（已 gitignore），不要用 tmp_path。

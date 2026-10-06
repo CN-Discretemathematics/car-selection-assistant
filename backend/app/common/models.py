@@ -351,3 +351,53 @@ class ComparisonItem(Base):
 
     comparison: Mapped["Comparison"] = relationship(back_populates="items")
     variant: Mapped["VehicleVariant"] = relationship()
+
+
+class AgentTurnLog(Base):
+    """助手对话的**每一轮**留档（2026-10-05 新增）。
+
+    为什么需要（这是一件独立的缺陷，不是为微调做的铺垫）：
+    在此之前，全仓**没有任何地方保存过对话**——`SessionStore` 是进程内 dict
+    （TTL 1 小时 / 上限 2000），生产 Redis 实现同样带 TTL。对话在一小时后
+    随 TTL 蒸发，后果是：
+
+      - 线上答错了，**无法复现**。本会话查出的多个缺陷之所以能定位，靠的是
+        「用户截图 + 我重新构造」，不是日志；用户拿不出原始输入时根本无从查起。
+      - 缺陷形态是「静默给出错误答案」（确定性链路的字符串匹配出错），
+        这种缺陷没有用户投诉也不会有异常日志——唯一能发现它的办法是
+        **事后能取回当时那一轮的输入与决策**。
+
+    因此这里存的是**复现所需的最小集**：用户输入、路由决策（含命中规则与信号）、
+    解析出的车系、回复正文、当时的画像快照。取回这三样就能在本地把那一轮
+    原样重放。
+
+    隐私：写入前对用户输入与回复做 PII 掩码（`app.agent.conversation_log`）。
+    取回需管理员 token（与 `/admin` 同一套凭据），不开放给普通接口。
+    保留期由 `AGENT_CONVERSATION_LOG_RETENTION_DAYS` 控制，过期自动清理。
+    """
+
+    __tablename__ = "agent_turn_logs"
+    __table_args__ = (
+        Index("ix_agent_turn_logs_session_created", "session_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    turn_index: Mapped[int] = mapped_column(Integer, default=0)
+    #: 用户输入（已 PII 掩码）
+    user_text: Mapped[str] = mapped_column(Text, default="")
+    #: 助手回复（已 PII 掩码）
+    reply_text: Mapped[str] = mapped_column(Text, default="")
+    #: 命中的路由意图（RouteDecision.intent）
+    intent: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: 命中的规则名（RouteDecision.matched_rule）——排障时最有用的一列
+    matched_rule: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    #: 规则判定用的信号（RouteDecision.signals），JSON
+    signals: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    #: 本轮解析出的车系 id，复现「选了哪台车」用
+    series_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    #: 该轮结束时的会话画像快照（已掩码），复现多轮上下文用
+    profile_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    need_clarification: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    elapsed_ms: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -106,6 +106,42 @@ _MIN_VARIANT_NAME_LEN = 6
 #: 已知接受的误伤：放开「炮」后，「大炮」「炮灰」这类句子会命中长城炮（实测语料里罕见）。
 _SINGLE_CHAR_SERIES_ALLOWED = frozenset({"汉", "炮"})
 
+#: 单字车系名作为**词素**出现时不指车的构词（2026-10-05 独立审查 P1 实测）。
+#:
+#: `_first_free_span` 只解决「跨度重叠」，解决不了「这里根本不是车」：
+#:     「汉字续航是多少」   → 命中 汉 → route=series_qa → 给出比亚迪汉完整参数卡
+#:     「汉朝的车值得买吗」 → 同上
+#:     「炮灰的车怎么样」   → 命中 炮 → 给出长城炮完整参数卡
+#:     「武汉」             → 命中 汉 → 同上
+#: 实测这四类都会走完 series_qa 并输出**自信的规格卡**——不崩溃、不报错，
+#: 测试全绿，正是本仓最难抓的那类错误。
+#:
+#: ⚠️ 这是**人工枚举**，与 `brands.AMBIGUOUS_BRANDS` 同一套路，**必然不完整**。
+#: 中文没有词边界，「汉」「炮」还能构成 汉子/汉中/炮弹/炮兵… 这里只收
+#: 真实语料里出现频率最高的几个。**真正的根治是把单字名从硬编码白名单换成
+#: 「首字必须构成独立词」的可判定判据**，那需要词典，超出本仓当前能力。
+_SINGLE_CHAR_BLOCKING_COMPOUNDS: dict[str, tuple[str, ...]] = {
+    "汉": ("武汉", "汉字", "汉朝", "汉代", "汉族", "汉子", "汉中"),
+    "炮": ("炮灰", "大炮", "炮弹", "炮兵", "炮火", "炮台"),
+}
+
+
+def _single_char_blocked_spans(msg: str, norm: str) -> list[tuple[int, int]]:
+    """单字车系名在 `msg` 里落在禁构词内的跨度（可直接丢弃的跨度）。"""
+    compounds = _SINGLE_CHAR_BLOCKING_COMPOUNDS.get(norm)
+    if not compounds:
+        return []
+    spans: list[tuple[int, int]] = []
+    for compound in compounds:
+        start = 0
+        while True:
+            pos = msg.find(compound, start)
+            if pos < 0:
+                break
+            spans.append((pos, pos + len(compound)))
+            start = pos + 1
+    return spans
+
 
 def _load_name_entries(db: Session) -> tuple[tuple[str, int], ...]:
     rows = db.execute(
@@ -209,16 +245,25 @@ def _series_fingerprint(db: Session) -> tuple:
 
 
 def _first_free_span(
-    msg: str, norm: str, chosen: list[tuple[int, int, int, str]]
+    msg: str,
+    norm: str,
+    chosen: list[tuple[int, int, int, str]],
+    extra_blocked: list[tuple[int, int]] | None = None,
 ) -> tuple[int, int] | None:
-    """`norm` 在 `msg` 里**第一个不与已选跨度重叠**的出现位置；找不到返回 None。"""
+    """`norm` 在 `msg` 里**第一个不与已选跨度重叠**的出现位置；找不到返回 None。
+
+    `extra_blocked` 是额外的禁区跨度（单字车系名的构词，见 `_single_char_blocked_spans`）。
+    它与 `chosen` 同等对待，只是来源不同：一个是「别的车系名占了这里」，
+    一个是「这里是常见词，不是车」。
+    """
+    blockers = list(chosen) + [(b, e, -1, "") for b, e in (extra_blocked or ())]
     start = 0
     while True:
         pos = msg.find(norm, start)
         if pos < 0:
             return None
         end = pos + len(norm)
-        if not any(pos < oend and end > ostart for ostart, oend, _, _ in chosen):
+        if not any(pos < oend and end > ostart for ostart, oend, _, _ in blockers):
             return pos, end
         start = pos + 1
 
@@ -248,7 +293,14 @@ def resolve_series(db: Session, message: str) -> list[tuple[VehicleSeries, Brand
         # 短名出现在**后面**时会被误杀：「汉L和汉怎么选」里「汉」在位置 4，
         # 但 find 返回 0（落在「汉l」的跨度 [0,2) 内），重叠判定把它当重叠跳过了，
         # 于是用户点名的「汉」被静默丢掉。改为**找第一个不被已选跨度覆盖的位置**。
-        span = _first_free_span(msg, norm, chosen)
+        span = _first_free_span(
+            msg,
+            norm,
+            chosen,
+            extra_blocked=(
+                _single_char_blocked_spans(msg, norm) if len(norm) == 1 else None
+            ),
+        )
         if span is None:
             continue  # 全部出现位置都被更长的名字覆盖（腾势Z9 ⊂ 腾势Z9GT）
         start, end = span
@@ -409,7 +461,22 @@ class _Entry(NamedTuple):
 
 
 _VALUE_UNIT_RE = re.compile(r"^(.*?)([^\d\s.]+)$")
-#: 库里把多个取值塞进一个 fact_value 的分隔符（实测命中：电池 `29.165~74.96/75.26`）。
+#: 库里把多个**离散**取值塞进一个 fact_value 的分隔符（实测脏数据：电池
+#: `29.165~74.96/75.26`——真正的垃圾是那个 `/`，端点整串挑不出该取哪个当上下界）。
+#:
+#: 2026-10-06 **撤回过一次**（重要，别再犯）：独立审查 P1-3 建议把 `~` 也加进来，
+#: 理由是注释里那个例子含 `~`。照做后回真实库一量——
+#: **全库 23 条含 `~` 的 fact_value 全部是合法区间，没有一条脏数据**：
+#:     9x 最大扭矩转速(rpm) = 1500~2400
+#:     4x 最大扭矩转速(rpm) = 1500~2600
+#:     2x 厂商指导价(元)    = 4.46万~4.49万
+#: 而本文件第 541 行**自己就用 `~` 拼区间**（`f"{lo.raw}~{hi.raw} {best.unit}"`），
+#: 也就是说 `~` 既是**输出格式**又是候选的**输入分隔符**。把它当分隔符，
+#: 等于把这 23 条合法区间全部打成 `return None` 退回单值——**在真实数据上制造静默降级**。
+#:
+#: 教训：那个「缺陷」是拿合成例子（`29.165~74.96` + `100`）推出来的，
+#: 而**真实扫描里它是 0 例**。修一个不存在的问题、代价是弄坏 23 条真数据。
+#: 「真实库命中数 = 0」与「合成样例能构造出」不是一回事，改判据前必须先量真实分布。
 _MULTI_VALUE_RE = re.compile(r"[/、,，]")
 
 
