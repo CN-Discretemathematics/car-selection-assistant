@@ -552,6 +552,39 @@ def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
 #: 品牌反问里最多给几个可点的车系样例。
 _BRAND_SAMPLE_LIMIT = 3
 
+#: 被上限截掉的车系名最多列几个（再多的用「等共 N 台」收尾，不把回答撑成长名单）。
+_DROPPED_NAME_LIMIT = 5
+
+
+def _dropped_note(
+    db: Session,
+    resolved: list[tuple[VehicleSeries, Brand | None]],
+    message: str,
+) -> str:
+    """点名超过上限时，**明说**哪些车系没被放进这次比较（2026-10-07 用户拍板）。
+
+    此前 `resolve_series` 硬编码 `[:4]`，用户点名 5 台时第 5 台被**静默丢掉**——
+    与同批修的「品牌被整段吞掉」是同一类错误：不响、用户以为 5 台都参与了。
+
+    只在真的触到上限时才重算一次解析；**重算结果与传进来的 `resolved` 必须逐 id
+    相同**才说话，否则宁可不提——不拿一个可能对不上的名单去糊弄用户。
+    """
+    from app.catalog.series_index import RESOLVE_SERIES_LIMIT, resolve_series_with_dropped
+
+    if len(resolved) < RESOLVE_SERIES_LIMIT:
+        return ""
+    again, dropped = resolve_series_with_dropped(db, message)
+    if not dropped or [s.id for s, _ in again] != [s.id for s, _ in resolved]:
+        return ""
+    total = len(resolved) + len(dropped)
+    names = "、".join(f"「{n}」" for n in dropped[:_DROPPED_NAME_LIMIT])
+    more = f"等共 {len(dropped)} 台" if len(dropped) > _DROPPED_NAME_LIMIT else ""
+    tail = f"{names}{more}" if not more else f"{names}，{more}"
+    return (
+        f"\n你一共提到 {total} 台车，上面放在一起看的是前 {len(resolved)} 台；"
+        f"没有放进来的有 {tail}，可以单独问我。"
+    )
+
 
 def _brand_active_series(db: Session, brand_name: str) -> list[str]:
     """某品牌名对应的在售车系名（按车系 id 升序）。
@@ -696,6 +729,9 @@ def build_series_qa_answer(
         brand_note = _brand_disclosure(db, resolved, message)
         if brand_note:
             parts.append(brand_note.strip())
+        dropped = _dropped_note(db, resolved, message)
+        if dropped:
+            parts.append(dropped.strip())
         parts.append(footer)
         return "\n".join(parts)
 
@@ -770,6 +806,9 @@ def build_series_qa_answer(
         brand_note = _brand_disclosure(db, resolved, message)
         if brand_note:
             blocks.append(brand_note)
+        dropped = _dropped_note(db, resolved, message)
+        if dropped:
+            blocks.append(dropped)
         blocks.append("\n" + footer)
         return "\n".join(blocks)
 
@@ -793,6 +832,9 @@ def build_series_qa_answer(
     brand_note = _brand_disclosure(db, resolved, message)
     if brand_note:
         blocks.append(brand_note)
+    dropped = _dropped_note(db, resolved, message)
+    if dropped:
+        blocks.append(dropped)
     blocks.append("\n" + footer)
     return "\n".join(blocks)
 

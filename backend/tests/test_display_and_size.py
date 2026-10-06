@@ -209,7 +209,7 @@ def test_size_multi_tier_uses_mode_with_coverage(db_session: Session):
     )
     assert (
         size_line(db_session, series)
-        == "4997*1963*1445 mm（在售 3 款中 2 款为此尺寸）"
+        == "4997*1963*1445 mm（3 款有尺寸数据，其中 2 款为此尺寸）"
     )
 
 
@@ -233,7 +233,7 @@ def test_size_tie_keeps_first_and_still_discloses(db_session: Session):
     )
     text = size_line(db_session, series)
     assert text is not None
-    assert "在售 2 款中 1 款为此尺寸" in text, text
+    assert "2 款有尺寸数据，其中 1 款为此尺寸" in text, text
 
 
 def test_size_absent_returns_none(db_session: Session):
@@ -269,7 +269,7 @@ def test_size_counts_by_variant_not_by_fact_row(db_session: Session):
     )
     text = size_line(db_session, series)
     assert text is not None
-    assert "在售 3 款中 2 款为此尺寸" in text, text
+    assert "3 款有尺寸数据，其中 2 款为此尺寸" in text, text
 
 
 
@@ -310,7 +310,7 @@ def test_size_normalizes_fullwidth_multiplication_sign(db_session: Session):
     """`×` 与 `*` 混写必须归一——否则同一尺寸被当成两档，覆盖率随之失真。
 
     审查 P2 实测：真实库 7 个车系同一尺寸有两种写法，五菱之光因此报
-    「在售 5 款中 **2** 款为此尺寸」，实际 4 款是同一尺寸
+    「5 款有尺寸数据，其中 **2** 款为此尺寸」，实际 4 款是同一尺寸
     （2 款 `3797*1510*1820` + 2 款 `3797×1510×1820`）。归一后 4 款合并成一档。
     """
     star, times = "3797*1510*1820", "3797×1510*1820"
@@ -329,5 +329,5 @@ def test_size_normalizes_fullwidth_multiplication_sign(db_session: Session):
     text = size_line(db_session, series)
     assert text is not None
     # 4 款同一尺寸 -> 覆盖率必须记 4，而不是被拆成 2+2 后的 2
-    assert "在售 5 款中 4 款为此尺寸" in text, text
+    assert "5 款有尺寸数据，其中 4 款为此尺寸" in text, text
     assert "3797" in text, text

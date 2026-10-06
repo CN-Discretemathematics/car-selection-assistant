@@ -241,7 +241,7 @@ def test_series_summary_slice_size_matches_card(db_session: Session):
         )
 
     card = size_line(db_session, series)
-    assert card is not None and "在售 3 款中 2 款为此尺寸" in card, card
+    assert card is not None and "3 款有尺寸数据，其中 2 款为此尺寸" in card, card
 
     # `build_chunks` 的 load / chunk 两节点之间会 `_end_readonly_tx`（expunge_all + rollback），
     # 夹具数据若还在未提交事务里会被**丢掉**，切片就会退回 `rank_headlines` 的首值——

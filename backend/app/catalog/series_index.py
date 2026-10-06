@@ -268,15 +268,38 @@ def _first_free_span(
         start = pos + 1
 
 
-def resolve_series(db: Session, message: str) -> list[tuple[VehicleSeries, Brand | None]]:
-    """从消息中解析用户提及的真实车系（按出现顺序，最多 4 个）。
+#: 一次比较最多放几台车进回答。超出上限的**必须明说**（见 `resolve_series_with_dropped`），
+#: 不能静默丢——用户点名 5 台却只看到 4 台的回答，会以为 5 台都参与了比较。
+#: 2026-10-07 用户拍板：4 → 6。
+RESOLVE_SERIES_LIMIT = 6
+
+
+def resolve_series(
+    db: Session, message: str
+) -> list[tuple[VehicleSeries, Brand | None]]:
+    """从消息中解析用户提及的真实车系（按出现顺序，最多 `RESOLVE_SERIES_LIMIT` 个）。
 
     匹配候选 = 车系名 / 品牌+车系名 / 去掉品牌前缀的车系名 / 别名；
     归一化后做子串匹配，重叠名字优先保留更长的（「腾势Z9」让位「腾势Z9GT」）。
+
+    **超过上限时这里会静默截断。** 需要知道被截掉哪些车系的调用方（车系问答要把
+    它们明说出来）请用 `resolve_series_with_dropped`。
+    """
+    return resolve_series_with_dropped(db, message)[0]
+
+
+def resolve_series_with_dropped(
+    db: Session, message: str
+) -> tuple[list[tuple[VehicleSeries, Brand | None]], list[str]]:
+    """同 `resolve_series`，但额外返回**命中却被上限截掉**的车系名。
+
+    2026-10-07：此前 `resolve_series` 硬编码 `[:4]`，用户点名 5 台时第 5 台被**静默**
+    丢掉——与同批修的「品牌被整段吞掉」是同一类错误（静默、不响）。修法是上限提到
+    `RESOLVE_SERIES_LIMIT`（6），且**超限时把被截掉的车系名说出来**。
     """
     msg = normalize_name(message)
     if not msg:
-        return []
+        return [], []
     if "PYTEST_CURRENT_TEST" in os.environ:
         entries = _load_name_entries(db)
     else:
@@ -308,16 +331,19 @@ def resolve_series(db: Session, message: str) -> list[tuple[VehicleSeries, Brand
     chosen.sort(key=lambda c: c[0])
     # 去重保序：车系名与其款型名同句出现（「比亚迪e2 的 2023款 出行版」）解析出同一
     # 车系两次会让 analyze 误判为多实体对比——只保留首次命中
-    ids = list(dict.fromkeys(c[2] for c in chosen[:6]))[:4]
-    if not ids:
-        return []
+    unique = list(dict.fromkeys(c[2] for c in chosen))
+    kept, dropped_ids = unique[:RESOLVE_SERIES_LIMIT], unique[RESOLVE_SERIES_LIMIT:]
+    if not kept:
+        return [], []
     rows = db.execute(
         select(VehicleSeries, Brand)
         .join(Brand, VehicleSeries.brand_id == Brand.id)
-        .where(VehicleSeries.id.in_(ids))
+        .where(VehicleSeries.id.in_(kept + dropped_ids))
     ).all()
     by_id = {series.id: (series, brand) for series, brand in rows}
-    return [by_id[sid] for sid in ids if sid in by_id]
+    items = [by_id[sid] for sid in kept if sid in by_id]
+    dropped = [by_id[sid][0].name for sid in dropped_ids if sid in by_id]
+    return items, dropped
 
 
 #: 品牌名里可省略的通用后缀——「小米汽车」对用户就是「小米」，拼到车系名前会重复。
@@ -695,9 +721,16 @@ def size_lines(
         top_text, top_count = counter.most_common(1)[0]
         total = len(per_variant)
         # 单档：top_text 已含单位，不要再拼一遍（否则「mm mm」）
+        #
+        # 2026-10-07：分母此前写「在售 {total} 款」，但 `total = len(per_variant)` 是
+        # **有尺寸事实的款数**，不是在售款数——没采到尺寸的款型压根没进这个桶。
+        # 于是「在售 6 款中 1 款为此尺寸」会被读成「这车 6 款里 5 款尺寸不对」，
+        # 而真相是另外 5 款**尺寸未披露**。框架误导，数字没错。
+        # 改成把分母是什么说清楚。M==1 的情形（「6 款有尺寸数据，其中 1 款为此尺寸」）
+        # 也因此自然可读，不需要单独分支。
         out[series_id] = (
             top_text if len(counter) < 2
-            else f"{top_text}（在售 {total} 款中 {top_count} 款为此尺寸）"
+            else f"{top_text}（{total} 款有尺寸数据，其中 {top_count} 款为此尺寸）"
         )
     return out
 

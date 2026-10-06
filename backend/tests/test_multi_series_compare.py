@@ -278,7 +278,10 @@ def test_comparison_line_size_matches_block_exactly(db_session: Session):
 
     for name, block_name in (("甲车", "甲厂甲车"), ("乙车", "乙厂乙车"), ("丙车", "丙厂丙车")):
         block = _size_in_block(text, block_name)
-        assert "在售 3 款中 2 款为此尺寸" in block, f"{name} 未取众数：{block}"
+        # 2026-10-07：分母文案由「在售 3 款中 2 款为此尺寸」改为
+        # 「3 款有尺寸数据，其中 2 款为此尺寸」——`total` 是**有尺寸事实的款数**，
+        # 不是在售款数。详见 `series_index.size_lines` 里的同名注释。
+        assert "3 款有尺寸数据，其中 2 款为此尺寸" in block, f"{name} 未取众数：{block}"
     # 逐项对比行里的三个尺寸，必须与各自车系块**逐字相同**
     diff_sizes = [s.strip() for s in _diff_line_full(text)]
     blocks = [
