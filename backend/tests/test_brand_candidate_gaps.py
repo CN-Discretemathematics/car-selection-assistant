@@ -41,24 +41,78 @@ def _seed(db: Session) -> None:
     db.commit()
 
 
-# ── 数据不变量：新方案不遮蔽，切段字符劈进品牌名就会坏掉 ───────────────────
+# ── 数据不变量：切段字符不能把车系名/品牌名切出「恰好等于品牌词」的碎片 ─────
+
+
+#: 探测用的字符池：正则 pattern 里出现的全部字符 + 常见可能作分隔符的字。
+_PUNCT_POOL = " \t-—–·。、，,：:；;！!？?/／\\()（）【】[]{}「」『』…~～_"
+
+
+def _real_cut_chars() -> set[str]:
+    """**实测**哪些字符真能切开字符串——不从正则 pattern 里直接取字符集。
+
+    上一版写成 `set(pattern) - set("[]()-")`，那是错的：`\\s` 让 `s` 混进来、
+    交替符 `|` 与转义 `\\` 也混进来（都不是切段字符），而真正的切段字符
+    `( ) -` 反而被一并减掉了。双向都错（审查实测）。
+
+    改成「逐个字符试切，切得开的才算」，两个方向的错都自然消失。
+    """
+    pool = set(_BRAND_SEGMENT_CUT_RE.pattern) | set(_PUNCT_POOL)
+    return {
+        ch for ch in pool
+        if ch not in "[]()^$*+?{}|" and len(re.split(_BRAND_SEGMENT_CUT_RE, "a" + ch + "b")) > 1
+    }
 
 
 def test_no_brand_name_contains_a_segment_cut_char(db_session: Session) -> None:
-    """**没有任何品牌词含切段字符**——这是「去掉遮蔽」能成立的前提。
+    """品牌词里不能含切段字符——含了就会被切段劈开。
 
-    去掉遮蔽后，品牌词若含切段字符就会被劈开（「比亚迪」曾因含「比」而永久不可达）。
-    真实库 95 个条目逐个查过是 0，但那是**数据现状、不是代码保证**——将来有人加
-    一个带「和」「与」「/」的品牌名，这里会红。守住它，别等出事再查。
+    上一版这条测试**没有调用 `_seed`**，在空品牌表上断言，`not offenders` 恒成立，
+    **任何 CI 环境下都不可能变红**。现已补上种子。
     """
-    cut_chars = set(_BRAND_SEGMENT_CUT_RE.pattern) - set("[]()-")
+    _seed(db_session)
+    cut = _real_cut_chars()
+    assert cut, "切段字符集不能是空的，否则这个不变量等于没有"
     offenders = sorted({
         (name, label) for name, _bid, label in _load_entries(db_session)
-        if any(ch in name for ch in cut_chars)
+        if any(ch in name for ch in cut)
     })
     assert not offenders, (
-        f"品牌词里含切段字符 {sorted(cut_chars)}，会被切段劈开：{offenders}。"
+        f"品牌词里含切段字符 {sorted(cut)}，会被切段劈开：{offenders}。"
         f"新方案不再遮蔽，请先把它加进 `_load_entries` 的别名或换个写法。"
+    )
+
+
+def test_no_series_fragment_equals_a_brand(db_session: Session) -> None:
+    """**这才是真正的不变量**：车系名被切段切出的碎片，不该被当成独立品牌。
+
+    2026-10-07 独立审查实测的一类真误反问：切段字符把**含空格/连字符的车系名**
+    切碎，碎片恰好等于某个品牌词——「MG Cyberster和汉哪个好」在答案末尾追加
+    「MG 是品牌，库里有 7 款…它不是一款车」，而答案开头刚报完这台车的完整参数。
+    真实库 18 个车系中招（MG 4X / MG Cyberster / MG ES5 / iCAR 超级V23 / iCAR V27 /
+    极狐 阿尔法S5 / 极狐 考拉S …）。
+
+    这里用**合成数据**造一个违反样本（车系名里带切段字符 + 该字符前半截又是品牌词），
+    断言**端到端**（`_brand_disclosure`，兜底就在那一层）不反问。比「拿真实库现状
+    当不变量」可靠：将来谁往切段集里加字符、或库里新增这种车系名，这里会先红。
+    """
+    _seed(db_session)
+    src = make_source(db_session, name="汽车之家")
+    holder = make_brand(db_session, name="某某厂", source=src)
+    make_brand(db_session, name="零光", source=src)      # 与下一台车系名同形
+    make_series(db_session, holder, name="零光-01", source=src, positioning="轿车")
+    db_session.commit()
+
+    from app.agent.series_qa import _brand_disclosure
+    from app.catalog.series_index import resolve_series
+
+    msg = "零光-01值得买吗"
+    resolved = resolve_series(db_session, msg)
+    assert resolved and resolved[0][0].name == "零光-01", "前提：车系名能解析出来"
+    assert "-" in _real_cut_chars(), "前提：连字符是切段字符"
+    assert _brand_disclosure(db_session, resolved, msg).strip() == "", (
+        "车系名「零光-01」被切段切出「零光」，而「零光」又是品牌词——"
+        "这正是 MG Cyberster / iCAR 超级V23 那一类误反问的形状"
     )
 
 
@@ -83,12 +137,30 @@ def test_dun_hao_separated_candidates(db_session: Session) -> None:
     assert {"大众", "丰田", "本田"} <= got, f"顿号并列的三家都该报出。实得={sorted(got)}"
 
 
-def test_space_and_hyphen_separated_candidates(db_session: Session) -> None:
-    """空格与连字符同样是切段字符。"""
+def test_punctuation_separated_candidates(db_session: Session) -> None:
+    """顿号 / 逗号 / 连字符是切段字符——这些**不可能出现在车系名里**，是纯收益。"""
     _seed(db_session)
-    for q in ("大众 丰田和汉哪个好", "大众-丰田和汉哪个好", "大众，丰田和汉哪个好"):
+    for q in ("大众、丰田和汉哪个好", "大众-丰田和汉哪个好", "大众，丰田和汉哪个好",
+              "大众,丰田和汉哪个好"):
         got = brand_candidates_in_message(db_session, q)
         assert {"大众", "丰田"} <= got, f"「{q}」应报出大众与丰田。实得={sorted(got)}"
+
+
+def test_space_is_not_a_cut_char(db_session: Session) -> None:
+    """**空格刻意不是切段字符**——真实库有 18 个车系名里带空格。
+
+    把空格放进切段集，切出的碎片恰好等于品牌词：
+        MG Cyberster → ['MG', 'Cyberster']     → 「MG」是品牌，7 款
+        iCAR 超级V23 → ['iCAR', '超级V23']      → 「iCAR」是品牌
+        极狐 阿尔法S5 → ['极狐', '阿尔法S5']    → 「极狐」是品牌
+    用户问一台真车，却被告知「它不是一款车」。代价是「大众 丰田」这类空格并列不再切——
+    那是**漏报**方向，安全。
+
+    端到端的兜底在 `test_no_series_fragment_equals_a_brand` 与
+    `test_space_separated_series_does_not_leak_a_brand`。
+    """
+    assert " " not in _real_cut_chars(), "空格不能是切段字符（真实库 18 个车系名带空格）"
+    assert "\t" not in _real_cut_chars(), "制表符同理"
 
 
 # ── ⑦ 段首提问前缀 ─────────────────────────────────────────────────────────
@@ -138,6 +210,30 @@ def test_bare_degree_words_are_not_tails(db_session: Session) -> None:
         assert "理想" not in got and "大众" not in got and "长安" not in got, (
             f"「{q}」不该报出品牌。实得={sorted(got)}"
         )
+
+
+def test_space_separated_series_does_not_leak_a_brand(db_session: Session) -> None:
+    """真实库里**带空格的车系名**问一遍，端到端不得多出品牌反问。
+
+    照搬 2026-10-07 独立审查实测中招的三个车系形状：品牌词恰好是车系名的前半截。
+    """
+    _seed(db_session)
+    src = make_source(db_session, name="汽车之家")
+    holder = make_brand(db_session, name="某某汽车", source=src)
+    for brand_name in ("极光", "银河"):
+        make_brand(db_session, name=brand_name, source=src)
+    for sname in ("极光 星舰", "银河 E5", "极光007"):
+        make_series(db_session, holder, name=sname, source=src, positioning="轿车")
+    db_session.commit()
+
+    from app.agent.series_qa import _brand_disclosure
+    from app.catalog.series_index import resolve_series
+
+    for msg in ("极光 星舰值得买吗", "银河 E5值得买吗", "极光 星舰和银河 E5哪个好"):
+        resolved = resolve_series(db_session, msg)
+        assert resolved, f"前提：「{msg}」能解析出车系"
+        note = _brand_disclosure(db_session, resolved, msg).strip()
+        assert not note, f"「{msg}」不该报出品牌反问（车系名带空格，前半截恰是品牌词）。实得：{note[:120]}"
 
 
 # ── 回归守卫：改前就报、改后也报的都要保住 ─────────────────────────────────

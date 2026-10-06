@@ -552,6 +552,43 @@ def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
 #: 品牌反问里最多给几个可点的车系样例。
 _BRAND_SAMPLE_LIMIT = 3
 
+
+def _series_name_spans(
+    message: str, resolved: list[tuple[VehicleSeries, Brand | None]]
+) -> list[tuple[int, int]]:
+    """已解析车系名在归一化消息里占据的区间（半开），含「品牌+车系」拼接形式。"""
+    normalized = normalize_name(message)
+    spans: list[tuple[int, int]] = []
+    for series, brand in resolved:
+        names = [series.name, *(series.aliases or [])]
+        if brand is not None:
+            names.append(f"{brand.name}{series.name}")
+        for raw in names:
+            needle = normalize_name(raw or "")
+            if not needle:
+                continue
+            start = normalized.find(needle)
+            while start != -1:
+                spans.append((start, start + len(needle)))
+                start = normalized.find(needle, start + 1)
+    return spans
+
+
+def _brand_appears_outside(
+    normalized: str, label: str, spans: list[tuple[int, int]]
+) -> bool:
+    """品牌词是否**至少有一次**出现落在所有车系名区间之外。"""
+    needle = normalize_name(label)
+    if not needle:
+        return False
+    start = normalized.find(needle)
+    while start != -1:
+        end = start + len(needle)
+        if not any(lo <= start and end <= hi for lo, hi in spans):
+            return True
+        start = normalized.find(needle, start + 1)
+    return False
+
 #: 被上限截掉的车系名最多列几个（再多的用「等共 N 台」收尾，不把回答撑成长名单）。
 _DROPPED_NAME_LIMIT = 5
 
@@ -675,6 +712,31 @@ def _brand_disclosure(
     # 遮蔽让「车系名」和「品牌词」在文本层完全不可区分，挡住它的只有这里。
     resolved_brands |= {series.name for series, _b in resolved}
     candidates = sorted(brand_candidates_in_message(db, message) - resolved_brands)
+    # **兜底：品牌词在消息里每一次出现都落在已解析车系名的字面范围内 → 剔掉。**
+    #
+    # 2026-10-07 独立审查实测的一类真误反问：切段字符把**含空格/连字符的车系名**
+    # 切碎，碎片恰好等于某个品牌词——「MG Cyberster和汉哪个好」在答案末尾追加
+    # 「MG 是品牌，库里有 7 款…它不是一款车」，而答案开头刚报完这台车的完整参数。
+    # 真实库 18 个车系中招（MG 4X / MG Cyberster / MG ES5 / iCAR 超级V23 / iCAR V27 /
+    # 极狐 阿尔法S5 / 极狐 考拉S …）。
+    #
+    # `resolved_brands` 那道相减**挡不住**：它按 `brand.name` 减，而库里有**空的重复
+    # 品牌行**——「MG」(id=10) 与「名爵」(id=55) 是两行，MG Cyberster 挂在名爵下，
+    # 于是「MG」逃过相减。
+    #
+    # 这里判的是「**每一次**出现都在车系名里」而不是「出现过」：
+    # 「北京现代ix35和北京哪个好」里「北京」既出现在车系名内部、又独立出现了一次，
+    # 那一次是真的在问品牌，必须保留。
+    #
+    # 这是**剔除**方向：只会让候选变少，不会新增错误。
+    if candidates:
+        spans = _series_name_spans(message, resolved)
+        if spans:
+            normalized = normalize_name(message)
+            candidates = [
+                label for label in candidates
+                if _brand_appears_outside(normalized, label, spans)
+            ]
     if not candidates:
         return ""
     # 库里 0 款在售的品牌不反问：说「库里有 0 款在售车」再附几个样例，
