@@ -604,28 +604,22 @@ def _brand_disclosure(
     return f"\n{detail}——它不是一款车。想比哪一款？把车系名给我{hint}，我就能比。"
 
 
-def _brand_series_count(db: Session, brand_name: str) -> int:
-    """某品牌在售车系数（查库，不用字符串猜）。"""
-    from sqlalchemy import func, select
+def _brand_active_series(db: Session, brand_name: str) -> list[str]:
+    """某品牌名对应的在售车系名（按车系 id 升序）。
 
-    from app.common.models import Brand, VehicleSeries
+    先按 `brand_id` 精确取。**取不到时才**用「车系名以该品牌词开头」兜一次——
+    真实库里有**空的重复品牌行**：
 
-    return int(
-        db.execute(
-            select(func.count(VehicleSeries.id))
-            .join(Brand, VehicleSeries.brand_id == Brand.id)
-            .where(Brand.name == brand_name, VehicleSeries.active_status == "active")
-        ).scalar()
-        or 0
-    )
+        「MG」   → 在售车系 = []            ← 空行
+        「名爵」 → 在售车系 = [MG4, MG5, MG6, MG7, MG 4X, MG ES5, MG Cyberster]
 
+    MG 与名爵是两个 `brand_id`，MG 的 7 款车全挂在名爵下。只按 `brand_id` 数，
+    「MG」算出 0 款，而用户问「MG 和汉哪个好」时，「0 款不反问」那条会把 MG
+    **整段吞掉**——系统对用户亲口点名的品牌一个字不提。审查实测 334 字、
+    回答里不含「MG」。
 
-def _sample_series_names(db: Session, brand_names: list[str], limit: int = 3) -> list[str]:
-    """给反问配几个可点的车系样例，让用户知道「说车系名」具体指什么。
-
-    查不到就返回空列表——调用方据此省掉「比如…」那半句。此前这里兜底硬编码
-    「朗逸」，于是「库里有 **0 款**在售车……（比如**朗逸**）」这种自相矛盾的话
-    会被原样说给用户。
+    兜底只对**按 brand_id 算出来是 0** 的品牌生效，所以「长安」仍报 26 款，
+    不会把启源那 8 款重复算进去。
     """
     from sqlalchemy import select
 
@@ -634,11 +628,48 @@ def _sample_series_names(db: Session, brand_names: list[str], limit: int = 3) ->
     rows = db.execute(
         select(VehicleSeries.name)
         .join(Brand, VehicleSeries.brand_id == Brand.id)
-        .where(Brand.name.in_(brand_names), VehicleSeries.active_status == "active")
+        .where(Brand.name == brand_name, VehicleSeries.active_status == "active")
         .order_by(VehicleSeries.id)
-        .limit(limit)
     ).all()
-    return [r[0] for r in rows]
+    if rows:
+        return [r[0] for r in rows]
+    head = normalize_name(brand_name)
+    if not head:
+        return []
+    cands = db.execute(
+        select(VehicleSeries.name)
+        .where(
+            VehicleSeries.active_status == "active",
+            VehicleSeries.name.like(f"{brand_name}%"),
+        )
+        .order_by(VehicleSeries.id)
+    ).all()
+    return [r[0] for r in cands if normalize_name(r[0]).startswith(head)]
+
+
+def _brand_series_count(db: Session, brand_name: str) -> int:
+    """某品牌在售车系数（查库，不用字符串猜）。见 `_brand_active_series` 的兜底说明。"""
+    return len(_brand_active_series(db, brand_name))
+
+
+def _sample_series_names(db: Session, brand_names: list[str], limit: int = 3) -> list[str]:
+    """给反问配几个可点的车系样例，让用户知道「说车系名」具体指什么。
+
+    与计数同源（`_brand_active_series`），否则会出现「库里有 7 款在售车」却
+    一个样例都列不出来的句子。
+
+    查不到就返回空列表——调用方据此省掉「比如…」那半句。此前这里兜底硬编码
+    「朗逸」，于是「库里有 **0 款**在售车……（比如**朗逸**）」这种自相矛盾的话
+    会被原样说给用户。
+    """
+    out: list[str] = []
+    for name in brand_names:
+        for series_name in _brand_active_series(db, name):
+            if series_name not in out:
+                out.append(series_name)
+            if len(out) >= limit:
+                return out
+    return out
 
 
 def build_series_qa_answer(

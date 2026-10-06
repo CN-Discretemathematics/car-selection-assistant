@@ -243,3 +243,67 @@ def test_brand_of_the_resolved_series_is_not_disclosed(db_session: Session):
         f"朗逸本身就是大众的车，不该再反问「大众是品牌」。实际末尾：{text[-200:]}"
     )
     assert "朗逸" in text, "朗逸是已答对的那台车，必须仍然出现"
+
+
+def test_brand_word_appearing_both_inside_and_outside_is_disclosed(db_session: Session):
+    """品牌词**既在车系名内部、又在别处独立出现**时，独立的那次要算数。
+
+    这是位置判定与早先子串排除**真正不等价**的地方。真实库实测五类问句
+    （`北京现代ix35和北京`、`长安启源A06和长安`、`长城猛龙 PLUS和长城`、
+    `郑州日产Z9 GE PHEV和日产`、`东风风神E70和东风`）：位置判定反问，子串排除全不反问。
+
+    子串排除是全局一刀切——`any(name in s for s in owned)` 命中一次就把整个品牌词
+    排掉，连独立那次一起排。后果是用户提了「北京」而系统对「北京」一个字不提，
+    **而全量测试照样全绿**。这条用例就是防这个的。
+    """
+    src = make_source(db_session, name="汽车之家")
+    bj_modern = make_brand(db_session, name="北京现代", source=src)
+    bj = make_brand(db_session, name="北京", source=src)
+    s = make_series(db_session, bj_modern, name="现代ix35", source=src, positioning="紧凑型SUV")
+    make_series(db_session, bj, name="北京越野BJ40", source=src, positioning="中型SUV")
+    db_session.commit()
+
+    resolved, text = _ask(db_session, "北京现代ix35和北京哪个好")
+    assert len(resolved) == 1 and resolved[0][0].name == "现代ix35", (
+        f"前提是只解析出北京现代ix35，实际 {[s.name for s, _ in resolved]}"
+    )
+    assert "款在售车" in text and "想比哪一款" in text, (
+        f"「北京」在「北京现代ix35」之外独立出现了一次，必须反问。实际末尾：{text[-200:]}"
+    )
+    assert s.name in text or "ix35" in text, "已答对的那台车不能被吞掉"
+
+
+def test_phantom_brand_row_falls_back_to_series_name_prefix(db_session: Session):
+    """空的重复品牌行要靠「车系名以该品牌词开头」兜住，否则用户点名的品牌被整段吞掉。
+
+    真实库事实（独立审查实测）：
+
+        「MG」  → 该 brand_id 下 0 款在售
+        「名爵」→ 该 brand_id 下 7 款：MG4 / MG5 / MG6 / MG7 / MG 4X / MG ES5 / MG Cyberster
+
+    只按 `brand_id` 数，「MG 和汉哪个好」算出的 MG 是 0 款，被「0 款不反问」
+    那条整段丢弃——**回答 334 字，里面一个字都不提 MG**。而用户明明点名了它。
+
+    这里用同构数据构造：品牌行「极氪」下 0 款在售，车系「极氪001」挂在另一个
+    品牌行「吉利汽车」下。兜底只对**算出来是 0** 的品牌生效，所以「吉利汽车」
+    自己的计数不受影响。
+    """
+    src = make_source(db_session, name="汽车之家")
+    geely = make_brand(db_session, name="吉利汽车", source=src)
+    make_brand(db_session, name="极氪", source=src)      # 空行：下面不放车系
+    make_series(db_session, geely, name="极氪001", source=src, positioning="中型轿车")
+    vw = make_brand(db_session, name="大众", source=src)
+    langyi = make_series(db_session, vw, name="朗逸", source=src, positioning="紧凑型车")
+    year = make_year(db_session, langyi)
+    make_variant(db_session, langyi, year, config_version="旗舰", energy_type="BEV",
+                 price_cny="150000", source=src)
+    db_session.commit()
+
+    resolved, text = _ask(db_session, "极氪和朗逸哪个好")
+    assert len(resolved) == 1 and resolved[0][0].name == "朗逸", (
+        f"前提是只解析出朗逸（极氪不是车系名），实际 {[x.name for x, _ in resolved]}"
+    )
+    assert "极氪" in text and "款在售车" in text, (
+        f"「极氪」独立出现、且车系挂在另一个品牌行下，不该被整段吞掉。实际末尾：{text[-200:]}"
+    )
+    assert "朗逸" in text, "已答对的那台车不能被吞掉"
