@@ -120,6 +120,70 @@ def test_brand_name_containing_link_char_stays_reachable(db_session: Session) ->
     del holder
 
 
+def test_numeric_brand_name_does_not_swallow_placeholders(db_session: Session) -> None:
+    """品牌词表里出现**纯数字**名时，不能把已放好的占位符一起吃掉。
+
+    遮蔽若用循环 `str.replace`，占位符里的十进制序号会被后面那轮 `replace`
+    一起替换掉——加一个叫「0」的品牌，**序号含 0 的那些**占位符（10/20/100…）
+    全部损坏，排在它们前面的品牌**同时静默失能**。真实库当前没有纯数字品牌名
+    （第六轮枚举：92 个活跃品牌里纯数字 0 个），但那纯属运气。
+
+    ⚠️ 这条用例必须造到**第 10 个** token 才逼得出真冲突：序号从 1 起，
+    1~9 的 token 里没有「0」字符，早先只造 2 个品牌时循环版看不出差别——
+    那是**空转**，已修。
+    """
+    src = make_source(db_session, name="汽车之家")
+    # 12 个中文品牌（造到两位数序号）+ 1 个纯数字品牌名
+    names = ["星比", "远航", "甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"]
+    for n in names:
+        make_brand(db_session, name=n, source=src)
+    make_brand(db_session, name="0", source=src)
+    for n in names:
+        s = make_series(db_session, _brand_named(db_session, n), name=f"{n}001",
+                        source=src, positioning="轿车")
+        year = make_year(db_session, s)
+        make_variant(db_session, s, year, config_version="旗舰", energy_type="BEV",
+                     price_cny="150000", source=src)
+    db_session.commit()
+
+    msg = "和".join(names) + "哪个好"
+    got = brand_candidates_in_message(db_session, msg)
+    missing = sorted(set(names) - got)
+    assert not missing, (
+        f"纯数字品牌名「0」把占位符里的序号一起吃掉，丢了 {missing}。"
+        f"实得={sorted(got)}"
+    )
+
+
+def _brand_named(db: Session, name: str):
+    from app.common.models import Brand
+
+    return db.query(Brand).filter(Brand.name == name).one()
+
+
+def test_series_named_exactly_like_a_brand_is_not_called_a_brand(db_session: Session) -> None:
+    """车系名**恰好等于**某个品牌词时，不能说它「不是一款车」。
+
+    真实库有个车系就叫「MINI」，它恰好挂在品牌「MINI」下——**纯属数据巧合**，
+    代码里没有任何东西保证这一点。遮蔽让「车系名」和「品牌词」在文本层完全
+    不可区分，挡住误报的只有 `resolved_brands` 那道相减，所以必须显式把
+    「已解析车系名」也算进去。
+    """
+    src = make_source(db_session, name="汽车之家")
+    other = make_brand(db_session, name="远望", source=src)   # 车系挂在**别的**品牌下
+    make_brand(db_session, name="MINI", source=src)
+    s = make_series(db_session, other, name="MINI", source=src, positioning="紧凑型车")
+    year = make_year(db_session, s)
+    make_variant(db_session, s, year, config_version="旗舰", energy_type="BEV",
+                 price_cny="150000", source=src)
+    db_session.commit()
+
+    resolved, text = _ask(db_session, "MINI值得买吗")
+    assert len(resolved) == 1 and resolved[0][0].name == "MINI"
+    assert "它不是一款车" not in text, f"用户只问了一台车，不该被告知它不是车。实际末尾：{text[-200:]}"
+    assert "想比哪一款" not in text, f"不该出现品牌反问。实际末尾：{text[-200:]}"
+
+
 def test_comma_separated_candidates_are_detected(db_session: Session) -> None:
     """逗号也是切段字符：「预算20万，大众和汉哪个好」这类写法非常常见。
 

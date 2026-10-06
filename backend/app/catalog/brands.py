@@ -183,13 +183,26 @@ def brand_candidates_in_message(db: Session, message: str) -> set[str]:
     # 遮蔽成不含切段字符的占位符，这一整类冲突就不存在了：
     # 品牌词表与切段字符集共用字母表，而遮蔽让两者不再互相干扰。
     # `_load_entries` 已按长度降序，长名先遮，短名不会被长名内部的碎片顶掉。
-    masked = normalized
-    marks: list[str] = []
-    for name, _brand_id, _label in entries:
-        if name in masked:
-            marks.append(name)
-            masked = masked.replace(name, f"\x00{len(marks) - 1}\x00")
-    tokens = {f"\x00{i}\x00": name for i, name in enumerate(marks)}
+    # ⚠️ 用**单次扫描替换**，不是循环 `str.replace`。循环版有个隐蔽的坑：
+    # 占位符里带十进制序号，一旦品牌词表里出现纯数字品牌名（哪怕叫「0」），
+    # 后面那轮的 `replace` 会把**前面已经放好的占位符**里的数字一起吃掉，
+    # 于是排在它前面的所有品牌**同时静默失能**。第六轮审查在合成库里逼出了这个，
+    # 真实库当前没有这类品牌——但那纯属运气。
+    # `re.sub` 在**原串**上匹配、只输出替换结果，天然没有这个问题。
+    # `_load_entries` 已按长度降序，正则的交替分支因此「长名优先」。
+    pattern = re.compile("|".join(re.escape(n) for n, _b, _l in entries))
+    marks: dict[str, str] = {}
+
+    def _mark(match: re.Match) -> str:
+        word = match.group()
+        if word not in marks:
+            # \x00 不可能出现在品牌名里（品牌名来自用户可见文本）；
+            # 序号从 1 起，前后各包一个 \x00，多位数也不会与品牌名里的数字混读
+            marks[word] = f"\x00{len(marks) + 1}\x00"
+        return marks[word]
+
+    masked = pattern.sub(_mark, normalized)
+    tokens = {token: word for word, token in marks.items()}
 
     found: set[str] = set()
     for segment in re.split(f"[{re.escape(''.join(sorted(COMPARISON_LINK_CHARS)))}]", masked):

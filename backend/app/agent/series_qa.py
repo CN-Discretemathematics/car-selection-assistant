@@ -632,6 +632,12 @@ def _brand_disclosure(
     # 品牌是**已解析车系自己的**品牌 → 用户已经点名到车系了，再问一遍是废话
     # （「大众和朗逸哪个好」：朗逸就是大众的车，反问等于把用户刚给的车型名推荐回去）
     resolved_brands = {brand.name for _s, brand in resolved if brand is not None}
+    # 品牌词**恰好等于某个已解析车系名**时同样不报。真实库有个车系就叫「MINI」，
+    # 它恰好挂在品牌「MINI」下——那是数据巧合，代码里没有任何东西保证它。
+    # 合成库里把「MINI」车系挂到别的品牌下，问「MINI值得买吗」就会得到
+    # 「MINI 是品牌…它不是一款车」——用户只问了一台车，却被告知它不是车。
+    # 遮蔽让「车系名」和「品牌词」在文本层完全不可区分，挡住它的只有这里。
+    resolved_brands |= {series.name for series, _b in resolved}
     candidates = sorted(brand_candidates_in_message(db, message) - resolved_brands)
     if not candidates:
         return ""
