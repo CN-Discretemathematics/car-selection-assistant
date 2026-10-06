@@ -93,6 +93,91 @@ def brand_entries(db: Session) -> tuple[tuple[str, int, str], ...]:
     return _load_entries(db)
 
 
+#: 品牌词**独立作为一个比较候选**时的邻接字：归一化后紧邻品牌词左边或右边的那一个字。
+#: 取自 `answer_contract._NAME_SHAPE_RE` 已有的连接/语气字集合（那里是拿它们**排除**，
+#: 这里反过来拿它们**认定**），只留真正表示「两个对象并列」的那几个。
+#:
+#: ⚠️ 刻意**不含**「，」：`normalize_name` 剥掉「、」但保留「，」，
+#: 而「汉的油耗怎么样，理想一点吗」里的「理想」前面正是「，」——把它当连接词，
+#: 就会对着一个问油耗的用户说「理想是品牌，库里有 5 款」。
+COMPARISON_LINK_CHARS = frozenset("和跟与及或对比")
+
+#: 问句尾巴。从每段**末尾**剥掉，直到剥不动为止。
+#: 这份清单**不需要完备**——缺一项的后果是「本该报却没报」（漏报），而不是误报。
+#: 方向是安全的那一侧：先按连接词切段，品牌词必须与整段**完全相等**才认。
+_QUESTION_TAILS = (
+    "值得买吗", "值不值", "能买吗", "是不是", "好不好", "怎么样", "哪个好",
+    "哪个", "好吗", "有吗", "是吗", "吗", "呢", "吧", "啊", "的", "好", "？", "?",
+)
+
+
+def brand_candidates_in_message(db: Session, message: str) -> set[str]:
+    """消息里**独立作为一个比较候选**出现的库内品牌名。
+
+    判据只有一条：**按比较连接词切段、剥掉每段末尾的问句尾巴之后，品牌词与整段
+    完全相等**。
+
+    ## 为什么不是「重建用户写了什么再建区间」
+
+    2026-10-06 血泪：先前用的是「从库里重推一遍用户可能写的字面，建区间，再看品牌词
+    是否落在所有区间之外」。那个方向默认是「是」，只要**多一类字面来源**就会漏进门，
+    而 `resolve_series` 的候选来源有**五类**：
+
+        车系名 / 品牌+车系 / 去掉品牌前缀的短名 / 别名 / 在售款型显示名
+
+    连续四轮各堵了一扇门（AMG GT 里的 MG → 北京 → 名爵空品牌行 → C级AMG 裸型号），
+    第五扇（在售款型显示名）一直开着——评测语料 q0069
+    「帮我对比 2026款 2.0L e:HEV 锐·领享版 和 2026款 AMG GLB 35 4MATIC 的配置差异」
+    在那个版本上仍在末尾多报一段「MG 是品牌，库里有 7 款」。
+
+    ## 为什么不是「品牌词紧邻连接词」
+
+    那样试过，默认方向虽然翻过来了，却仍有两类误报：
+
+        「奔驰C级AMG和朗逸哪个好」  AMG|和|朗逸  「MG」紧跟「和」，但在「amg」里面
+        「朗逸和北京现代ix35哪个好」  和|北京|现代  「北京」紧跟「和」，但在车系名里面
+
+    中文没有词边界，「和星芒S7」里的「星芒」和「和汉」里的「汉」在结构上**完全一样**，
+    光看左右邻字分不开。**整段相等**能分开：前者切出「星芒S7」、后者切出「汉」。
+
+    ## 真实库逐条核对
+
+        「大众和汉哪个好」            → 段 [大众, 汉]        → 大众 ✅
+        「汉和大众哪个好」            → 段 [汉, 大众]        → 大众 ✅
+        「北京现代ix35和北京哪个好」   → 段 [北京现代ix35, 北京] → 北京 ✅
+        「朗逸和北京现代ix35哪个好」   → 段 [朗逸, 北京现代ix35] → 不报 ✅
+        「五菱和缤果Pro哪个好」        → 段 [五菱, 缤果Pro]    → 五菱（由调用方相减挡掉）
+        「MG和汉哪个好」              → 段 [MG, 汉]          → MG ✅
+        「AITO问界和汉哪个好」         → 段 [AITO问界, 汉]     → 问界 ✅（AITO问界 是它的别名）
+        「奔驰C级AMG值得买吗」         → 段 [奔驰C级AMG]       → 不报 ✅
+        「C级AMG值得买吗」             → 段 [C级AMG]           → 不报 ✅
+        「AMG GT值得买吗」            → 段 [AMG GT]          → 不报 ✅
+        「2025款 熊猫mini 210km 元气熊值得买吗」→ 段 [2025款 熊猫mini…] → 不报 ✅
+        「朗逸适合大众家用吗」          → 段 [朗逸适合大众家用]   → 不报 ✅
+        「汉的油耗怎么样，理想一点吗」    → 段 [汉的油耗…]      → 不报 ✅
+    """
+    normalized = normalize_name(message)
+    if not normalized:
+        return set()
+    labels: dict[str, str] = {}
+    for name, _brand_id, label in _load_entries(db):
+        labels.setdefault(name, label)
+
+    found: set[str] = set()
+    for segment in re.split(f"[{re.escape(''.join(sorted(COMPARISON_LINK_CHARS)))}]", normalized):
+        seg = segment.strip()
+        while seg:
+            for tail in _QUESTION_TAILS:
+                if seg.endswith(tail) and len(seg) > len(tail):
+                    seg = seg[: -len(tail)]
+                    break
+            else:
+                break
+        if seg and seg in labels:
+            found.add(labels[seg])
+    return found
+
+
 # 明确品牌约束的语气（「只要奔驰」「必须是奔驰」「想买奔驰」）
 BRAND_INTENT_RE = re.compile(
     r"(只要|只考虑|只看|只买|必须是|必须|就要|想要|想买|打算买|要买|买个|购买|买|锁定)"
