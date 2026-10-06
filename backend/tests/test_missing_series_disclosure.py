@@ -96,3 +96,150 @@ def test_bare_brand_ask_lists_its_series(db_session: Session):
     resolved = resolve_series(db_session, msg)
     text = build_series_qa_answer(db_session, resolved, msg)
     assert "朗逸" in text, f"朗逸在库里，回答里必须出现它。实际：{text[:160]}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2026-10-06 独立审查（判不通过）后补的回归。
+#
+# 上一批用例的两个问句「传祺和朗逸哪个好」「大众柯珞克哪个好」都只解析出**1**个
+# 车系，只走单车系分支。三处调用点里另外两处**零覆盖**——独立审查给
+# `_brand_disclosure` 装探针跑完整套件，非空返回只出现 3 次且全是 `len==1`。
+# 下面这批专门补上双车系 / 三车系，以及「不该反问」的两种反向情形。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _seed_multis(db: Session):
+    """多种子：覆盖同级/异级/三车系，以及两种**不该**反问的形态。"""
+    src = make_source(db, name="汽车之家")
+    vw = make_brand(db, name="大众", source=src)
+    gq = make_brand(db, name="传祺", source=src)
+    sk = make_brand(db, name="斯柯达", source=src)
+    jiguang = make_brand(db, name="极光", source=src)   # 库里有车系 → 排除条件不成立
+    # 启辰只通过问句文本被提到（「启辰和朗逸哪个好」），不需要持有引用
+    make_brand(db, name="启辰", source=src)             # 库里 0 款在售
+    langyi = make_series(db, vw, name="朗逸", source=src, positioning="紧凑型车")
+    xuanyi = make_series(db, vw, name="轩逸", source=src, positioning="紧凑型车")
+    maiteng = make_series(db, vw, name="迈腾", source=src, positioning="中型车")
+    # 品牌名「极光」嵌在**别的**品牌（斯柯达）的车系名里 —— 与真实库的
+    # 「AMG GT」含「MG」、「宏光MINIEV」含「MINI」同构。
+    make_series(db, sk, name="极光星舰", source=src, positioning="中型SUV")
+    make_series(db, gq, name="传祺GS4", source=src, positioning="紧凑型SUV")
+    make_series(db, jiguang, name="极光007", source=src, positioning="轿车")
+    for s in (langyi, xuanyi, maiteng):
+        year = make_year(db, s)
+        make_variant(db, s, year, config_version="旗舰", energy_type="BEV",
+                     price_cny="150000", source=src)
+    db.commit()
+
+
+def _ask(db: Session, msg: str):
+    resolved = resolve_series(db, msg)
+    return resolved, build_series_qa_answer(db, resolved, msg)
+
+
+def test_two_series_same_class_still_gets_brand_ask(db_session: Session):
+    """两款车**同级**时品牌反问也必须追加——独立审查 S1 抓到的那处缩进。
+
+    此前这三行写在 `if same_class: ... else: ...` 的 `else` 里，于是
+    `same_class` 为真时整段被跳过：「传祺和朗逸、轩逸哪个好」里「传祺」是个
+    品牌，系统却一声不吭。
+
+    现有测试抓不到，是因为 `make_series()` 从不设 `positioning`，种子车系全为
+    `None` → `same_class` 恒假 → 这条分支走不到。种子加了 `positioning` 才走得进去。
+    """
+    _seed_multis(db_session)
+    resolved, text = _ask(db_session, "传祺和朗逸、轩逸哪个好")
+    assert len(resolved) == 2, f"这条用例的前提是解析出 2 台，实际 {[s.name for s, _ in resolved]}"
+    assert resolved[0][0].positioning == resolved[1][0].positioning == "紧凑型车", (
+        "这条用例的前提是两台同级，实际 "
+        f"{[s.positioning for s, _ in resolved]}"
+    )
+    assert "款在售车" in text and "想比哪一款" in text, (
+        f"同级双车系时品牌反问被整段丢弃了。实际末尾：{text[-160:]}"
+    )
+    for name in ("朗逸", "轩逸"):
+        assert name in text, f"「{name}」在库里，回答里必须出现它。实际末尾：{text[-160:]}"
+
+
+def test_two_series_different_class_gets_brand_ask(db_session: Session):
+    """异级双车系同样要追加——与上一条对照，防止只修好其中一支。"""
+    _seed_multis(db_session)
+    resolved, text = _ask(db_session, "传祺和朗逸、迈腾哪个好")
+    assert len(resolved) == 2, f"实际 {[s.name for s, _ in resolved]}"
+    assert resolved[0][0].positioning != resolved[1][0].positioning, "前提是两台异级"
+    assert "款在售车" in text and "想比哪一款" in text, (
+        f"异级双车系时没有品牌反问。实际末尾：{text[-160:]}"
+    )
+
+
+def test_three_series_gets_brand_ask(db_session: Session):
+    """≥3 车系的汇总路径也要追加。"""
+    _seed_multis(db_session)
+    resolved, text = _ask(db_session, "传祺和朗逸、轩逸、迈腾哪个好")
+    assert len(resolved) == 3, f"实际 {[s.name for s, _ in resolved]}"
+    assert "款在售车" in text and "想比哪一款" in text, (
+        f"三车系汇总时没有品牌反问。实际末尾：{text[-200:]}"
+    )
+    for name in ("朗逸", "轩逸", "迈腾"):
+        assert name in text, f"「{name}」被汇总路径吞掉了。实际末尾：{text[-200:]}"
+
+
+def test_brand_word_inside_resolved_series_name_is_not_a_brand_ask(db_session: Session):
+    """品牌名嵌在**别的**品牌的车系名里时，不能判成「用户在问品牌」（独立审查 S2）。
+
+    真实库原文（修复前）：
+
+        「AMG GT 值得买吗」    → 解析出 AMG GT，却被判成在问品牌「MG」，
+                                报「库里有 0 款」并推荐朗逸；
+        「宏光MINIEV 值得买吗」→ 同理，推荐电动 MINI；
+        「东风本田S7 值得买吗」→ 「东风」当成品牌，推荐御风EM27。
+
+    本用例用「极光星舰」（斯柯达）含品牌「极光」同构构造，且**刻意让极光在库
+    里有车系**——这样即使位置判定整个失效、只剩「0 款不反问」那道，它也会暴露。
+    """
+    _seed_multis(db_session)
+    resolved, text = _ask(db_session, "极光星舰值得买吗")
+    assert len(resolved) == 1 and resolved[0][0].name == "极光星舰", (
+        f"前提是解析出斯柯达极光星舰，实际 {[s.name for s, _ in resolved]}"
+    )
+    assert "是品牌" not in text, (
+        f"「极光」嵌在车系名「极光星舰」里，不该被判成在问品牌。实际末尾：{text[-200:]}"
+    )
+    assert "想比哪一款" not in text, f"不该出现品牌反问。实际末尾：{text[-200:]}"
+
+
+def test_brand_with_zero_active_series_is_not_disclosed(db_session: Session):
+    """库里 0 款在售的品牌不反问（用户 2026-10-06 拍板）。
+
+    「库里有 0 款在售车……（比如朗逸）」是自相矛盾的话。此前 `_sample_series_names`
+    还会硬编码兜底成「朗逸」，两处叠加就成了这种句子。
+    """
+    _seed_multis(db_session)
+    resolved, text = _ask(db_session, "启辰和朗逸哪个好")
+    assert len(resolved) == 1 and resolved[0][0].name == "朗逸", (
+        f"前提是只解析出朗逸，实际 {[s.name for s, _ in resolved]}"
+    )
+    assert "启辰" not in text, f"启辰库里 0 款在售，不该出现在回答里。实际末尾：{text[-200:]}"
+    assert "0 款" not in text, f"不该报「0 款在售车」。实际末尾：{text[-200:]}"
+    assert "朗逸" in text, "朗逸在库里且是已答对的那台，不能被吞掉"
+
+
+def test_brand_of_the_resolved_series_is_not_disclosed(db_session: Session):
+    """品牌与**自家**车系分开写时也不反问——用户已经点名到车系了，再问一遍是废话。
+
+    真实库实测「大众和朗逸哪个好」：朗逸就是大众的车，系统只正常答朗逸（312 字），
+    不追加「大众是品牌……想比哪一款？比如**朗逸**」——那等于把用户刚给的车系名
+    原样推荐回去。
+
+    挡住它的是 `resolved_brands` 相减（朗逸的品牌就是大众），不是位置判断；
+    这条用例把这个区别钉住，防止以后重构时只保留位置判断而丢掉相减。
+    """
+    _seed_multis(db_session)
+    resolved, text = _ask(db_session, "大众和朗逸哪个好")
+    assert len(resolved) == 1 and resolved[0][0].name == "朗逸", (
+        f"前提是只解析出朗逸，实际 {[s.name for s, _ in resolved]}"
+    )
+    assert "想比哪一款" not in text, (
+        f"朗逸本身就是大众的车，不该再反问「大众是品牌」。实际末尾：{text[-200:]}"
+    )
+    assert "朗逸" in text, "朗逸是已答对的那台车，必须仍然出现"

@@ -45,6 +45,7 @@ def make_series(
     body_type: str = "suv",
     energy_types: tuple[str, ...] = ("BEV",),
     source: Source | None = None,
+    positioning: str | None = None,
 ) -> VehicleSeries:
     series = VehicleSeries(
         brand_id=brand.id,
@@ -54,6 +55,10 @@ def make_series(
         official_page_url="https://example.com/series",
         active_status="active",
         source_id=source.id if source else None,
+        # 2026-10-06 独立审查 P0：此前这个参数**不存在**，于是所有种子车系
+        # `positioning` 恒为 None → 多车系对比里 `same_class` 恒假，
+        # 「两款车同级」那条分支用现有种子根本走不到（详见 S1）。
+        positioning=positioning,
     )
     db.add(series)
     db.flush()

@@ -564,7 +564,15 @@ def _brand_disclosure(
     四轮审查反复翻车的那类启发式（品牌前缀判断、子串排除、连接词计数）这里一个
     都不需要。
 
+    什么时候算「用户在问品牌」，用户 2026-10-06 拍板两条：
+
+    1. **按位置**：品牌词必须落在已解析车系名的字面范围**之外**。真实库里
+       **541/908（59.6%）的车系名本身以品牌名开头**，按子串判断会把
+       「AMG GT」里的「MG」、「宏光MINIEV」里的「MINI」当成用户在问品牌。
+    2. **库里 0 款在售的品牌不反问**：报了「0 款」还要附样例，是自相矛盾。
+
     返回的是**补充**，不是替代——调用方必须把它追加在正常回答**之后**。
+    三处调用点（单车系 / 双车系 / ≥3 车系）都要追加，一条都不能漏。
     """
     from app.catalog.brands import brand_names_in_message
 
@@ -576,20 +584,24 @@ def _brand_disclosure(
         for series, brand in resolved
         for name in (series.name, f"{brand.name}{series.name}" if brand else series.name)
     ]
-    brand_only = brand_names_in_message(
-        db, message, owned, require_model_suffix=False, exclude_owned=False
-    ) - resolved_brands
+    # `brand_names_in_message` 按**位置**判：品牌词落在已解析车系名的字面范围内
+    # （「AMG GT」里的「MG」、「宏光MINIEV」里的「MINI」）不算用户在问品牌。
+    brand_only = brand_names_in_message(db, message, owned) - resolved_brands
+    if not brand_only:
+        return ""
+    # 库里 0 款在售的品牌**不反问**（用户 2026-10-06 拍板）。说「库里有 0 款在售车」
+    # 再附几个样例，本身就是一句自相矛盾的话——MG / 长安启源 / 理想汽车都会走到这句，
+    # 而它们触发的根因是品牌词嵌在别的品牌车系名里（上一段已挡掉），这里兜第二层。
+    counts = {label: _brand_series_count(db, label) for label in sorted(brand_only)}
+    brand_only = [label for label, c in counts.items() if c > 0]
     if not brand_only:
         return ""
     detail = "；".join(
-        f"「{label}」是品牌，库里有 {_brand_series_count(db, label)} 款在售车"
-        for label in sorted(brand_only)
+        f"「{label}」是品牌，库里有 {counts[label]} 款在售车" for label in brand_only
     )
-    samples = _sample_series_names(db, sorted(brand_only))
-    return (
-        f"\n{detail}——它不是一款车。想比哪一款？把车系名给我"
-        f"（比如{'、'.join(samples)}），我就能比。"
-    )
+    samples = _sample_series_names(db, brand_only)
+    hint = f"（比如{'、'.join(samples)}）" if samples else ""
+    return f"\n{detail}——它不是一款车。想比哪一款？把车系名给我{hint}，我就能比。"
 
 
 def _brand_series_count(db: Session, brand_name: str) -> int:
@@ -609,7 +621,12 @@ def _brand_series_count(db: Session, brand_name: str) -> int:
 
 
 def _sample_series_names(db: Session, brand_names: list[str], limit: int = 3) -> list[str]:
-    """给反问配几个可点的车系样例，让用户知道「说车系名」具体指什么。"""
+    """给反问配几个可点的车系样例，让用户知道「说车系名」具体指什么。
+
+    查不到就返回空列表——调用方据此省掉「比如…」那半句。此前这里兜底硬编码
+    「朗逸」，于是「库里有 **0 款**在售车……（比如**朗逸**）」这种自相矛盾的话
+    会被原样说给用户。
+    """
     from sqlalchemy import select
 
     from app.common.models import Brand, VehicleSeries
@@ -621,7 +638,7 @@ def _sample_series_names(db: Session, brand_names: list[str], limit: int = 3) ->
         .order_by(VehicleSeries.id)
         .limit(limit)
     ).all()
-    return [r[0] for r in rows] or ["朗逸"]
+    return [r[0] for r in rows]
 
 
 def build_series_qa_answer(
@@ -751,9 +768,15 @@ def build_series_qa_answer(
             + price_verdict + "，直接比「谁更好」意义不大；"
             "更合适的做法是按预算与用途缩小范围——告诉我预算和主要用途，我可以帮你筛真正同档的候选。"
         )
-        brand_note = _brand_disclosure(db, resolved, message)
-        if brand_note:
-            blocks.append(brand_note)
+    # 与单车系、≥3 车系两处对齐：**同级/异级都要追加**。
+    # 2026-10-06 独立审查 P0：这三行原先缩进在上面的 `else` 里，
+    # 于是两台车定位相同时（`same_class` 为真）整段被跳过——「传祺和朗逸、轩逸
+    # 哪个好」里「传祺」是个品牌，系统却一声不吭。现有测试抓不到，因为
+    # `tests/seed.py` 的 `make_series()` 从不设 `positioning`，种子车系全为 None，
+    # `same_class` 恒假，这条分支用现有种子走不到。
+    brand_note = _brand_disclosure(db, resolved, message)
+    if brand_note:
+        blocks.append(brand_note)
     blocks.append("\n" + footer)
     return "\n".join(blocks)
 
