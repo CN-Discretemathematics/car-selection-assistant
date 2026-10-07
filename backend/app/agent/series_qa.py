@@ -670,7 +670,48 @@ def _brand_active_series(db: Session, brand_name: str) -> list[str]:
     hits = [(name, bid) for name, bid in cands if normalize_name(name).startswith(head)]
     if len({bid for _name, bid in hits}) > 1:
         return []  # 命中车系分属不同品牌行 → 不能算这个品牌的
-    return [name for name, _bid in hits]
+    if hits:
+        return [name for name, _bid in hits]
+
+    # **借用兄弟品牌行**（2026-10-07 用户拍板）。真实库有 5 个**幻影品牌行**——
+    # 品牌名在、车系不在，而车挂在**同一家公司另一个品牌行**下：
+
+    #     吉利银河  0 款  ←→  吉利汽车 11 款 / 银河 12 款
+    #     零跑汽车  0 款  ←→  零跑     9 款
+    #     理想汽车  0 款  ←→  理想     5 款
+    #     AITO 问界 0 款  ←→  问界     5 款
+    #     待分类（汽车之家销量榜）0 款  ←→  无对应，仍为 0
+    #
+    # 「车系名以该品牌词开头」这条兼底救不了它们——零跑的车叫「零跑T03」而不是
+    # 「零跑汽车T03」。改为：找一个**以本品牌名开头或结尾**的另一个品牌行，借它的车。
+    # 取**最长**的那个匹配（「长安启源」上面已经有 6 款，不会走到这里；真走到这里时
+    # 「长安启源」与「长安」都匹配，取「长安启源」优先才不会被 26 款的大品牌盖掉）。
+    from app.catalog.brands import _load_entries as _brand_entries
+    from app.common.models import Brand as _Brand
+
+    raw = brand_name.strip()
+    if len(raw) >= 2:
+        siblings = sorted(
+            {
+                other
+                for other, _bid, _label in _brand_entries(db)
+                if other != raw
+                and len(other) >= 2
+                and (raw.startswith(other) or raw.endswith(other))
+            },
+            key=len,
+            reverse=True,
+        )
+        for sibling in siblings:
+            rows_sib = db.execute(
+                select(VehicleSeries.name)
+                .join(_Brand, VehicleSeries.brand_id == _Brand.id)
+                .where(_Brand.name == sibling, VehicleSeries.active_status == "active")
+                .order_by(VehicleSeries.id)
+            ).all()
+            if rows_sib:
+                return [r[0] for r in rows_sib]
+    return []
 
 
 def _brand_disclosure(
@@ -877,6 +918,12 @@ def build_series_qa_answer(
         blocks.append("\n" + footer)
         return "\n".join(blocks)
 
+    # 2026-10-07：此前 `resolved[0][0]` / `resolved[1][0]` 在空列表上抛 IndexError。
+    # 生产调用点（`engine.py`）有 `if resolved:` 挡着，所以**用户碰不到**；但只要
+    # 将来多一个不经那层保护的调用点，或有人拿探针直接调它，就是一个必崩的入口。
+    # 这里把崩溃变成确定的空回答，成本一行。
+    if not resolved:
+        return ""
     first, second = resolved[0][0], resolved[1][0]
     same_class = first.positioning and first.positioning == second.positioning
     price_verdict = _price_overlap_verdict(db, first, second)

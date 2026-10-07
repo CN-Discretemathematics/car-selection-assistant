@@ -154,7 +154,23 @@ def _load_name_entries(db: Session) -> tuple[tuple[str, int], ...]:
         names: list[str] = [series.name]
         brand_name = brand.name if brand else ""
         if brand_name and series.name.startswith(brand_name):
-            names.append(series.name[len(brand_name):])
+            short = series.name[len(brand_name):]
+            # 2026-10-07：字母数字**混搭**且短于 4 字符的短名**不注册**。
+            # 「问界M6」去掉品牌前缀得到「M6」，而「传祺M6」里就含「m6」→ 解析成
+            # 问界M6（库里并没有传祺M6）；同类还有「宝马i5 M60」（"m60" 里含 "m6"）、
+            # 「吉利几何M6」。这类短名是**跨品牌的通用型号代号**，不是某台车的名字。
+            # 纯数字短名由下面 `not norm.isdigit()` 拦，本条管字母数字混搭。
+            # ⚠️ 判据是「**整串都是 ASCII** 的字母数字混搭」。「星越L」虽然含一个
+            # 拉丁字母，但主体是中文，那不是混搭、不能砍（实测会被误伤）。
+            mixed_short = (
+                len(short) < 4
+                and short.isascii()
+                and short.isalnum()
+                and not short.isalpha()
+                and not short.isdigit()
+            )
+            if short and not mixed_short:
+                names.append(short)
         if brand_name:
             names.append(f"{brand_name}{series.name}")
         names.extend(list(series.aliases or []))
