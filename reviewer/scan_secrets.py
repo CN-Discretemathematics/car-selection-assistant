@@ -197,12 +197,18 @@ def _looks_like_identifier_or_path(value: str) -> bool:
     （凭据文件路径）都判成了疑似密钥——同一行出现「token」字样就命中，纯属噪声。
     真实密钥几乎不会长成「纯小写单词用 _ 拼起来」或「带 / 与扩展名的路径」，
     因此这两类直接放过；混合大小写或含数字/符号的仍照常上报。
+
+    2026-10-07：snake_case 那条正则原先是 `[a-z][a-z0-9]*(_[a-z0-9]+)+`，
+    **要求以字母开头**，于是 `_foo` / `_private_key` 这类**前导下划线**的私有名
+    标识符一个都扫不出来——而 Python 私有属性/私有常量正是写成 `_name`。
+    改成 `[a-z_][a-z0-9]*(?:_[a-z0-9]+)+`：多一个前导下划线，噪音面不变
+    （仍然要求全小写 + 含下划线），覆盖面补上私有名。
     """
     candidate = value.strip()
     if "/" in candidate or "\\" in candidate or candidate.endswith((".txt", ".env", ".json", ".sh", ".py", ".md")):
         return True  # 路径 / 文件名
-    if re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", candidate):
-        return True  # snake_case 标识符（全小写 + 下划线）
+    if re.fullmatch(r"[a-z_][a-z0-9]*(?:_[a-z0-9]+)+", candidate):
+        return True  # snake_case 标识符（全小写 + 下划线，含 `_` 前导的私有名）
     if re.fullmatch(r"[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+", candidate):
         return True  # kebab-case / dotted 名称
     return False
