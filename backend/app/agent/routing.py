@@ -436,6 +436,32 @@ def _tool_loop_eligible(
     )
 
 
+def _brand_count_in_message(db: Session, message: str) -> int:
+    """消息里出现了几个**互不包含**的库内品牌名（按字面包含计数，不做整段相等判定）。
+
+    2026-10-07 上线前审查抓到的回归：扩词表后，「大众和丰田哪个**车**销量最好」被
+    判成全库榜问句，回一份带月份、带「39,651 辆」、带引用的**全库前十**，
+    **完全不提大众和丰田**。`0.7a2` 那个分支调的是 `sales_ranking(db, limit=10)`
+    ——**profile 压根没传进去**，所以价格/年份/车身这些限定词能被
+    `_SALES_RANKING_QUALIFIER_RE` 挡住，**唯独品牌挡不住**（限定词表里只有那四类）。
+
+    而「大众和丰田哪个车销量最好」是**两品牌对比**，它要的是这两家谁高，不是全库榜。
+
+    这里刻意用「字面包含」而不是 `brand_candidates_in_message` 的整段相等判定——
+    后者对「丰田哪个车销量最好」这种尾巴剥不干净的情况会漏掉「丰田」，数出来只有 1。
+    """
+    normalized = normalize_name(message)
+    if not normalized:
+        return 0
+    kept: list[str] = []
+    for name, _bid, _label in sorted(
+        brand_entries(db), key=lambda e: -len(e[0])
+    ):
+        if name and name in normalized and not any(name in k for k in kept):
+            kept.append(name)
+    return len(kept)
+
+
 def decide_route(
     message: str,
     hints: dict,
@@ -510,8 +536,13 @@ def decide_route(
     #        「销量数据不完整，没法给你准确的热门榜」，并凭记忆列举了速腾/凯美瑞/
     #        卡罗拉——**三款都不是销冠**（销冠是星愿 39,651 辆），而首页正下方
         #        就是同一份榜单。**该能答的说没有、不能答的凭记忆答**，两头都错。
-    #        守卫：不与「已点名车系」共存（「汉卖得好吗」是单车系问题，走档案/检索）。
-    if asks_sales_ranking(message) and not resolved:
+    #        守卫：不与「已点名车系」共存（「汉卖得好吗」是单车系问题，走档案/检索），
+    #        **也不与「已点名 ≥2 个品牌」共存**（见 `_brand_count_in_message`）。
+    if (
+        asks_sales_ranking(message)
+        and not resolved
+        and _brand_count_in_message(db, message) < 2
+    ):
         return RouteDecision(
             intent="sales_ranking",
             matched_rule="0.7a2:asks_sales_ranking+no_resolved",
@@ -665,7 +696,14 @@ def llm_intent_executable(
     if intent == "catalog_count":
         return not core_constraints and not resolved and not profile.brand_ids
     if intent == "sales_ranking":
-        return not resolved and asks_sales_ranking(message)
+        # 与 `decide_route` 的 0.7a2 同一套条件（2026-10-07）：LLM 把「大众和丰田
+        # 哪个车销量最好」判成 sales_ranking 时必须在这里也挡掉，否则它绕过正则路由
+        # 直接改了执行分支——这正是 `arbitrate_route` 那一段注释警告的情形。
+        return (
+            not resolved
+            and asks_sales_ranking(message)
+            and _brand_count_in_message(db, message) < 2
+        )
     if intent == "tool_loop":
         # 同 decide_route 的 0.75 分支：带排序意图时 tool_loop 是错的执行分支。
         # （原先把否决写在这个 return **之后**，是死代码——LLM 改写照样能从这扇门进来。）

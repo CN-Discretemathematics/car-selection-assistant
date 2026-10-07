@@ -615,15 +615,14 @@ def _dropped_note(
     if not dropped or [s.id for s, _ in again] != [s.id for s, _ in resolved]:
         return ""
     names = "、".join(f"「{n}」" for n in dropped[:_DROPPED_NAME_LIMIT])
-    more = f"等共 {len(dropped)} 台" if len(dropped) > _DROPPED_NAME_LIMIT else ""
-    tail = f"{names}{more}" if not more else f"{names}，{more}"
+    more = f"，等共 {len(dropped)} 台" if len(dropped) > _DROPPED_NAME_LIMIT else ""
     # 主语必须是**系统视角**，不能是「你一共提到 N 台」——独立审查实测（2026-10-07）：
     # 用户点 9 个名字、其中一个库里没有（「途观」只有「途观L插电混动」）时，
     # `total = len(resolved) + len(dropped)` 数的是**匹配上且去重后**的车系，
     # 会说出「你一共提到 8 台」——用户点的是 9 个，一对就发现是假话。
     return (
         f"\n下面放在一起看的是我认出的 {len(resolved)} 台车；"
-        f"没有放进来的有{tail}，可以单独问我。"
+        f"没有放进来的有{names}{more}，可以单独问我。"
     )
 
 
@@ -692,6 +691,9 @@ def _brand_active_series(db: Session, brand_name: str) -> list[str]:
 
     raw = brand_name.strip()
     if len(raw) >= 2:
+        # 排序键带名字本身，不能只用 `len`：同长度的兄弟来自 `set` 迭代，
+        # 顺序随进程哈希随机化（上线前审查实测 seed=2/4/7 时「长安启源」的候选
+        # 变成 ['启源','长安']）。款数当时恰好相同，但**答案是谁**不能靠运气。
         siblings = sorted(
             {
                 other
@@ -700,8 +702,7 @@ def _brand_active_series(db: Session, brand_name: str) -> list[str]:
                 and len(other) >= 2
                 and (raw.startswith(other) or raw.endswith(other))
             },
-            key=len,
-            reverse=True,
+            key=lambda s: (-len(s), s),
         )
         for sibling in siblings:
             rows_sib = db.execute(
