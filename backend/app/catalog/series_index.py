@@ -235,6 +235,31 @@ def _load_name_entries(db: Session) -> tuple[tuple[str, int], ...]:
     return tuple(entries)
 
 
+def active_series_count(db: Session) -> int:
+    """在售车系数——供回答里**声明覆盖范围**用。
+
+    2026-10-07 用户拍板：「大众朗逸和明锐哪个好」只回答朗逸、不说明明锐库里没有，
+    用户会以为看全了。要说「明锐没有」，前提是能认出它是个车型名——而库里没有它，
+    就需要一份全量车型名录，代价与收益不成比例。**改成说清范围**：
+    「以上基于库内在售的 N 个车系」。用户于是知道还有多少东西不在库里。
+
+    走与名称索引**同一份指纹缓存**，不额外打查询。
+    """
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return int(
+            db.execute(
+                select(func.count(VehicleSeries.id))
+                .where(VehicleSeries.active_status == "active")
+            ).scalar()
+            or 0
+        )
+    fingerprint = _series_fingerprint(db)
+    if _resolve_cache["fingerprint"] != fingerprint:
+        _resolve_cache["fingerprint"] = fingerprint
+        _resolve_cache["entries"] = _load_name_entries(db)
+    return int(fingerprint[0])
+
+
 def _series_fingerprint(db: Session) -> tuple:
     row = db.execute(
         select(

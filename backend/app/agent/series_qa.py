@@ -21,6 +21,7 @@ from app.catalog.series_constraints import PARAM_KEYS
 from app.catalog.series_index import (
     HEADLINE_ORDER,
     HEADLINE_PREFIX as _HEADLINE_PREFIX,
+    active_series_count,
     normalize_name,
     split_key_unit,
     display_name,
@@ -809,7 +810,15 @@ def build_series_qa_answer(
     message: str,
 ) -> str:
     """生成车系问答的确定性回答文本（所有内容来自数据库事实）。"""
-    footer = "以上基于汽车之家参数配置页与官方指导价整理（动态驾驶感受、车主口碑与优惠信息不在数据范围内），具体以品牌官网为准。"
+    # 2026-10-07 用户拍板：回答里**声明覆盖范围**。此前用户问「大众朗逸和明锐哪个好」
+    # 只得到朗逸的回答、没有任何「明锐库里没有」的提示，会以为看全了。说出范围
+    # （库内在售 N 个车系）比逐个点名「哪个没有」诚实且零维护成本——要说准某台车缺，
+    # 前提是能认出它是个车型名，而库里没有它就需要一份全量车型名录。
+    footer = (
+        "以上基于汽车之家参数配置页与官方指导价整理"
+        f"（范围：库内在售车系 {active_series_count(db)} 个，未收录的车型不在此列），"
+        "动态驾驶感受、车主口碑与优惠信息不在数据范围内，具体以品牌官网为准。"
+    )
 
     if len(resolved) == 1:
         series, brand = resolved[0]
