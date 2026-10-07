@@ -21,6 +21,7 @@ from app.catalog.series_constraints import PARAM_KEYS
 from app.catalog.series_index import (
     HEADLINE_ORDER,
     HEADLINE_PREFIX as _HEADLINE_PREFIX,
+    active_series_count,
     normalize_name,
     split_key_unit,
     display_name,
@@ -553,6 +554,78 @@ def _describe(db: Session, series: VehicleSeries, brand: Brand | None) -> str:
 _BRAND_SAMPLE_LIMIT = 3
 
 
+def _series_name_spans(
+    message: str, resolved: list[tuple[VehicleSeries, Brand | None]]
+) -> list[tuple[int, int]]:
+    """已解析车系名在归一化消息里占据的区间（半开），含「品牌+车系」拼接形式。"""
+    normalized = normalize_name(message)
+    spans: list[tuple[int, int]] = []
+    for series, brand in resolved:
+        names = [series.name, *(series.aliases or [])]
+        if brand is not None:
+            names.append(f"{brand.name}{series.name}")
+        for raw in names:
+            needle = normalize_name(raw or "")
+            if not needle:
+                continue
+            start = normalized.find(needle)
+            while start != -1:
+                spans.append((start, start + len(needle)))
+                start = normalized.find(needle, start + 1)
+    return spans
+
+
+def _brand_appears_outside(
+    normalized: str, label: str, spans: list[tuple[int, int]]
+) -> bool:
+    """品牌词是否**至少有一次**出现落在所有车系名区间之外。"""
+    needle = normalize_name(label)
+    if not needle:
+        return False
+    start = normalized.find(needle)
+    while start != -1:
+        end = start + len(needle)
+        if not any(lo <= start and end <= hi for lo, hi in spans):
+            return True
+        start = normalized.find(needle, start + 1)
+    return False
+
+#: 被上限截掉的车系名最多列几个（再多的用「等共 N 台」收尾，不把回答撑成长名单）。
+_DROPPED_NAME_LIMIT = 5
+
+
+def _dropped_note(
+    db: Session,
+    resolved: list[tuple[VehicleSeries, Brand | None]],
+    message: str,
+) -> str:
+    """点名超过上限时，**明说**哪些车系没被放进这次比较（2026-10-07 用户拍板）。
+
+    此前 `resolve_series` 硬编码 `[:4]`，用户点名 5 台时第 5 台被**静默丢掉**——
+    与同批修的「品牌被整段吞掉」是同一类错误：不响、用户以为 5 台都参与了。
+
+    只在真的触到上限时才重算一次解析；**重算结果与传进来的 `resolved` 必须逐 id
+    相同**才说话，否则宁可不提——不拿一个可能对不上的名单去糊弄用户。
+    """
+    from app.catalog.series_index import RESOLVE_SERIES_LIMIT, resolve_series_with_dropped
+
+    if len(resolved) < RESOLVE_SERIES_LIMIT:
+        return ""
+    again, dropped = resolve_series_with_dropped(db, message)
+    if not dropped or [s.id for s, _ in again] != [s.id for s, _ in resolved]:
+        return ""
+    names = "、".join(f"「{n}」" for n in dropped[:_DROPPED_NAME_LIMIT])
+    more = f"，等共 {len(dropped)} 台" if len(dropped) > _DROPPED_NAME_LIMIT else ""
+    # 主语必须是**系统视角**，不能是「你一共提到 N 台」——独立审查实测（2026-10-07）：
+    # 用户点 9 个名字、其中一个库里没有（「途观」只有「途观L插电混动」）时，
+    # `total = len(resolved) + len(dropped)` 数的是**匹配上且去重后**的车系，
+    # 会说出「你一共提到 8 台」——用户点的是 9 个，一对就发现是假话。
+    return (
+        f"\n下面放在一起看的是我认出的 {len(resolved)} 台车；"
+        f"没有放进来的有{names}{more}，可以单独问我。"
+    )
+
+
 def _brand_active_series(db: Session, brand_name: str) -> list[str]:
     """某品牌名对应的在售车系名（按车系 id 升序）。
 
@@ -597,7 +670,50 @@ def _brand_active_series(db: Session, brand_name: str) -> list[str]:
     hits = [(name, bid) for name, bid in cands if normalize_name(name).startswith(head)]
     if len({bid for _name, bid in hits}) > 1:
         return []  # 命中车系分属不同品牌行 → 不能算这个品牌的
-    return [name for name, _bid in hits]
+    if hits:
+        return [name for name, _bid in hits]
+
+    # **借用兄弟品牌行**（2026-10-07 用户拍板）。真实库有 5 个**幻影品牌行**——
+    # 品牌名在、车系不在，而车挂在**同一家公司另一个品牌行**下：
+
+    #     吉利银河  0 款  ←→  吉利汽车 11 款 / 银河 12 款
+    #     零跑汽车  0 款  ←→  零跑     9 款
+    #     理想汽车  0 款  ←→  理想     5 款
+    #     AITO 问界 0 款  ←→  问界     5 款
+    #     待分类（汽车之家销量榜）0 款  ←→  无对应，仍为 0
+    #
+    # 「车系名以该品牌词开头」这条兼底救不了它们——零跑的车叫「零跑T03」而不是
+    # 「零跑汽车T03」。改为：找一个**以本品牌名开头或结尾**的另一个品牌行，借它的车。
+    # 取**最长**的那个匹配（「长安启源」上面已经有 6 款，不会走到这里；真走到这里时
+    # 「长安启源」与「长安」都匹配，取「长安启源」优先才不会被 26 款的大品牌盖掉）。
+    from app.catalog.brands import _load_entries as _brand_entries
+    from app.common.models import Brand as _Brand
+
+    raw = brand_name.strip()
+    if len(raw) >= 2:
+        # 排序键带名字本身，不能只用 `len`：同长度的兄弟来自 `set` 迭代，
+        # 顺序随进程哈希随机化（上线前审查实测 seed=2/4/7 时「长安启源」的候选
+        # 变成 ['启源','长安']）。款数当时恰好相同，但**答案是谁**不能靠运气。
+        siblings = sorted(
+            {
+                other
+                for other, _bid, _label in _brand_entries(db)
+                if other != raw
+                and len(other) >= 2
+                and (raw.startswith(other) or raw.endswith(other))
+            },
+            key=lambda s: (-len(s), s),
+        )
+        for sibling in siblings:
+            rows_sib = db.execute(
+                select(VehicleSeries.name)
+                .join(_Brand, VehicleSeries.brand_id == _Brand.id)
+                .where(_Brand.name == sibling, VehicleSeries.active_status == "active")
+                .order_by(VehicleSeries.id)
+            ).all()
+            if rows_sib:
+                return [r[0] for r in rows_sib]
+    return []
 
 
 def _brand_disclosure(
@@ -639,6 +755,31 @@ def _brand_disclosure(
     # 遮蔽让「车系名」和「品牌词」在文本层完全不可区分，挡住它的只有这里。
     resolved_brands |= {series.name for series, _b in resolved}
     candidates = sorted(brand_candidates_in_message(db, message) - resolved_brands)
+    # **兜底：品牌词在消息里每一次出现都落在已解析车系名的字面范围内 → 剔掉。**
+    #
+    # 2026-10-07 独立审查实测的一类真误反问：切段字符把**含空格/连字符的车系名**
+    # 切碎，碎片恰好等于某个品牌词——「MG Cyberster和汉哪个好」在答案末尾追加
+    # 「MG 是品牌，库里有 7 款…它不是一款车」，而答案开头刚报完这台车的完整参数。
+    # 真实库 18 个车系中招（MG 4X / MG Cyberster / MG ES5 / iCAR 超级V23 / iCAR V27 /
+    # 极狐 阿尔法S5 / 极狐 考拉S …）。
+    #
+    # `resolved_brands` 那道相减**挡不住**：它按 `brand.name` 减，而库里有**空的重复
+    # 品牌行**——「MG」(id=10) 与「名爵」(id=55) 是两行，MG Cyberster 挂在名爵下，
+    # 于是「MG」逃过相减。
+    #
+    # 这里判的是「**每一次**出现都在车系名里」而不是「出现过」：
+    # 「北京现代ix35和北京哪个好」里「北京」既出现在车系名内部、又独立出现了一次，
+    # 那一次是真的在问品牌，必须保留。
+    #
+    # 这是**剔除**方向：只会让候选变少，不会新增错误。
+    if candidates:
+        spans = _series_name_spans(message, resolved)
+        if spans:
+            normalized = normalize_name(message)
+            candidates = [
+                label for label in candidates
+                if _brand_appears_outside(normalized, label, spans)
+            ]
     if not candidates:
         return ""
     # 库里 0 款在售的品牌不反问：说「库里有 0 款在售车」再附几个样例，
@@ -670,7 +811,15 @@ def build_series_qa_answer(
     message: str,
 ) -> str:
     """生成车系问答的确定性回答文本（所有内容来自数据库事实）。"""
-    footer = "以上基于汽车之家参数配置页与官方指导价整理（动态驾驶感受、车主口碑与优惠信息不在数据范围内），具体以品牌官网为准。"
+    # 2026-10-07 用户拍板：回答里**声明覆盖范围**。此前用户问「大众朗逸和明锐哪个好」
+    # 只得到朗逸的回答、没有任何「明锐库里没有」的提示，会以为看全了。说出范围
+    # （库内在售 N 个车系）比逐个点名「哪个没有」诚实且零维护成本——要说准某台车缺，
+    # 前提是能认出它是个车型名，而库里没有它就需要一份全量车型名录。
+    footer = (
+        "以上基于汽车之家参数配置页与官方指导价整理"
+        f"（范围：库内在售车系 {active_series_count(db)} 个，未收录的车型不在此列），"
+        "动态驾驶感受、车主口碑与优惠信息不在数据范围内，具体以品牌官网为准。"
+    )
 
     if len(resolved) == 1:
         series, brand = resolved[0]
@@ -696,6 +845,9 @@ def build_series_qa_answer(
         brand_note = _brand_disclosure(db, resolved, message)
         if brand_note:
             parts.append(brand_note.strip())
+        dropped = _dropped_note(db, resolved, message)
+        if dropped:
+            parts.append(dropped.strip())
         parts.append(footer)
         return "\n".join(parts)
 
@@ -738,7 +890,7 @@ def build_series_qa_answer(
 
     # 逐项对比（双方都有数据的量纲）
     # 尺寸必须走 `size_line`（众数+覆盖率）而不是 `heads_map` 的首值，否则
-    # 上面那一块写「5050*1960*1505 mm（在售 6 款中 4 款为此尺寸）」、
+    # 上面那一块写「5050*1960*1505 mm（6 款有尺寸数据，其中 4 款为此尺寸）」、
     # 下面这行写「4995*1910*1495 mm」——**同一条回答里自相矛盾**。
     heads = [
         head_with_size(size_map.get(series.id), heads_map.get(series.id, {}))
@@ -748,7 +900,7 @@ def build_series_qa_answer(
     for label in HEADLINE_ORDER:
         values = [h.get(label) for h in heads]
         # 2026-10-05：此前是 `values[0] vs values[1]`——三个及以上车系时
-        # **后面的被静默丢掉**（`resolve_series` 明确最多 4 个）。
+        # **后面的被静默丢掉**（`resolve_series` 上限是 `RESOLVE_SERIES_LIMIT`，当前 6）。
         # 用户问「汉、汉L、秦PLUS 怎么选」，对比行里只有秦PLUS vs 汉，汉L 消失，
         # 而上文三个车系块都在，用户看不出第三个没被比。
         if all(values):
@@ -770,9 +922,18 @@ def build_series_qa_answer(
         brand_note = _brand_disclosure(db, resolved, message)
         if brand_note:
             blocks.append(brand_note)
+        dropped = _dropped_note(db, resolved, message)
+        if dropped:
+            blocks.append(dropped)
         blocks.append("\n" + footer)
         return "\n".join(blocks)
 
+    # 2026-10-07：此前 `resolved[0][0]` / `resolved[1][0]` 在空列表上抛 IndexError。
+    # 生产调用点（`engine.py`）有 `if resolved:` 挡着，所以**用户碰不到**；但只要
+    # 将来多一个不经那层保护的调用点，或有人拿探针直接调它，就是一个必崩的入口。
+    # 这里把崩溃变成确定的空回答，成本一行。
+    if not resolved:
+        return ""
     first, second = resolved[0][0], resolved[1][0]
     same_class = first.positioning and first.positioning == second.positioning
     price_verdict = _price_overlap_verdict(db, first, second)
@@ -793,6 +954,9 @@ def build_series_qa_answer(
     brand_note = _brand_disclosure(db, resolved, message)
     if brand_note:
         blocks.append(brand_note)
+    dropped = _dropped_note(db, resolved, message)
+    if dropped:
+        blocks.append(dropped)
     blocks.append("\n" + footer)
     return "\n".join(blocks)
 

@@ -75,7 +75,8 @@ PR 的 base 可以是 `main`，**不要**为了「避开同文件冲突」把 ba
   机械计数交给 `doc_sync_check.py --fix`；两道都过再 commit
 - 端到端判据先定义再动手（真后端 + 真 DOM 断言），参考 `skills/` 同类脚本。
 - **ruff（2026-10-03 起可跑）**：`backend\.venv\Scripts\python.exe -m ruff check .`
-  在 `backend/` 下。基线 **130 条**，CI `lint` job 只报不拦。**不要无脑 `--fix`**：
+  在 `backend/` 下。基线 **129 条**（2026-10-07 起，原写 130；连续四轮实测均为 129，
+  且改动文件的告警条数与位置未变），CI `lint` job 只报不拦。**不要无脑 `--fix`**：
   I001 会把 `app.*` 排到 `load_dotenv()` 之前（搞坏环境加载），F401 会删掉
   `__init__.py` 的 re-export（外部 import 崩）。改动后若计数上升需在提交信息里说明。
   它的 `target-version = "py311"` 是本仓 3.11 兼容承诺的**唯一自动化执行点**——

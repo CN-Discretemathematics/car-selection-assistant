@@ -196,14 +196,59 @@ def asks_catalog_count(message: str) -> bool:
 #: 排除「解释/为什么」语境：那是问原因不是要榜单。
 _SALES_RANKING_RE = re.compile(
     r"(热门的?|卖得(好|快)|销量(榜|排名|排行)|最(火|畅销|受欢迎)|"
-    r"什么车(最)?(火|畅销|受欢迎)|哪款车(最)?(火|畅销)|卖得最好的)"
+    r"什么车(最)?(火|畅销|受欢迎)|哪款车(最)?(火|畅销)|卖得最好的|"
+    # 2026-10-07：「什么车销量最好」这类**主句式**此前接不住——「销量」只在
+    # `销量(榜|排名|排行)` 一个分支里，用户最常问的那句落到了错分支去。
+    r"什么车销量(最好|最高|高)|什么车卖得(最好|最多|最快)|什么车最好卖|"
+    r"哪(款|台|个)车销量(最|排名)|"
+    r"哪个品牌销量(最|排名)|卖得最多的是|销量(榜单|榜上|第一)|"
+    r"哪(款|台|个)车(卖得|销量)最)"
+)
+
+#: **带限定词**的销量问句不该拿全库榜回答。`0.7a2` 那个分支调的是
+#: `catalog.sales_ranking(db, limit=10)`——**profile 根本没传进去**，文案第一句写死
+#: 「全库前十」。于是（2026-10-07 独立审查实测）：
+#:
+#:     「20万以内什么车销量最好」→ 旧路由走 recommendation（会用预算），
+#:                                 扩词表后被抢到 sales_ranking，**预算被丢掉**；
+#:     「大众旗下什么车销量最好」→ 回的 Top10 覆盖 9 个品牌，**一个大众都没有**；
+#:     「SUV里 / 国产车里 / 2025年什么车销量最好」→ 同上。
+#:
+#: 这不是「说少了」，是**自信地回答了另一个问题**：返回的榜单带月份、带
+#: 「39,651 辆」、带出处，看起来很权威，而约束被丢掉这件事**没有任何信号**。
+#: 比「少提示一句」坏得多，所以这一条比词表本身更要紧。
+#:
+#: 形如 `_CATALOG_COUNT_EXCLUDE_RE`（见下方），命中即**不算**全库榜单问句。
+#: 裸 `销量(最好|最高)` 仍不补：`not resolved` 那道判断挡得住车系、**挡不住品牌**。
+#: ⚠️ 正确的反例是「大众和丰田哪个销量**最好**」，**不是**「销量**好**」——独立审查
+#: 2026-10-07 实测：裸模式匹配不到「好」，所以把裸模式加回去，那句**照样不命中**、
+#: 测试照样通过。拿它举例等于举了个证明不了的例子。测试见
+#: `tests/test_deferred_gaps_batch1.py::test_sales_ranking_does_not_swallow_comparisons`。
+_SALES_RANKING_QUALIFIER_RE = re.compile(
+    r"(以内|左右|上下|预算|落地|裸车|"          # 钱
+    r"万以内|万元|\d+\s*万|"                    # 「20万以内」「15万」
+    r"\d{4}\s*年|今年|去年|明年|本年度|"        # 年
+    r"suv|轿车|mpv|家用|商务|越野|两厢|三厢|皮卡|"  # 车身
+    r"国产|合资|进口|自主|韩系|日系|德系|美系|"   # 归属
+    r"旗下|的车型|哪个牌子)",
+    # IGNORECASE：「SUV里什么车销量最好」里 SUV 是大写，漏了它这道判断就形同虚设
+    re.IGNORECASE,
 )
 _SALES_RANKING_EXCLUDE_RE = re.compile(r"(为什么|怎么算|解释|是不是真的|准不准)")
 
 
 def asks_sales_ranking(message: str) -> bool:
-    """是否在要一份**销量榜**（读库报数，不该由模型凭记忆列举）。"""
+    """是否在要一份**销量榜**（读库报数，不该由模型凭记忆列举）。
+
+    2026-10-07：加了 `_SALES_RANKING_QUALIFIER_RE` 一道——带价格/年份/车身/归属
+    限定词的问句**不是**在要全库榜（「20万以内什么车销量最好」要的是预算内的）。
+    没有这道判断时，扩词表会把它们从「会用预算的 recommendation」抢到
+    「完全不看预算的 sales_ranking」，而榜单带引用、带辆数、看起来很权威，
+    **预算被丢掉这件事没有任何信号**。
+    """
     if _SALES_RANKING_EXCLUDE_RE.search(message):
+        return False
+    if _SALES_RANKING_QUALIFIER_RE.search(message):
         return False
     return bool(_SALES_RANKING_RE.search(message))
 
@@ -391,6 +436,32 @@ def _tool_loop_eligible(
     )
 
 
+def _brand_count_in_message(db: Session, message: str) -> int:
+    """消息里出现了几个**互不包含**的库内品牌名（按字面包含计数，不做整段相等判定）。
+
+    2026-10-07 上线前审查抓到的回归：扩词表后，「大众和丰田哪个**车**销量最好」被
+    判成全库榜问句，回一份带月份、带「39,651 辆」、带引用的**全库前十**，
+    **完全不提大众和丰田**。`0.7a2` 那个分支调的是 `sales_ranking(db, limit=10)`
+    ——**profile 压根没传进去**，所以价格/年份/车身这些限定词能被
+    `_SALES_RANKING_QUALIFIER_RE` 挡住，**唯独品牌挡不住**（限定词表里只有那四类）。
+
+    而「大众和丰田哪个车销量最好」是**两品牌对比**，它要的是这两家谁高，不是全库榜。
+
+    这里刻意用「字面包含」而不是 `brand_candidates_in_message` 的整段相等判定——
+    后者对「丰田哪个车销量最好」这种尾巴剥不干净的情况会漏掉「丰田」，数出来只有 1。
+    """
+    normalized = normalize_name(message)
+    if not normalized:
+        return 0
+    kept: list[str] = []
+    for name, _bid, _label in sorted(
+        brand_entries(db), key=lambda e: -len(e[0])
+    ):
+        if name and name in normalized and not any(name in k for k in kept):
+            kept.append(name)
+    return len(kept)
+
+
 def decide_route(
     message: str,
     hints: dict,
@@ -465,8 +536,13 @@ def decide_route(
     #        「销量数据不完整，没法给你准确的热门榜」，并凭记忆列举了速腾/凯美瑞/
     #        卡罗拉——**三款都不是销冠**（销冠是星愿 39,651 辆），而首页正下方
         #        就是同一份榜单。**该能答的说没有、不能答的凭记忆答**，两头都错。
-    #        守卫：不与「已点名车系」共存（「汉卖得好吗」是单车系问题，走档案/检索）。
-    if asks_sales_ranking(message) and not resolved:
+    #        守卫：不与「已点名车系」共存（「汉卖得好吗」是单车系问题，走档案/检索），
+    #        **也不与「已点名 ≥2 个品牌」共存**（见 `_brand_count_in_message`）。
+    if (
+        asks_sales_ranking(message)
+        and not resolved
+        and _brand_count_in_message(db, message) < 2
+    ):
         return RouteDecision(
             intent="sales_ranking",
             matched_rule="0.7a2:asks_sales_ranking+no_resolved",
@@ -620,7 +696,14 @@ def llm_intent_executable(
     if intent == "catalog_count":
         return not core_constraints and not resolved and not profile.brand_ids
     if intent == "sales_ranking":
-        return not resolved and asks_sales_ranking(message)
+        # 与 `decide_route` 的 0.7a2 同一套条件（2026-10-07）：LLM 把「大众和丰田
+        # 哪个车销量最好」判成 sales_ranking 时必须在这里也挡掉，否则它绕过正则路由
+        # 直接改了执行分支——这正是 `arbitrate_route` 那一段注释警告的情形。
+        return (
+            not resolved
+            and asks_sales_ranking(message)
+            and _brand_count_in_message(db, message) < 2
+        )
     if intent == "tool_loop":
         # 同 decide_route 的 0.75 分支：带排序意图时 tool_loop 是错的执行分支。
         # （原先把否决写在这个 return **之后**，是死代码——LLM 改写照样能从这扇门进来。）
