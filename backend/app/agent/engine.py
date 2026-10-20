@@ -39,7 +39,11 @@ from app.agent.llm_router import (
     log_shadow_record,
     route_with_llm,
 )
-from app.agent.preferences import persist_hints, restore_into_profile
+from app.agent.preferences import (
+    effective_brand_exclusions,
+    persist_hints,
+    restore_into_profile,
+)
 from app.agent.routing import (
     asks_brand_count,
     asks_brand_lineup,
@@ -1235,13 +1239,44 @@ class AgentEngine:
 
         profile = await _load_profile(self._store, session_id)
         hints = extract_hints(message)
+        # 0.5) 车系识别与品牌硬约束（「只要奔驰」）——**提到记忆回填之前**。
+        #
+        # 为什么（2026-10-21）：记忆里可能有「不要比亚迪」，而用户这轮说「我要比亚迪」。
+        # 品牌排除项要靠**本轮的品牌要求**才能消解冲突，否则旧记忆会把用户明说的
+        # 正向约束直接删掉 → 推荐结果空掉，用户只看到「没有合适的车」。
+        #
+        # ⚠️ 只把**解析**提前；品牌 hints 的**合并**仍在原处（下面），
+        # 否则 `structured` 的赋值顺序会变（「我强调过了，只要奔驰」这类只重申
+        # 约束、不含购车意图词的消息会掉进通用对话分支，2026-09 回归）。
+        wants_unlock = bool(_UNLOCK_RE.search(message))
+        resolved = await run_in_threadpool(resolve_series, db, message)
+        brand_hints = await run_in_threadpool(
+            resolve_brand_mentions,
+            db,
+            message,
+            series_names=[s.name for s, _brand in resolved],
+            assume_constraint=(
+                asks_brand_lineup(message)
+                or asks_catalog_count(message)
+                or asks_brand_count(db, message)
+            ),
+        )
         # 跨会话记忆**回填**：旧记忆先并进画像。
         # ⚠️ 必须在下面 merge_profile(hints) **之前**——用户改了主意时，
         # 「这一轮说的」必须压过「上次记的」。
         # turn_hints 一并传入：回填要靠它判断「本轮的正面诉求压过记忆里的旧排除」
         # （例如本轮说「SUV 也行」，而记忆里还挂着「不要 SUV」）。
+        # brand_exclusions 由 preferences 算好（它要查库解析品牌名 + 消解冲突）。
+        brand_exclusions = await run_in_threadpool(
+            effective_brand_exclusions, db, identity, profile, brand_hints
+        )
         await run_in_threadpool(
-            restore_into_profile, db, identity, profile, turn_hints=hints
+            restore_into_profile,
+            db,
+            identity,
+            profile,
+            turn_hints=hints,
+            brand_exclusions=brand_exclusions,
         )
         profile = merge_profile(profile, hints)
         # 跨会话记忆**写入**：把本轮**明说**的线索落库。
@@ -1250,7 +1285,12 @@ class AgentEngine:
         # off 模式下 persist_hints 直接返回空列表，**行为与接入前逐位相同**。
         # 走线程池：里面有一次 commit（写库要落盘），别占着事件循环。
         await run_in_threadpool(
-            persist_hints, db, identity, hints, evidence_span=message[:200]
+            persist_hints,
+            db,
+            identity,
+            hints,
+            brand_exclusions=brand_exclusions,
+            evidence_span=message[:200],
         )
         # L1 软偏好抽取（sales-agent-proposal §3 L1）。默认 AGENT_SOFT_PREF_MODE=off，
         # 此时下面只多一次 env 读取、**不发起任何 LLM 调用**，行为与接入前逐位相同——
@@ -1287,21 +1327,9 @@ class AgentEngine:
 
         # 0.5) 车系识别与锁定（必须在「无购车意图 → 普通对话」gate 之前：
         #       「星愿和零跑A10选哪个」不含购车关键词，但提到具体车系，必须走确定性链路）
-        wants_unlock = bool(_UNLOCK_RE.search(message))
-        resolved = await run_in_threadpool(resolve_series, db, message)
-        # 品牌硬约束（「只要奔驰」）：需查库把品牌名解析成 brand_id；且必须结合车系解析结果
-        # 消歧——「银河星愿怎么样」里的「银河」属于车系名，不是品牌约束（2026-09 回归）。
-        brand_hints = await run_in_threadpool(
-            resolve_brand_mentions,
-            db,
-            message,
-            series_names=[s.name for s, _brand in resolved],
-            assume_constraint=(
-                asks_brand_lineup(message)
-                or asks_catalog_count(message)
-                or asks_brand_count(db, message)
-            ),
-        )
+        #
+        # ⚠️ 车系/品牌的**解析**已提到本函数开头（记忆回填之前，见那里的说明）；
+        # 这里只做「品牌 hints 并进画像」。
         if brand_hints:
             profile = merge_profile(profile, brand_hints)
             # 品牌线索也算「结构化输入」：否则「我强调过了，只要奔驰」这类只重申约束、

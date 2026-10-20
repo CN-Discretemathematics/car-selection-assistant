@@ -142,6 +142,9 @@ class TrackedKey:
     kind: str
     #: True = 只能由用户明说产生（`explicit`），模型推断（`inferred`）一律拒绝
     infer_forbidden: bool = False
+    #: True = 值域**不在静态枚举里**，由写库路径查库解析校验（品牌名就是这种：
+    #: 品牌注册表是动态的）。
+    dynamic_vocabulary: bool = False
 
 
 #: **被持久化的键就是全部**——不在表里的键一律不写。
@@ -155,6 +158,11 @@ TRACKED_KEYS: tuple[TrackedKey, ...] = (
     TrackedKey("budget", CATEGORY_CONSTRAINT, "budget", infer_forbidden=True),
     TrackedKey("passengers", CATEGORY_CONSTRAINT, "int"),
     TrackedKey("avoid", CATEGORY_EXCLUSION, "str_list"),
+    # 品牌排除项（「不要日系」）：值是**品牌名**而不是 brand_id——
+    # 库重导入时 id 会重排（评测锚点 406/410 那个坑），名字与 id 无关 ✓。
+    TrackedKey(
+        "brand_exclude", CATEGORY_EXCLUSION, "str_list", dynamic_vocabulary=True
+    ),
 )
 
 TRACKED_BY_KEY: dict[str, TrackedKey] = {t.key: t for t in TRACKED_KEYS}
@@ -279,6 +287,10 @@ def _validate_decoded(key: str, spec: TrackedKey, decoded: Any) -> tuple[bool, s
         return False, f"{key!r} 的值必须是非空列表"
     if any(not isinstance(v, str) for v in decoded):
         return False, f"{key!r} 的列表元素必须是字符串"
+    if TRACKED_BY_KEY[key].dynamic_vocabulary:
+        # 值域是**动态**的（品牌名 → 品牌注册表）：静态枚举查不到，
+        # 由写库路径查库解析校验（见 `resolve_brand_names`）。
+        return True, ""
     allowed = allowed_values(key) or set()
     bad = sorted({v for v in decoded if v not in allowed})
     if bad:
@@ -583,12 +595,99 @@ def effective_tracked(
     return out
 
 
+# ── 品牌排除项 ──────────────────────────────────────────────────────────────
+
+
+def resolve_brand_names(db: Session, names: list[str]) -> tuple[list[int], list[str]]:
+    """品牌名 → (brand_ids, 规范名)。**解析不到的丢弃**。
+
+    为什么用 `resolve_brand_mentions`：它是全仓唯一的「品牌名 → id」实现
+    （含「长名优先」与「车系名消歧」两条实测教训），不另抄一份。
+
+    为什么存**名字**而不是 brand_id：库重导入时 id 会重排
+    （评测锚点 406/410 那个坑——题库的 id 指向的车与题面说的不是同一台）。
+    名字与 id 无关 ✓，所以记忆里存名字。
+    """
+    from app.catalog.brands import resolve_brand_mentions
+
+    ids: list[int] = []
+    labels: list[str] = []
+    for name in names:
+        hints = resolve_brand_mentions(db, name, assume_constraint=True)
+        for bid, label in zip(
+            hints.get("brand_ids") or [], hints.get("brand_labels") or []
+        ):
+            if bid not in ids:
+                ids.append(int(bid))
+                labels.append(label)
+    return ids, labels
+
+
+def _memory_value(
+    db: Session, identity: AnonymousIdentity, key: str
+) -> list[str]:
+    """读某个键上的记忆值（列表形状）。"""
+    spec = TRACKED_BY_KEY.get(key)
+    if spec is None:
+        return []
+    for mem in list_memories(db, identity):
+        if mem.key != key:
+            continue
+        decoded = decode_value(key, mem.value)
+        if isinstance(decoded, list):
+            return [str(v) for v in decoded]
+    return []
+
+
+def effective_brand_exclusions(
+    db: Session,
+    identity: AnonymousIdentity | None,
+    profile: UserProfile,
+    turn_brand_hints: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """记忆里的品牌排除项 → **生效**的排除项（hints 形状）。
+
+    去掉用户**这轮**与**本会话**已经要求的品牌：旧记忆不能把用户明说的正向
+    约束删掉——「我就要比亚迪」被记忆里的「不要比亚迪」直接删掉，推荐结果会
+    **空掉**，而用户只看到一句「没有合适的车」（计划 §1.2：硬约束排除项错了
+    直接毁掉答案）。
+
+    这正是三层消解规则在品牌维度上的落法：**本轮 > 本会话 > 记忆**。
+    """
+    if identity is None or not is_enabled():
+        return {}
+    turn = turn_brand_hints or {}
+    names = list(_memory_value(db, identity, "brand_exclude"))
+    # 本轮的排除项（「这一轮说不要比亚迪」比会话里更早的要求更新）
+    for label in turn.get("brand_exclude_labels") or []:
+        label = str(label)
+        if label not in names:
+            names.append(label)
+    if not names:
+        return {}
+    # 被「要求」的品牌不受排除：但**本轮自己说的排除**优先于更早的要求
+    # （三层规则：本轮 > 本会话 > 记忆）。
+    turn_excluded = {str(l) for l in turn.get("brand_exclude_labels") or []}
+    protected = (
+        set(profile.brand_labels or [])
+        | {str(l) for l in turn.get("brand_labels") or []}
+    ) - turn_excluded
+    kept = [n for n in names if n not in protected]
+    if not kept:
+        return {}
+    ids, labels = resolve_brand_names(db, kept)
+    if not ids:
+        return {}
+    return {"brand_exclude_ids": ids, "brand_exclude_labels": labels}
+
+
 def restore_into_profile(
     db: Session,
     identity: AnonymousIdentity | None,
     profile: UserProfile,
     *,
     turn_hints: dict[str, Any] | None = None,
+    brand_exclusions: dict[str, Any] | None = None,
 ) -> UserProfile:
     """会话开始时把**旧记忆**回填进画像。
 
@@ -596,21 +695,31 @@ def restore_into_profile(
     闸门的底线：`off` 不只是不写库，是**完全不介入**（否则切回 off 时，
     之前 on 模式写下的记忆仍会悄悄影响推荐）。
 
-    ## 只填空缺，不覆盖会话已有的值
+    ## 回填走 `merge_profile`（唯一合并器）
 
-    会话内的画像是**比记忆新**的事实（用户今天说的话压过上个月记的）。
-    无条件覆盖会让「今天说 30 万」在下一轮被「记忆里的 20 万」悄悄改回去——
-    用户看到的是「我明明说了 30 万，怎么又变了」。
+    只把**会话还没有的**字段交给它——会话内的是更新的事实：
+    会话内的画像比记忆新，无条件覆盖会让「今天说 30 万」在下一轮被
+    「记忆里的 20 万」悄悄改回去，用户看到的是「我明明说了 30 万，怎么又变了」。
+
+    排除项是**并集**（`merge_profile` 的语义 ✓）：排除不会「过期」。
+    ⚠️ 会话自己已有的排除项**原样保留**：会话内的「既要求又排除」是本仓**既有**的
+    缺陷（`merge_profile` 从不清除旧的正面诉求），修它属于独立改动——
+    在这里顺手改会让「同一个对话在有/无身份时行为不同」。
 
     ## 回填必须在**本轮线索合并之前**调用
 
     否则记忆会盖住本轮：本轮说「SUV 也行」，记忆里还挂着「不要 SUV」，
     本轮的正面诉求被旧记忆压掉。
+
+    ## 品牌排除项由调用方算好传进来
+
+    它需要**本轮与本会话的品牌要求**才能消解冲突（见
+    `effective_brand_exclusions`）——本 module 拿不到「用户这轮要哪个品牌」。
     """
     if identity is None or not is_enabled():
         return profile
     mem = memories_to_hints(db, identity)
-    if not mem:
+    if not mem and not brand_exclusions:
         return profile
 
     positives, negatives = _resolve_conflicts(
@@ -630,25 +739,28 @@ def restore_into_profile(
     energy = [e for e in (mem.get("energy_preference") or []) if e in positives]
     avoid = [a for a in (mem.get("avoid") or []) if a in negatives]
 
+    # 只把「会话还没有的」字段交给合并器（会话内的是更新的事实）
+    hints: dict[str, Any] = {}
     if not profile.body_type and body:
-        profile.body_type = body
+        hints["body_type"] = body
     if not profile.energy_preference and energy:
-        profile.energy_preference = energy
+        hints["energy_preference"] = energy
     if not profile.usage and mem.get("usage"):
-        profile.usage = list(mem["usage"])
+        hints["usage"] = list(mem["usage"])
     if (
         profile.budget.min is None
         and profile.budget.max is None
         and mem.get("budget")
     ):
-        profile.budget = Budget(**mem["budget"])
+        hints["budget"] = mem["budget"]
     if profile.passengers is None and mem.get("passengers") is not None:
-        profile.passengers = mem["passengers"]
-    # 排除项取**并集**：排除不会「过期」——会话里说过的与记忆里的都要算数。
-    # ⚠️ 会话自己已有的排除项**原样保留**：会话内的「既要求又排除」是本仓**既有**的
-    # 缺陷（`merge_profile` 从不清除旧的正面诉求），修它属于独立改动——
-    # 在这里顺手改会让「同一个对话在有/无身份时行为不同」。
-    profile.avoid = sorted(set(profile.avoid) | set(avoid))
+        hints["passengers"] = mem["passengers"]
+    if avoid:
+        hints["avoid"] = avoid
+    if brand_exclusions:
+        hints.update(brand_exclusions)
+    if hints:
+        _merge_profile(profile, hints)
     return profile
 
 
@@ -657,6 +769,7 @@ def persist_hints(
     identity: AnonymousIdentity | None,
     hints: dict[str, Any],
     *,
+    brand_exclusions: dict[str, Any] | None = None,
     evidence_span: str | None = None,
 ) -> list[WriteOutcome]:
     """把**本轮明说**的线索写成记忆。
@@ -667,6 +780,12 @@ def persist_hints(
     ⚠️ 只写**用户明说**的（explicit），**不写模型推断的**——
     推断猜错会静默砍掉整个候选集（见 `TrackedKey.infer_forbidden`）。
     `off` 模式下不写任何东西；`shadow` 模式只落日志（不写库、不回填）。
+
+    ## 品牌排除项由调用方算好传进来
+
+    品牌约束不在 `extract_hints` 里（要查库解析品牌名），且它的生效值需要
+    **本轮与本会话的品牌要求**才能消解冲突——所以由 engine 调
+    `effective_brand_exclusions` 算好后传进来（`brand_exclusions`）。
 
     ## 自己提交
 
@@ -682,6 +801,10 @@ def persist_hints(
         return []
 
     effective = effective_tracked(db, identity, hints)
+    if brand_exclusions:
+        labels = [str(v) for v in (brand_exclusions.get("brand_exclude_labels") or [])]
+        if labels:
+            effective["brand_exclude"] = labels
     if mode == MODE_SHADOW:
         _logger.info(
             "偏好记忆（shadow，未写库）: %s",

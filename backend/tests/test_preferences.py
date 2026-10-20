@@ -750,3 +750,153 @@ def test_migrated_schema_matches_the_models(tmp_path):
             f"{table} 的迁移与模型不一致："
             f"迁移缺 {sorted(declared - migrated)}，迁移多 {sorted(migrated - declared)}"
         )
+
+
+# ── 品牌排除项（计划 §1.2 的「第一批记忆价值：硬约束排除项」）──────────────────
+#
+# 品牌排除项与车身/能源排除项的关键差别：**它必须存品牌名而不是 brand_id**——
+# 库重导入时 id 会重排（评测锚点 406/410 那个坑：题库的 id 指向的车与题面说的
+# 不是同一台）。名字与 id 无关 ✓。
+#
+# 另一条更要命的：**旧记忆不能把用户这轮的正向约束删掉**。记忆里「不要比亚迪」+
+# 用户这轮说「我要比亚迪」→ 品牌被排除 → 推荐结果空掉，用户只看到
+# 「没有合适的车」（计划 §1.2：硬约束排除项错了直接毁掉答案）。
+
+
+def _seed_two_brands(db_session: Session) -> None:
+    """两个品牌，各一款车（用来验证「推荐里有没有它」）。"""
+    source = make_source(db_session, name="官方测试来源")
+    for name in ("测试比亚迪", "测试奔驰"):
+        brand = make_brand(db_session, name=name, source=source)
+        series = make_series(
+            db_session, brand, name=f"{name}车系", body_type="sedan",
+            energy_types=("BEV",), source=source,
+        )
+        year = make_year(db_session, series)
+        make_variant(
+            db_session, series, year, config_version="标准版", energy_type="BEV",
+            price_cny="150000", source=source,
+        )
+    db_session.commit()
+
+
+def _identity_headers(client) -> dict[str, str]:
+    ident = client.post("/api/v1/agent/identity").json()
+    return {"Authorization": f"Bearer {ident['token']}"}
+
+
+def test_brand_exclusion_is_stored_by_name(client, db_session, durable_on):
+    """记忆里存**品牌名**——id 会随库重导入重排，名字不会。"""
+    _seed_two_brands(db_session)
+    headers = _identity_headers(client)
+    sid = _create_session(client)
+    resp = client.post(
+        f"/api/v1/agent/sessions/{sid}/messages",
+        json={"message": "预算20万，通勤，不要测试比亚迪"},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    rows = client.get("/api/v1/agent/preferences", headers=headers).json()
+    brand_rows = [r for r in rows if r["key"] == "brand_exclude"]
+    assert brand_rows, f"品牌排除项应当被记住，实际记住了：{[r['key'] for r in rows]}"
+    assert brand_rows[0]["value"] == '["测试比亚迪"]', brand_rows[0]["value"]
+
+
+def test_brand_exclusion_applies_in_the_next_session(
+    client, db_session, durable_on
+):
+    """第二段对话：记忆里的「不要某品牌」应当生效。
+
+    带**前提断言**：同样的请求在没有记忆时**确实会**推荐那个品牌——
+    否则本用例证明不了任何事。
+    """
+    _seed_two_brands(db_session)
+    headers = _identity_headers(client)
+
+    # 前提：没有记忆时，该品牌会被推荐
+    plain_headers = _identity_headers(client)
+    plain_sid = _create_session(client)
+    plain = client.post(
+        f"/api/v1/agent/sessions/{plain_sid}/messages",
+        json={"message": "预算20万，通勤，两三个人"},
+        headers=plain_headers,
+    ).json()
+    assert "测试比亚迪" in {
+        v.get("brand_name") for v in plain.get("recommended_variants", [])
+    }, "前提不成立：没有记忆时该品牌并未被推荐，本用例测的是空气"
+
+    # 第一段：记住排除
+    sid1 = _create_session(client)
+    client.post(
+        f"/api/v1/agent/sessions/{sid1}/messages",
+        json={"message": "预算20万，通勤，不要测试比亚迪"},
+        headers=headers,
+    )
+
+    # 第二段（新会话）：被排除的品牌不该再出现
+    sid2 = _create_session(client)
+    resp = client.post(
+        f"/api/v1/agent/sessions/{sid2}/messages",
+        json={"message": "预算20万，通勤，两三个人"},
+        headers=headers,
+    ).json()
+    brands = {v.get("brand_name") for v in resp.get("recommended_variants", [])}
+    assert "测试比亚迪" not in brands, f"记忆里的品牌排除项未生效：{brands}"
+
+
+def test_turn_requirement_beats_the_remembered_exclusion(
+    client, db_session, durable_on
+):
+    """**本轮的正向要求压过记忆里的旧排除**——否则推荐直接空掉。
+
+    记忆里「不要测试比亚迪」+ 用户这轮说「只要测试比亚迪」→
+    品牌必须仍在候选里（用户改主意了，记忆是旧的）。
+    """
+    _seed_two_brands(db_session)
+    headers = _identity_headers(client)
+
+    # 第一段：记住「不要测试比亚迪」
+    sid1 = _create_session(client)
+    client.post(
+        f"/api/v1/agent/sessions/{sid1}/messages",
+        json={"message": "预算20万，通勤，不要测试比亚迪"},
+        headers=headers,
+    )
+
+    # 第二段（新会话）：用户改主意了
+    sid2 = _create_session(client)
+    resp = client.post(
+        f"/api/v1/agent/sessions/{sid2}/messages",
+        json={"message": "预算20万，通勤，两三个人，只要测试比亚迪"},
+        headers=headers,
+    ).json()
+    brands = {v.get("brand_name") for v in resp.get("recommended_variants", [])}
+    assert "测试比亚迪" in brands, (
+        f"用户这轮明确要求的品牌被旧记忆删掉了：{brands}——"
+        f"这正是「硬约束排除项错了直接毁掉答案」"
+    )
+
+
+def test_turn_exclusion_beats_the_session_requirement(
+    client, db_session, durable_on
+):
+    """**本轮的排除压过会话里更早的要求**（三层规则：本轮 > 本会话 > 记忆）。"""
+    _seed_two_brands(db_session)
+    headers = _identity_headers(client)
+    sid = _create_session(client)
+    # 第一轮：要求某品牌
+    client.post(
+        f"/api/v1/agent/sessions/{sid}/messages",
+        json={"message": "预算20万，通勤，只要测试比亚迪"},
+        headers=headers,
+    )
+    # 第二轮：改主意，排除它
+    resp = client.post(
+        f"/api/v1/agent/sessions/{sid}/messages",
+        json={"message": "不要测试比亚迪了，预算20万，通勤"},
+        headers=headers,
+    ).json()
+    brands = {v.get("brand_name") for v in resp.get("recommended_variants", [])}
+    assert "测试比亚迪" not in brands, (
+        f"本轮的排除没有压过会话里更早的要求：{brands}"
+    )

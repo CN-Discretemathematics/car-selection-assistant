@@ -327,11 +327,16 @@ def resolve_brand_mentions(
             continue  # 品牌名属于被点名的车系名（「银河星愿」）→ 是对车系的指代
         if name in AMBIGUOUS_BRANDS and not (has_intent and has_strong_intent):
             continue  # 「理想的预算 20 万」不当作品牌「理想」；「我想买理想」才算
-        if not (explicit or _is_bare_brand(normalized, name)):
-            continue  # 只是提及，不构成硬约束
-        claimed.append((start, end))
         prefix = normalized[max(0, start - 4): start]
-        if any(neg in prefix for neg in NEGATION_PREFIXES):
+        negated = any(neg in prefix for neg in NEGATION_PREFIXES)
+        if not negated and not (explicit or _is_bare_brand(normalized, name)):
+            continue  # 只是提及，不构成硬约束
+        # ⚠️ 2026-10-21：**否定词本身就是约束**，不需要再要一个意图词。
+        # 此前否定判定排在「提及即忽略」之后，于是「预算20万，通勤，不要比亚迪」
+        # 里的「不要比亚迪」被当普通提及丢掉——用户明说的排除项**根本没进画像**，
+        # 而跨会话记忆要记的恰恰就是它（计划 §1.2：硬约束排除项错了直接毁掉答案）。
+        claimed.append((start, end))
+        if negated:
             exclude[brand_id] = label
         else:
             include[brand_id] = label
@@ -345,6 +350,11 @@ def resolve_brand_mentions(
         result["brand_labels"] = [include[i] for i in sorted(include)]
     if exclude:
         result["brand_exclude_ids"] = sorted(exclude)
+        # ⚠️ 2026-10-21：排除项**也要带名字**。此前只给 ids，
+        # `merge_profile` 只能把 id 当字符串写进 `brand_exclude_labels`——
+        # 追问回执于是显示「不要12」而不是「不要比亚迪」（用户看到的是一串数字）。
+        # 跨会话记忆要记的也正是**名字**（id 会随库重导入重排）。
+        result["brand_exclude_labels"] = [exclude[i] for i in sorted(exclude)]
     return result
 
 
