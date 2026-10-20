@@ -84,6 +84,53 @@ def test_rejected_car_is_the_sampled_series(db_session):
         ], scenario
 
 
+def test_memory_deleted_scenario_has_a_positive_control(db_session):
+    """「删记忆」场景必须**先**在另一个会话验过「记忆还在」。
+
+    否则它分不清「删掉了」和「本来就没记住」——
+    实测：记忆功能整体关闭（`DURABLE_PREFS_MODE=off`）时，旧版场景**照样 50/50 通过**
+    ⇒ 那是个恒真的断言。有对照轮后，记忆功能一关，对照轮必红。
+    """
+    _seed(db_session)
+    rng = random.Random(5)
+    requirements = gen.sample_requirements(db_session, rng, 2)
+    scenarios = gen.gen_memory_deleted_scenarios(rng, requirements)
+    for scenario, req in zip(scenarios, requirements, strict=True):
+        turns = scenario["turns"]
+        lo, hi = req["band"]
+        lo, hi = lo * 10000, hi * 10000
+        asserts = [a for t in turns for a in t["assert"]]
+        assert {"type": "budget_in", "min": lo, "max": hi} in asserts, scenario
+        assert {"type": "budget_not_in", "min": lo, "max": hi} in asserts, scenario
+        # 对照轮（budget_in）必须在删除轮**之前**
+        in_idx = next(
+            i for i, t in enumerate(turns)
+            if any(a["type"] == "budget_in" for a in t["assert"])
+        )
+        forget_idx = next(i for i, t in enumerate(turns) if "忘掉" in t["user"])
+        assert in_idx < forget_idx, scenario
+        # 三个会话：陈述 → 跨会话对照+删除 → 删除后再换会话
+        assert len({t["session"] for t in turns}) == 3, scenario
+
+
+def test_memory_scenarios_are_disabled_by_default_and_flippable(db_session):
+    """两个记忆场景**默认关**（依赖未落地能力），开关能打开。"""
+    _seed(db_session)
+    rng = random.Random(9)
+    requirements = gen.sample_requirements(db_session, rng, 1)
+
+    off = gen.gen_returning_scenarios(rng, requirements) + gen.gen_memory_deleted_scenarios(
+        rng, requirements
+    )
+    assert all(s["enabled"] is False for s in off), off
+    assert all(s.get("reason_disabled") for s in off), off
+
+    on = gen.gen_returning_scenarios(
+        rng, requirements, enabled=True
+    ) + gen.gen_memory_deleted_scenarios(rng, requirements, enabled=True)
+    assert all(s["enabled"] is True for s in on), on
+
+
 def test_generator_emits_three_scenarios_with_the_requested_count(db_session):
     _seed(db_session)
     rng = random.Random(3)

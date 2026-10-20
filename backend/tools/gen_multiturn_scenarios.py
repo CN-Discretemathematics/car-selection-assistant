@@ -303,7 +303,21 @@ def gen_returning_scenarios(
 def gen_memory_deleted_scenarios(
     rng: random.Random, requirements: list[dict], *, enabled: bool = False
 ) -> list[dict]:
-    """场景 3：删掉的记忆是否真的不生效？（跨会话，依赖 Phase 1）"""
+    """场景 3：删掉的记忆是否真的不生效？（跨会话，依赖 Phase 1）
+
+    ## 必须带**阳性对照**轮（2026-10-21 实测后补）
+
+    只断言「删完不生效」有个致命漏洞：**分不清「删掉了」和「本来就没记住」**。
+    实测（`DURABLE_PREFS_MODE=off`，记忆功能整体关闭）：本场景**照样 50/50 通过**
+    ——它验的是「本来就没有」，不是「删掉了」。这种「通过」是**恒真**。
+
+    所以删除**之前**先加一轮跨会话的阳性对照：第二个会话里先断言「记忆还在」
+    （`budget_in`），删完再到第三个会话断言「记忆没了」（`budget_not_in`）。
+    记忆功能整体关闭时，对照轮必红 ⇒ 本场景**不可能假通过**。
+
+    对照轮放在**第二个会话**、删除轮也在第二个会话（删的是**跨会话记忆**，
+    会话画像不动——与设置页撤回同一语义），断言轮在**第三个会话**。
+    """
     out = []
     for i, req in enumerate(requirements):
         lo, hi = req["band"]
@@ -321,9 +335,17 @@ def gen_memory_deleted_scenarios(
                         "assert": [],
                         "session": "first",
                     },
-                    {"user": "把之前记的预算忘掉", "assert": [], "session": "first"},
                     {
-                        # 删掉预算后，下一轮不应再按该预算筛
+                        # 阳性对照：换会话，记忆应**仍然生效**。
+                        # 没有这一轮，本场景就分不清「删掉了」和「本来就没记住」
+                        # （实测：记忆功能整体关闭时照样 50/50 通过 ⇒ 恒真）。
+                        "user": "按我之前说的条件推荐",
+                        "assert": [{"type": "budget_in", "min": lo, "max": hi}],
+                        "session": "second",
+                    },
+                    {"user": "把之前记的预算忘掉", "assert": [], "session": "second"},
+                    {
+                        # 删掉预算后，**换个会话**再看：记忆不应再回填
                         "user": "现在推荐一台车",
                         "assert": [
                             # 查**结构化口径**（response.filters 的预算区间）：
@@ -332,7 +354,7 @@ def gen_memory_deleted_scenarios(
                             # 实测 50/50 条断言全中这一枪 ⇒ 假否定 ⇒ 低估能力
                             {"type": "budget_not_in", "min": lo, "max": hi},
                         ],
-                        "session": "second",
+                        "session": "third",
                     },
                 ],
             }
