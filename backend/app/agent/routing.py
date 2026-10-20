@@ -56,6 +56,38 @@ _CAR_INTENT_RE = re.compile(
 )
 _CAR_BUY_RE = re.compile(r"(?:买|购|选|提|试)[^。！？!?]{0,6}车")
 
+#: **上下文追问**（用户看过一批推荐，想要「更多」）——
+#: 这些句子**本句不含购车关键词**，语义上却明确是要「再给一批」。
+#:
+#: 2026-10-21 实测（本地快照库，多轮题库第三轮）：
+#: 「还有别的吗」「再看看其他的」被规则 1 判成**普通对话** ⇒ 引擎回一句闲聊模板，
+#: **一张车都不推**——而此时画像里预算/用途/人数俱全（探针逐轮打印确认）。
+#: 用户明确在要车，引擎却反问「可以告诉我你的预算吗？」：**问的是它已经知道的**。
+#:
+#: ⚠️ 只收**整句**匹配：「还有问题吗」「还有别的优惠吗」这类**不是**要车，
+#: 落到本正则之外（`还有` 后只允许可选的「别的/其他/推荐的…」+「吗/呢」）。
+_REASK_RE = re.compile(
+    r"^(?:"
+    r"还有(?:别的|其他的|别的车|其他车|推荐|推荐的|推荐的车型)?(?:吗|呢)?"
+    r"|再(?:推荐|看看|来|给我|多推|多来|选)(?:几款|一些|一批|几个|点|别的|其他的|别的车)?"
+    r"|多(?:推|来)(?:几款|一批|一些|几个)"
+    r"|推荐几款"
+    r"|换个推荐|继续推荐|再选几款|多选几款|多推几款"
+    r"|就这些(?:吗|啊)?|就这几个|就这些车"
+    r"|其他(?:的)?呢|别的(?:的)?呢"
+    r")[!！。？?~～\s]*$",
+    re.IGNORECASE,
+)
+
+
+def asks_more_cars(message: str) -> bool:
+    """是否是「再给一批」的上下文追问（`还有别的吗` / `再看看其他的`）。
+
+    与「本句含购车关键词」是**两件事**：本函数只看**句式**，
+    是否真的该再推一批由调用方结合**会话上下文**判断（见 `decide_route` 规则 1a）。
+    """
+    return bool(_REASK_RE.match(message.strip()))
+
 
 def _ranking_intent_skips_consultation(
     hints: dict, resolved: list, profile: UserProfile
@@ -599,6 +631,27 @@ def decide_route(
 
     # 1) 无购车意图的普通对话（如「今天天气不错」「帮我算个题」）→ 自然回复
     if not (has_car_intent(message) or structured):
+        # 1a) **上下文追问**（「还有别的吗」「再看看其他的」）——
+        #     本句没有购车关键词，但**会话里已经建立了明确的购车诉求**
+        #     ⇒ 应当**再推一批**，而不是回一句闲聊。
+        #
+        # 2026-10-21 实测：旧行为是回一句「可以告诉我你的预算、主要用途和乘坐人数吗？」
+        # （而画像里预算/用途/人数**俱全**——探针逐轮打印确认），**一张车都不推**。
+        # 用户明确在要车，引擎却反问它已经知道的：这不是风格问题，是**答非所问**。
+        #
+        # 守卫：必须有**核心约束**（预算/用途/人数/车身）才这么判——
+        # 没有购车上下文的「还有别的吗」（如「还有别的优惠吗」）仍走普通对话。
+        if asks_more_cars(message) and profile_has_core_constraints(profile):
+            return RouteDecision(
+                intent="recommendation",
+                matched_rule="1a:asks_more_cars+profile_core_constraints",
+                signals={
+                    "has_car_intent": False,
+                    "structured": False,
+                    "reask": True,
+                    "car_context": car_context,
+                },
+            )
         return RouteDecision(
             intent="chitchat",
             matched_rule="1:not(has_car_intent or structured)",
@@ -645,6 +698,10 @@ def decide_route(
             "has_car_intent": has_car_intent(message),
             "structured": structured,
             "car_context": car_context,
+            # 「再给一批」的标记（2026-10-21）：执行层据此**排除已展示过的款型**。
+            # 引擎是确定性的 ⇒ 不排除的话同一画像必然推回逐位相同的那一批
+            # （实测：宽需求下候选池 3162 台，第二轮仍是同一批 5 台）。
+            "reask": asks_more_cars(message),
         },
     )
 

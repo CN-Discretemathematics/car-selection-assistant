@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Sequence
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -335,6 +336,7 @@ def recommendation_tool(
     limit: int = 5,
     *,
     include_dims: bool = False,
+    exclude_series_ids: Sequence[int] = (),
 ) -> dict:
     """确定性推荐：PostgreSQL 硬条件筛选 + 软评分。
 
@@ -347,6 +349,15 @@ def recommendation_tool(
     逐维得分 `_dims` 与「本候选有实值的维度」`_measured` 一并返回，供
     `tools/eval_tradeoffs.py` 独立复核取舍叙事。**默认路径行为逐位不变**——
     这两个键照旧在返回前剥离，不进生产响应体。
+
+    exclude_series_ids（2026-10-21，默认空）：**要排除的车系 id**——
+    用于「再给一批」时排掉本会话**已经展示过**的车系。
+    引擎是确定性的 ⇒ 不排除的话同一画像必然推回逐位相同的那一批
+    （实测：宽需求下候选池 3162 台，第二轮仍是同一批 5 台）。
+    ⚠️ 按**车系**排除而不是按款型：用户心里的「另一台车」是另一个**车系**，
+    不是同款车的另一个配置（实测：第一轮推的 5 张卡常是同一车系的 5 个款型）。
+    ⚠️ 与「被用户拒绝的款型」是**两件事**：拒绝是**永久**排除
+    （`profile.rejected_variant_ids`，会话内一直生效），推过了只是这轮不想重复。
     """
     weights = {**DEFAULT_WEIGHTS, **{k: float(v) for k, v in (profile.weights or {}).items() if v is not None}}
 
@@ -432,6 +443,10 @@ def recommendation_tool(
     #
     # 先把量测出来再决定怎么改：一次 COUNT(*) 比物化全表便宜得多，
     # 记进日志与返回体的 candidates_scanned，让「多大」成为可观测事实而非猜测。
+    #
+    # ⚠️ 这个计数在**排除「已展示」之前**取：它是「符合当前条件的池子有多大」，
+    # 执行层要靠它区分两种空结果——「条件本身没匹配到车」与「匹配到的都推过了」
+    # （文案不同，不能混）。排除后的实际评分数见返回体的 `count`。
     candidates_scanned = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     if candidates_scanned > _CANDIDATE_SCAN_WARN:
         logging.getLogger("app.agent.recommendation").info(
@@ -444,6 +459,11 @@ def recommendation_tool(
                 ensure_ascii=False,
             )
         )
+
+    # 「再给一批」：排掉本会话**已经展示过**的车系（2026-10-21）。
+    # 放在计数**之后**、物化**之前**：计数要反映「池子有多大」（见上面的说明）。
+    if exclude_series_ids:
+        stmt = stmt.where(~VehicleVariant.series_id.in_(list(exclude_series_ids)))
 
     variants = db.scalars(stmt).all()
     variant_ids = [v.id for v in variants]
@@ -559,6 +579,11 @@ def recommendation_tool(
         # 被用户明确拒绝过的款型：SQL 侧已下推，这里是**同口径的兜底**
         # （本仓惯例：下推 + Python 兜底，两处口径必须一致）
         if profile.rejected_variant_ids and variant.id in profile.rejected_variant_ids:
+            continue
+        # 已经展示过的**车系**（2026-10-21）：SQL 侧已排除，这里是**同口径的兜底**
+        # （本仓惯例：下推 + Python 兜底，两处口径必须一致）
+        # ⚠️ 与上面那条是**两件事**：拒绝是永久排除，推过了只是这轮不想重复。
+        if exclude_series_ids and variant.series_id in exclude_series_ids:
             continue
         seats = _extract_seats(facts)
         # ⚠️ 这一行**必须保留**：它是下推的兜底，不是冗余。

@@ -1766,7 +1766,18 @@ class AgentEngine:
             await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
 
         # 重计算（批量 SQL）放线程池：避免单 worker 事件循环被大数据量查询阻塞
-        result = await run_in_threadpool(recommendation_tool, db, profile)
+        #
+        # 「再给一批」（2026-10-21）：**排除本会话已经展示过的款型**。
+        # 引擎是确定性的 ⇒ 不排除的话同一画像必然推回逐位相同的那一批
+        # （实测：宽需求下候选池 3162 台，第二轮仍是同一批 5 台）。
+        # ⚠️ 只在**追问轮**排除：用户重新问需求时，应当回到原来那一批。
+        # ⚠️ 与「被拒绝的款型」是两件事：拒绝是**永久**排除
+        # （`profile.rejected_variant_ids`，会话内一直生效），已展示只是这轮不想重复。
+        reask = bool(decision.signals.get("reask"))
+        exclude_ids = tuple(profile.shown_series_ids) if reask else ()
+        result = await run_in_threadpool(
+            recommendation_tool, db, profile, exclude_series_ids=exclude_ids
+        )
 
         filters = {
             "budget_min": profile.budget.min,
@@ -1818,6 +1829,16 @@ class AgentEngine:
         if unlock_note:
             # 口径变化必须对用户可见：先说明「已不再限定在某车系」，再给推荐理由
             reasons.insert(0, unlock_note)
+        if reask and not top and exclude_ids:
+            # 「都推过了」与「没匹配到车」是**两件事**，文案不能混：
+            # 池子本来有车（`candidates_scanned` 在排除**之前**取），
+            # 只是都已经展示过 ⇒ 该说的是「推过了」，而不是「没有符合条件的车」
+            # （后者会让用户以为自己的预算/用途有问题）。
+            reasons.insert(
+                0,
+                "符合你当前条件的车型刚才都已经推过了；想看别的，"
+                "可以放宽预算、车身类型或能源偏好。",
+            )
         # 座位约束的校验覆盖率（2026-10-05）。库里查不到座位数的款型不会被筛掉
         # （缺数据 ≠ 不满足），但那不等于这条约束生效了——必须在**用户看得见的地方**
         # 说出来，否则用户会把「预算匹配、用途匹配」误读成「全部硬条件都校验过了」。
@@ -1864,6 +1885,16 @@ class AgentEngine:
         ids_changed = new_ids != profile.last_recommended_variant_ids
         profile.last_recommended_variant_ids = new_ids
 
+        # 记下本会话**累计展示过的车系**（2026-10-21）：下一轮「再推荐」据此排除，
+        # 免得推回逐位相同的那一批（见上面工具调用处的说明）。
+        # ⚠️ **不新增落盘点**——画像的落盘契约钉死了「无条件落盘恰好两处」，
+        # 这里只改画像对象，落盘仍由下面那次条件写负责（`shown_changed` 并入它的条件）。
+        shown_ids = list(
+            dict.fromkeys([*profile.shown_series_ids, *(v["series_id"] for v in top)])
+        )
+        shown_changed = shown_ids != profile.shown_series_ids
+        profile.shown_series_ids = shown_ids
+
         out = AgentMessageOut(
             session_id=session_id,
             need_clarification=False,
@@ -1877,7 +1908,7 @@ class AgentEngine:
             followup=followup,
         )
         # 画像变更必须落盘，否则下一轮又会读到旧的（追问状态 / 已推荐款型）。
-        if followup is not None or ids_changed:
+        if followup is not None or ids_changed or shown_changed:
             await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         await self._emit(session_id, explanation or "", out)
         # 拒绝反馈的影子评估（计划 Phase 3）：**派发即走，不等它**。
