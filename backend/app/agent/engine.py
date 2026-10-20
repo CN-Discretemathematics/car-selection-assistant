@@ -878,9 +878,32 @@ def _explain_system_prompt(profile: UserProfile) -> str:
 class AgentEngine:
     def __init__(self, llm: LLMClient | None = None, store: SessionStore | None = None) -> None:
         self._llm = llm or get_llm_client()
-        self._store = store or get_session_store()
+        self._injected_store = store
         # shadow 旁路任务的强引用集（asyncio 要求持有引用防止任务被 GC；完成即移除）
         self._pending_shadow_tasks: set[asyncio.Task] = set()
+
+    @property
+    def _store(self) -> SessionStore:
+        """会话存储**每次现取**——引擎不能缓存实例。
+
+        2026-10-21（H1）：存储实现会随 Redis 可用性**切换**（回退进程内 ↔ 切回 Redis，
+        见 `common.redis_client.StoreSelector`）。引擎若在构造时把实例存下来，
+        就与路由现取的实例**分叉**：路由在旧实例里建会话、引擎往新实例里写画像
+        → `KeyError(session_id)`（全量测试 7 条红，实测）。
+
+        代价：切换瞬间（Redis 恢复的那一次）进程内会话本就失效，用户会拿到
+        404「会话不存在」——**这是切换的固有代价**，已在 `StoreSelector` 的
+        docstring 里写明并落 warning 日志。
+
+        getter 用 `getattr` 兜底：测试替身（`tests/test_known_facts_wiring.py`）
+        直接给 `self._store` 赋值、不调 `super().__init__()`。
+        """
+        injected = getattr(self, "_injected_store", None)
+        return injected or get_session_store()
+
+    @_store.setter
+    def _store(self, value: SessionStore) -> None:
+        self._injected_store = value
 
     def _routing_llm(self) -> LLMClient:
         """路由调用（shadow / llm 模式）使用的 LLM 客户端。

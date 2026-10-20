@@ -258,7 +258,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 
 | # | 位置 | 问题 |
 | --- | --- | --- |
-| H1 | `backend/app/agent/session.py:107` 等四个 getter | Redis 首次不可达即**永久锁存**进程内实现，多 worker 脑裂 |
+| H1 | `backend/app/agent/session.py` 的 `get_session_store` + `backend/app/auth/security.py` 的 `get_code_store` / `get_token_store` / `get_rate_limiter` | ✅ **已修（2026-10-21）**：4 处各自「探一次 Redis → 永久缓存」，**Redis 首次不可达就把实现锁死在进程内**——多 worker 脑裂（会话在 worker A、令牌在 worker B → 用户被随机踢下线、验证码在别的 worker 上验不过 → 登录不了、限流各算各的），且 `get_redis()` 自带的 60s 重试被这一层的一次性缓存**彻底废掉**（实测：Redis 恢复后仍返回同一个进程内实例）。修法：新增 `common.redis_client.StoreSelector`（选择 + 定期重试 + **切换时落 warning**），4 处调用点共用一处实现；回退态同一 worker 内仍是同一实例（否则会话立刻丢） |
 | H2 | `backend/app/agent/tools.py` 硬约束 stmt | 无 SQL LIMIT，全量物化；销量子查询无月份谓词 —— ⚠️ **已加可观测化未改行为**：见 P5.1 节。LIMIT 会静默改变推荐结果，需先跑检索评测对齐基线 |
 | H3 | `backend/app/agent/engine.py` 14 处 | `async def` 内裸调同步 `Session`，阻塞事件循环 |
 | H4 | `backend/app/agent/series_qa.py` | 两条最热问答路径的 N+1 —— ✅ **已修**（P5.2）→ `catalog.services.variants_current_prices` / `variants_facts`，5 例逐条等价性回归（性能优化的前提是结果逐字相同） |
@@ -293,6 +293,8 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 **修复顺序**（先易后难、先安全后性能）：C1 → C2 → H5 → H3 → H1 → H6 → H10 → M 项 → H2/H4（性能，需评测兜底）。
 C1/C2/H5/H10 已于 2026-10-02 / 2026-10-04 完成；H5 的**回归守卫**于 2026-10-21 补齐
 （修复在、守卫不在，等于修好了也会被改回去——台账不标「已修」同理会让下一个人重做一遍）。
+**H1 已于 2026-10-21 修完**（4 处调用点共用 `common.redis_client.StoreSelector`：Redis 不可用时回退进程内，
+但**定期重试**，恢复后自愈并落 warning）。下一项是 H3。
 
 **H10 的两条诚实声明（2026-10-04 实测，务必别当成「性能优化已上线」）**：
 
