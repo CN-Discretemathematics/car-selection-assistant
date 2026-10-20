@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from app.common.config import get_settings
+from app.common.redis_client import StoreSelector
 
 MAX_MESSAGES = 50  # 会话消息历史上限（超出后保留最近 50 条；生产 Redis 实现沿用）
 
@@ -139,20 +140,21 @@ class SessionStore:
         return self._data.pop(session_id, None) is not None
 
 
-_session_store: SessionStore | None = None
+_session_store_selector = StoreSelector(
+    redis_factory=lambda client: RedisSessionStore(client),
+    local_factory=SessionStore,
+    name="Agent 会话",
+)
 
 
 def get_session_store() -> SessionStore:
-    global _session_store
-    if _session_store is None:
-        from app.common.redis_client import get_redis
+    """会话存储（生产 Redis；未配置/不可用时回退进程内，**并定期重试**）。
 
-        redis_client = get_redis()
-        if redis_client is not None:
-            _session_store = RedisSessionStore(redis_client)
-        else:
-            _session_store = SessionStore()
-    return _session_store
+    2026-10-21（H1）：原先这里只探一次 Redis——首次不可达就**永久缓存**进程内实现，
+    多 worker 脑裂（会话只在拿到它的那个 worker 里），且 Redis 恢复后不自愈。
+    选择逻辑已收敛到 `common.redis_client.StoreSelector`（4 处共用一处实现）。
+    """
+    return _session_store_selector.get()
 
 
 class RedisSessionStore:
