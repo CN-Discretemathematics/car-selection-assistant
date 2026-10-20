@@ -51,7 +51,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.schemas import Budget, UserProfile
+from app.agent.schemas import UserProfile
 from app.common.enums import BODY_TYPES, ENERGY_TYPES
 from app.common.models import AnonymousIdentity, PreferenceMemory
 
@@ -713,7 +713,9 @@ def resolve_brand_names(db: Session, names: list[str]) -> tuple[list[int], list[
     for name in names:
         hints = resolve_brand_mentions(db, name, assume_constraint=True)
         for bid, label in zip(
-            hints.get("brand_ids") or [], hints.get("brand_labels") or []
+            hints.get("brand_ids") or [],
+            hints.get("brand_labels") or [],
+            strict=False,
         ):
             if bid not in ids:
                 ids.append(int(bid))
@@ -765,10 +767,10 @@ def effective_brand_exclusions(
         return {}
     # 被「要求」的品牌不受排除：但**本轮自己说的排除**优先于更早的要求
     # （三层规则：本轮 > 本会话 > 记忆）。
-    turn_excluded = {str(l) for l in turn.get("brand_exclude_labels") or []}
+    turn_excluded = {str(excluded) for excluded in turn.get("brand_exclude_labels") or []}
     protected = (
         set(profile.brand_labels or [])
-        | {str(l) for l in turn.get("brand_labels") or []}
+        | {str(brand_label) for brand_label in turn.get("brand_labels") or []}
     ) - turn_excluded
     kept = [n for n in names if n not in protected]
     if not kept:
