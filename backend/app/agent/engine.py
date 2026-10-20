@@ -778,6 +778,23 @@ def next_clarification(profile: UserProfile) -> Clarification | None:
 CITATION_LIMIT = 3
 
 
+def _source_names(db: Session, source_ids: list[int]) -> dict[int, str]:
+    """来源 id → 来源名。**唯一**实现。
+
+    2026-10-21（H3）：这段查询此前在 4 处各写一遍（`_source_citations` 内部 +
+    推荐 / 版本差异 / 车系问答三条回答链），每处都是 `async def` 里**裸调**——
+    真正执行 I/O 的是 `.all()`，不是 `db.scalars()` 本身，所以只包住调用没用。
+
+    统一成一个 helper 后，调用点一律 `await run_in_threadpool(_source_names, db, ids)`。
+    """
+    if not source_ids:
+        return {}
+    return {
+        s.id: s.name
+        for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
+    }
+
+
 def _source_citations(
     db: Session,
     source_ids: list[int],
@@ -803,9 +820,7 @@ def _source_citations(
     """
     if not source_ids:
         return []
-    names = {
-        s.id: s.name for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
-    }
+    names = _source_names(db, source_ids)
     return [
         Citation(
             source_id=sid,
@@ -1435,7 +1450,9 @@ class AgentEngine:
             and not NEGATION_RE.search(message)
             and await run_in_threadpool(locked_series_conflict, db, profile)
         ):
-            unlock_note = self._unlock_note(db, profile.locked_series_ids)
+            unlock_note = await run_in_threadpool(
+                self._unlock_note, db, profile.locked_series_ids
+            )
             profile.locked_series_ids = []
             await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
 
@@ -1470,8 +1487,7 @@ class AgentEngine:
         source_names: list[str] = []
         source_ids = sorted({v["source_id"] for v in top if v.get("source_id")})
         if source_ids:
-            sources = db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
-            name_by_id = {s.id: s.name for s in sources}
+            name_by_id = await run_in_threadpool(_source_names, db, source_ids)
             for v in top:
                 sid = v.get("source_id")
                 citations.append(
@@ -1663,7 +1679,11 @@ class AgentEngine:
                 if f.get("source_id")
             }
         )
-        citations.extend(_source_citations(db, source_ids, label_suffix="配置数据"))
+        citations.extend(
+            await run_in_threadpool(
+                _source_citations, db, source_ids, label_suffix="配置数据"
+            )
+        )
         out = AgentMessageOut(
             session_id=session_id,
             explanation=text,
@@ -1741,7 +1761,9 @@ class AgentEngine:
         # 引用条数与其余三条回答统一走 CITATION_LIMIT（2026-10-03 产品口径拍板）。
         # 此前盘点回答**不限条**（limit=None），同一页面上出现两套引用密度。
         citations.extend(
-            _source_citations(db, source_ids, label_suffix="车型数据")
+            await run_in_threadpool(
+                _source_citations, db, source_ids, label_suffix="车型数据"
+            )
         )
         out = AgentMessageOut(
             session_id=session_id,
@@ -1766,7 +1788,11 @@ class AgentEngine:
         text = self._brand_overview_text(profile, overview, energy_filter)
         citations: list[Citation] = []
         source_ids = sorted({s for s in (i.get("source_id") for i in overview["series"]) if s})
-        citations.extend(_source_citations(db, source_ids, label_suffix="车型数据"))
+        citations.extend(
+            await run_in_threadpool(
+                _source_citations, db, source_ids, label_suffix="车型数据"
+            )
+        )
         out = AgentMessageOut(
             session_id=session_id,
             explanation=text,
@@ -1901,7 +1927,9 @@ class AgentEngine:
                     if sid
                 }
             )
-            citations = _source_citations(db, source_ids, label_suffix="销量数据")
+            citations = await run_in_threadpool(
+                _source_citations, db, source_ids, label_suffix="销量数据"
+            )
         out = AgentMessageOut(
             session_id=session_id,
             explanation=text,
@@ -2108,7 +2136,9 @@ class AgentEngine:
         # 正文数字全部能溯源到这批来源时才引用（无数字则无需引用）
         if source_ids and any(ch.isdigit() for ch in final_text):
             citations.extend(
-                _source_citations(db, sorted(source_ids), label_suffix="数据")
+                await run_in_threadpool(
+                    _source_citations, db, sorted(source_ids), label_suffix="数据"
+                )
             )
         out = AgentMessageOut(
             session_id=session_id,
@@ -2197,8 +2227,7 @@ class AgentEngine:
         citations: list[Citation] = []
         source_ids = sorted({r["source_id"] for r in rows if r.get("source_id")})
         if source_ids:
-            sources = db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
-            name_by_id = {s.id: s.name for s in sources}
+            name_by_id = await run_in_threadpool(_source_names, db, source_ids)
             for r in rows:
                 sid = r.get("source_id")
                 if sid is None:
@@ -2255,8 +2284,7 @@ class AgentEngine:
         source_ids = sorted({s.source_id for s, _ in resolved if s.source_id})
         name_by_id: dict[int, str] = {}
         if source_ids:
-            sources = db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
-            name_by_id = {s.id: s.name for s in sources}
+            name_by_id = await run_in_threadpool(_source_names, db, source_ids)
 
         citations: list[Citation] = [
             Citation(

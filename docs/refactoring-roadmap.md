@@ -260,7 +260,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | --- | --- | --- |
 | H1 | `backend/app/agent/session.py` 的 `get_session_store` + `backend/app/auth/security.py` 的 `get_code_store` / `get_token_store` / `get_rate_limiter` | ✅ **已修（2026-10-21）**：4 处各自「探一次 Redis → 永久缓存」，**Redis 首次不可达就把实现锁死在进程内**——多 worker 脑裂（会话在 worker A、令牌在 worker B → 用户被随机踢下线、验证码在别的 worker 上验不过 → 登录不了、限流各算各的），且 `get_redis()` 自带的 60s 重试被这一层的一次性缓存**彻底废掉**（实测：Redis 恢复后仍返回同一个进程内实例）。修法：新增 `common.redis_client.StoreSelector`（选择 + 定期重试 + **切换时落 warning**），4 处调用点共用一处实现；回退态同一 worker 内仍是同一实例（否则会话立刻丢） |
 | H2 | `backend/app/agent/tools.py` 硬约束 stmt | 无 SQL LIMIT，全量物化；销量子查询无月份谓词 —— ⚠️ **已加可观测化未改行为**：见 P5.1 节。LIMIT 会静默改变推荐结果，需先跑检索评测对齐基线 |
-| H3 | `backend/app/agent/engine.py` 14 处 | `async def` 内裸调同步 `Session`，阻塞事件循环 |
+| H3 | `backend/app/agent/engine.py` 14 处 | ✅ **已修（2026-10-21）**：`async def` 内**裸调同步 `Session`**（实测真实阻塞点 9 处：推荐 / 版本差异 / 车系问答三条回答链各查一次 `Source`、5 处 `_source_citations`、1 处 `_unlock_note`）——真 I/O 发生在**结果被消费**那一刻（`.all()`），不是 `db.scalars()` 本身，所以只包住调用不包住消费等于没修。修法：新增唯一实现 `_source_names`（此前「查 Source」4 处各写一遍）+ 9 处统一 `await run_in_threadpool(...)`。**结果逐字不变**（全量用例守住）+ 变异测试 5/5 + AST 契约守卫（async 函数里不得直接碰同步 DB，helper 集合算**传递闭包**——抽出一个 helper 就让守卫失明，变异测试实测踩到） |
 | H4 | `backend/app/agent/series_qa.py` | 两条最热问答路径的 N+1 —— ✅ **已修**（P5.2）→ `catalog.services.variants_current_prices` / `variants_facts`，5 例逐条等价性回归（性能优化的前提是结果逐字相同） |
 | H5 | `backend/app/agent/engine.py` 的 `_on_shadow_done` | ✅ **已修（2026-10-02），2026-10-21 补守卫**：原实现只 `discard` 从不调 `task.exception()`，而 `_shadow_route` 内部只兜底了 `route_with_llm` 一段——其后的 `arbitrate_route` / `log_shadow_record` 一旦抛异常，任务**静默死亡**，唯一痕迹是 asyncio 在 GC 时打的 "Task exception was never retrieved"，那行**不在** `app.agent.router.shadow` 日志流里，`shadow_report.py` 解析不到。修法即取回异常并落 warning。⚠️ 该修复此前**无任何测试钉住**（删掉 `task.exception()` 全量测试依然全绿），2026-10-21 补两条守卫（异常必落 warning 日志 / 取消的任务不算异常）+ 3 个变异点全部被抓住 |
 | H6 | `backend/app/sources/autohome_sku.py:25-28` | `MOBILE_UA` 伪装 iPhone，与 README 合规声明矛盾 —— ✅ **已修并实测**（2026-10-03）：改用 `fetcher.DEFAULT_USER_AGENT`，直调 `fetch_sku_config` 抓 3 个车系（8433/8529/8171）款型 4/8/9 条、配置组 21/22/23 组，无 403 无空数据 → 对方不拦非浏览器 UA，改动零代价 |
@@ -294,7 +294,9 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 C1/C2/H5/H10 已于 2026-10-02 / 2026-10-04 完成；H5 的**回归守卫**于 2026-10-21 补齐
 （修复在、守卫不在，等于修好了也会被改回去——台账不标「已修」同理会让下一个人重做一遍）。
 **H1 已于 2026-10-21 修完**（4 处调用点共用 `common.redis_client.StoreSelector`：Redis 不可用时回退进程内，
-但**定期重试**，恢复后自愈并落 warning）。下一项是 H3。
+但**定期重试**，恢复后自愈并落 warning）。
+**H3 已于 2026-10-21 修完**（9 处裸调同步 DB 统一进线程池，「查 Source」收敛为唯一实现 `_source_names`）。
+下一项是 H6。
 
 **H10 的两条诚实声明（2026-10-04 实测，务必别当成「性能优化已上线」）**：
 
