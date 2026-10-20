@@ -39,6 +39,7 @@ from app.agent.llm_router import (
     log_shadow_record,
     route_with_llm,
 )
+from app.agent.rejection_shadow import brand_exclusion_delta
 from app.agent.routing import (
     asks_brand_count,
     asks_brand_lineup,
@@ -90,6 +91,8 @@ from app.agent.tools import (
 from app.catalog import services as catalog
 from app.catalog.brands import brand_series_overview, resolve_brand_mentions
 from app.catalog.series_index import display_name, resolve_series
+from app.common.config import get_settings
+from app.common.database import get_session_factory
 from app.common.enums import NEW_ENERGY_TYPES, expand_avoid, expand_energy_prefs
 from app.common.llm import LLMClient, LLMError, get_llm_client
 from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, VehicleVariant
@@ -730,6 +733,20 @@ def _apply_rejection(profile: UserProfile, message: str) -> str:
     return "已排除刚推荐的那款，换一批给你看。"
 
 
+def _variant_brand(db: Session, variant_id: int) -> tuple[int | None, str | None]:
+    """款型 → (brand_id, brand_name)。查不到就返回 (None, None)。
+
+    影子评估要用它算「被拒车属于哪个品牌」——品牌级排除的误伤面就来自同品牌的其它车。
+    """
+    row = db.execute(
+        select(Brand.id, Brand.name)
+        .join(VehicleSeries, VehicleSeries.brand_id == Brand.id)
+        .join(VehicleVariant, VehicleVariant.series_id == VehicleSeries.id)
+        .where(VehicleVariant.id == variant_id)
+    ).first()
+    return (int(row[0]), str(row[1])) if row else (None, None)
+
+
 def _profile_summary(profile: UserProfile) -> str:
     """已收集画像的一句话复述（用于「已记住：…」引导）。"""
     parts: list[str] = []
@@ -1063,6 +1080,21 @@ class AgentEngine:
 
     # ── 路由模式（W0 Phase 2）────────────────────────────────────────────────
     # regex（默认）不进这里：respond() 里 router_mode 为 regex 时不做任何新动作。
+    def _spawn_shadow(self, coro_factory, *, logger_name: str) -> None:
+        """派发一个**旁路**任务：不 await、异常全兜底、in-flight 有上限。
+
+        路由对拍与拒绝影子评估共用这一条——**上限、回收、异常归属三处必须一致**，
+        各写一遍必然漂移（旁路出错的痕迹会散到不同日志流里，事后查不到）。
+        """
+        if len(self._pending_shadow_tasks) >= _SHADOW_MAX_PENDING:
+            logging.getLogger(logger_name).info(
+                json.dumps({"shadow_skipped": True, "reason": "pending_full"}, ensure_ascii=False)
+            )
+            return
+        task = asyncio.create_task(coro_factory())
+        self._pending_shadow_tasks.add(task)
+        task.add_done_callback(lambda t: self._on_shadow_done(t, logger_name=logger_name))
+
     def _spawn_shadow_route(self, message: str, profile: UserProfile, regex_decision) -> None:
         """shadow 模式：LLM 路由放 create_task 旁路，**绝不在响应路径 await**。
 
@@ -1076,16 +1108,14 @@ class AgentEngine:
         """
         if not getattr(self._llm, "available", False):
             return
-        if len(self._pending_shadow_tasks) >= _SHADOW_MAX_PENDING:
-            logging.getLogger("app.agent.router.shadow").info(
-                json.dumps({"shadow_skipped": True, "reason": "pending_full"}, ensure_ascii=False)
-            )
-            return
-        task = asyncio.create_task(self._shadow_route(message, profile, regex_decision))
-        self._pending_shadow_tasks.add(task)
-        task.add_done_callback(self._on_shadow_done)
+        self._spawn_shadow(
+            lambda: self._shadow_route(message, profile, regex_decision),
+            logger_name="app.agent.router.shadow",
+        )
 
-    def _on_shadow_done(self, task: asyncio.Task) -> None:
+    def _on_shadow_done(
+        self, task: asyncio.Task, *, logger_name: str = "app.agent.router.shadow"
+    ) -> None:
         """回收旁路任务：既从 in-flight 集合摘除，也**取回异常**。
 
         2026-10-02：原实现只 `discard`，从不调 `task.exception()`。`_shadow_route`
@@ -1101,9 +1131,63 @@ class AgentEngine:
             return
         exc = task.exception()
         if exc is not None:
-            logging.getLogger("app.agent.router.shadow").warning(
+            logging.getLogger(logger_name).warning(
                 "shadow 旁路任务异常（不影响响应路径）: %s: %s",
                 type(exc).__name__, str(exc)[:200], exc_info=True,
+            )
+
+    async def _shadow_rejection(
+        self, profile: UserProfile, result: dict, rejected_variant_id: int
+    ) -> None:
+        """拒绝反馈的影子评估：**只算不改**（计划 Phase 3「反馈驱动偏好调整」）。
+
+        算一次「若把这次拒绝上升为**品牌级排除项**（Phase 2b 反馈表的候选口径），
+        推荐会怎么变、**会误伤几台**」，结果写结构化日志
+        （logger "app.agent.rejection.shadow"）。
+
+        为什么值得算：用户拒绝的往往只是那一台的某个配置，不一定是整个品牌。
+        品牌级排除「一票否决」同品牌其它车——**误伤面**有多大，是这条产品决策
+        该不该做、该做到什么粒度的证据。没有这个数就只能拍脑袋。
+
+        绝不把异常抛给响应路径：旁路采样可容忍丢失。
+        """
+        try:
+            before = list(result.get("variants") or [])
+            with get_session_factory()() as db:
+                brand_id, brand_name = await run_in_threadpool(
+                    _variant_brand, db, rejected_variant_id
+                )
+                if brand_id is None:
+                    return
+                counterfactual = profile.model_copy(deep=True)
+                counterfactual.brand_exclude_ids = [
+                    *counterfactual.brand_exclude_ids,
+                    brand_id,
+                ]
+                after_result = await run_in_threadpool(
+                    recommendation_tool, db, counterfactual
+                )
+            delta = brand_exclusion_delta(
+                before,
+                list(after_result.get("variants") or []),
+                brand_name=brand_name,
+                rejected_variant_id=rejected_variant_id,
+            )
+            logging.getLogger("app.agent.rejection.shadow").info(
+                json.dumps(
+                    {
+                        "shadow": "rejection_brand_exclusion",
+                        "rejected_variant_id": rejected_variant_id,
+                        "brand_id": brand_id,
+                        "brand_name": brand_name,
+                        **delta,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        except Exception:  # noqa: BLE001 —— 旁路失败绝不影响响应路径
+            logging.getLogger("app.agent.rejection.shadow").warning(
+                "拒绝影子评估失败（不影响响应路径）", exc_info=True
             )
 
     async def _shadow_route(self, message: str, profile: UserProfile, regex_decision) -> None:
@@ -1653,6 +1737,23 @@ class AgentEngine:
         if followup is not None or ids_changed:
             await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         await self._emit(session_id, explanation or "", out)
+        # 拒绝反馈的影子评估（计划 Phase 3）：**派发即走，不等它**。
+        # 只算不改：算「若把这次拒绝上升为品牌级排除项，推荐会怎么变、误伤几台」，
+        # 结论进结构化日志，供 Phase 2b（反馈表）拍板粒度用。
+        # 默认关（每次要多跑一遍推荐查询）——见 config.agent_rejection_shadow_enabled。
+        if (
+            reject_note
+            and profile.rejected_variant_ids
+            and get_settings().agent_rejection_shadow_enabled
+        ):
+            snapshot = profile.model_copy(deep=True)
+            before = {**result, "variants": list(result.get("variants") or [])}
+            self._spawn_shadow(
+                lambda: self._shadow_rejection(
+                    snapshot, before, profile.rejected_variant_ids[-1]
+                ),
+                logger_name="app.agent.rejection.shadow",
+            )
         return out
 
     async def _comparison_analysis_reply(

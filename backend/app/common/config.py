@@ -41,6 +41,15 @@ class Settings(BaseSettings):
     #: 留档保留天数，0 = 永不自动清理（法规要求长期留存时用这个出口，
     #: 关掉自动清理、交给外部流程接管）。
     agent_conversation_log_retention_days: int = 30
+    # 拒绝反馈的影子评估（计划 Phase 3「反馈驱动偏好调整（shadow）」，2026-10-21）。
+    #
+    #: 用户拒绝一台车后，后台算一次「若把它上升为**品牌级排除项**，推荐会怎么变、
+    #: 会误伤几台」，**只记录不改行为**——这是 Phase 2b（拒绝跨会话记住）该做到
+    #: 什么粒度的证据。
+    #:
+    #: 默认**关**：影子每次要多跑一遍推荐查询（全库扫描级开销），不该默认付。
+    #: 设 AGENT_REJECTION_SHADOW_ENABLED=true 开启。
+    agent_rejection_shadow_enabled: bool = False
     # 认证（邮箱验证码 + OTP；本地进程内存储，生产 Redis）
     dev_echo_codes: bool = False  # 仅开发模式：注册/登录响应回显验证码；生产必须为 false
     auth_token_ttl_seconds: int = 30 * 86400
