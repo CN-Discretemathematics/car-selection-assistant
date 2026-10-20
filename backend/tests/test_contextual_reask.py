@@ -47,6 +47,28 @@ def _seed(db_session: Session) -> None:
     db_session.commit()
 
 
+def _seed_many(db_session: Session, count: int = 3) -> None:
+    """种 count 个**不同车系**（同品牌同档），每个车系**两个款型**。
+
+    两个款型是必要的：按**款型**排除（而不是按车系）的实现会漏掉同车系的另一个款型 ⇒
+    用户看到的还是那个车系。款型只有一个时测不出这个差别。
+    """
+    source = make_source(db_session, name="换批测试来源")
+    brand = make_brand(db_session, name="测试品牌", source=source)
+    for i in range(count):
+        series = make_series(
+            db_session, brand, name=f"换批车系{i}", body_type="sedan",
+            energy_types=("BEV",), source=source,
+        )
+        year = make_year(db_session, series)
+        for cfg in ("标准版", "尊贵版"):
+            make_variant(
+                db_session, series, year, config_version=cfg, energy_type="BEV",
+                price_cny="150000", source=source,
+            )
+    db_session.commit()
+
+
 # ── 句式：只收「再给一批」的追问 ────────────────────────────────────────────
 
 
@@ -135,8 +157,12 @@ def test_normal_car_question_still_routes_to_recommendation(db_session: Session)
 
 
 def test_reask_turn_produces_structured_recommendations(db_session: Session):
-    """第一轮给需求，第二轮「还有别的吗」⇒ **有卡片**，不是一句闲聊。"""
-    _seed(db_session)
+    """第一轮给需求，第二轮「还有别的吗」⇒ **有卡片**，不是一句闲聊。
+
+    ⚠️ 要种**超过一轮展示量**的车：池子被推完后「再给一批」没有可给的了
+    （那时给的是「都推过了」的诚实文案，见下面的用例）⇒ 用例会假红。
+    """
+    _seed_many(db_session, 7)
     engine = AgentEngine(llm=LLMClient(api_key=None), store=SessionStore())
     sid = engine._store.create()
 
@@ -150,3 +176,101 @@ def test_reask_turn_produces_structured_recommendations(db_session: Session):
         "「还有别的吗」必须再推一批，而不是回一句闲聊"
         f"（实得：{second.explanation!r}）"
     )
+
+
+# ── 「再给一批」：给**没给过**的车，而不是逐位相同的那一批 ──────────────────
+#
+# 引擎是确定性的 ⇒ 同一画像必然推回同一批（实测：宽需求下候选池 3162 台，
+# 第二轮仍是同一批 5 台）。用户要「更多」，必须把**已经给过的车系**排除掉。
+
+
+def _series_names(out) -> set[str]:
+    return {v.series_name for v in out.recommended_variants or []}
+
+
+def test_reask_gives_a_batch_of_unseen_series(db_session: Session):
+    """「再推荐几款」⇒ 第二轮的车系与第一轮**零重叠**。"""
+    _seed_many(db_session, 7)
+    engine = AgentEngine(llm=LLMClient(api_key=None), store=SessionStore())
+    sid = engine._store.create()
+
+    first = asyncio.run(engine.respond(db_session, sid, "预算15万，通勤，两三个人用"))
+    assert first.recommended_variants, "第一轮就该有推荐（前提）"
+    second = asyncio.run(engine.respond(db_session, sid, "再推荐几款"))
+    assert second.recommended_variants, "第二轮该给下一批"
+    assert not (_series_names(first) & _series_names(second)), (
+        f"第二轮把第一轮的车又推了一遍：{_series_names(first)} vs {_series_names(second)}"
+    )
+
+
+def test_restating_the_requirement_returns_the_original_batch(db_session: Session):
+    """**不是**追问的那一轮（重新说需求）⇒ 回到原来那一批。
+
+    排除只在**追问轮**生效——用户重新问需求时看到不同的车会以为是系统不稳定。
+    """
+    _seed_many(db_session, 3)
+    engine = AgentEngine(llm=LLMClient(api_key=None), store=SessionStore())
+    sid = engine._store.create()
+
+    first = asyncio.run(engine.respond(db_session, sid, "预算15万，通勤，两三个人用"))
+    again = asyncio.run(engine.respond(db_session, sid, "预算15万，通勤，两三个人用"))
+    assert _series_names(first) == _series_names(again), (
+        "同样的需求必须给出同样的一批（确定性）"
+    )
+
+
+def test_reask_when_pool_is_exhausted_says_already_shown(db_session: Session):
+    """池子里的车都推过了 ⇒ 如实说「都推过了」，**不是**「没有符合条件的车」。
+
+    后者会让用户以为自己的预算/用途有问题——而事实是条件都匹配、只是都给过了。
+    """
+    _seed(db_session)  # 只有一台 ⇒ 推完就没了
+    engine = AgentEngine(llm=LLMClient(api_key=None), store=SessionStore())
+    sid = engine._store.create()
+
+    first = asyncio.run(engine.respond(db_session, sid, "预算15万，通勤，两三个人用"))
+    assert first.recommended_variants, "第一轮就该有推荐（前提）"
+    second = asyncio.run(engine.respond(db_session, sid, "再推荐几款"))
+    assert not second.recommended_variants, "池子空了，不该再给车"
+    text = " ".join(second.reasons or []) + (second.explanation or "")
+    assert "推过了" in text, text
+
+
+def test_tool_excludes_the_given_series(db_session: Session):
+    """工具层：传入 `exclude_series_ids` ⇒ 那个车系的**全部款型**都不进候选。
+
+    顺带钉住**车系级**语义：同一车系的另一个款型也必须被排掉
+    （按款型排除的实现会漏掉它 ⇒ 用户看到的还是那个车系）。
+    """
+    from app.agent.tools import recommendation_tool
+
+    source = make_source(db_session, name="工具排除测试来源")
+    brand = make_brand(db_session, name="排除测试品牌", source=source)
+    for i in range(2):
+        series = make_series(
+            db_session, brand, name=f"排除车系{i}", body_type="sedan",
+            energy_types=("BEV",), source=source,
+        )
+        year = make_year(db_session, series)
+        # 同一车系两个款型：排除车系 ⇒ 两个款型都该走
+        for cfg in ("标准版", "尊贵版"):
+            make_variant(
+                db_session, series, year, config_version=cfg, energy_type="BEV",
+                price_cny="150000", source=source,
+            )
+    db_session.commit()
+
+    profile = UserProfile(
+        budget={"min": 100000.0, "max": 200000.0, "currency": "CNY", "type": "official_msrp"},
+        usage=["通勤"],
+        passengers=3,
+        body_type=["sedan"],
+    )
+    plain = recommendation_tool(db_session, profile)
+    assert plain["variants"], "前提：不排除时应有候选"
+    first_series = plain["variants"][0]["series_id"]
+
+    excluded = recommendation_tool(db_session, profile, exclude_series_ids=[first_series])
+    assert all(v["series_id"] != first_series for v in excluded["variants"]), excluded
+    # 池子大小（排除**前**）不变——执行层要靠它区分「没匹配到」与「都推过了」
+    assert excluded["candidates_scanned"] == plain["candidates_scanned"], excluded
