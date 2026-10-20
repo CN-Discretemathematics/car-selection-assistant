@@ -37,6 +37,23 @@
 指向的车与题面说的不是同一台**（库重导入后 id 重排）。若多轮框架沿用 id 锚点，
 会**继承同一个缺陷**。故本框架的 `car` 一律用**车系名**。
 
+## 跨会话：每轮可带 `session` 标签
+
+2026-10-21 补：题库里的「回访用户记忆」「删掉的记忆」两个场景要测的是**跨会话**行为，
+而此前框架全程共用一个 `session_id` ⇒ 测的其实是「同会话内还记不记得」
+（记忆要么一直生效、要么一直不生效，**都不是跨会话**）。
+
+现在每轮可带 `session` 标签（"first"/"second"…）：**标签变了就换一个 session**；
+同一标签的多轮仍在同一会话。跨会话场景还要一个**身份**（记忆的载体），
+引擎支持 `handle(identity=...)` 时本场建一个、所有会话共用。
+
+## 只跑 `enabled` 的场景
+
+题库里 `enabled: false` 的场景依赖**尚未落地**的能力。框架默认跳过它们
+（单独报数、不计入分母）——否则「通过率」被未落地的能力拉低，
+看报告的人会误判成「功能坏了」，更糟的是有人会去**改断言**让它变绿。
+要强行跑看它为什么红：`--include-disabled`。
+
 ## 用法
 
     python tools/eval_multiturn.py --scenarios eval/multiturn.json --report eval/multiturn-report.json
@@ -48,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import sys
 import time
@@ -257,16 +275,87 @@ def check_assertion(
     if kind == "mentions" and not hit:
         raise AssertionFailed(f"{kind}：{assertion!r} —— 但回答里没提到")
 
+def _session_labels(turns: list[dict]) -> set[str]:
+    """本场用到的会话标签集合（空串 = 未标注 = 默认会话）。"""
+    return {str(t.get("session") or "") for t in turns}
+
+
+def _needs_identity(turns: list[dict]) -> bool:
+    """本场是否**跨会话**（≥2 个不同标签）——只有跨会话才需要身份。"""
+    return len(_session_labels(turns)) > 1
+
+
+def _engine_supports_identity(engine: Any) -> bool:
+    """引擎的 `handle` 是否接受 `identity` 参数。
+
+    用 `inspect.signature` 而不是 `try: handle(..., identity=...)`：
+    后者会把「不支持」变成运行期 TypeError，且已经产出了副作用。
+    """
+    try:
+        params = inspect.signature(engine.handle).parameters
+    except (TypeError, ValueError):  # pragma: no cover - 取不到签名的代理对象
+        return False
+    return "identity" in params
+
+
+def _identity_factory() -> Any:
+    """取「建身份」的函数。
+
+    独立成函数有两个理由：
+
+    1. **接线坏了要响**——`app.agent.preferences` 不存在时直接 ImportError，
+       不能悄悄降级成「不建身份」：降级会让「跨会话记忆」场景测的其实是
+       「没有记忆」，`budget_in` 断言恒真 ⇒ 又一次**假通过**。
+    2. **测试能替换**——框架单测不该依赖真实的身份表。
+    """
+    from app.agent.preferences import get_or_create_identity
+
+    return get_or_create_identity
+
+
 async def run_scenario(
     db: Session, scenario: dict, *, llm_available: bool = True
 ) -> dict:
     """跑一个多轮场景，返回结果记录。
 
-    每轮用**同一个 session_id**——跨轮行为的前提就是会话态连续。
+    ## 会话与身份
+
+    - 每轮可带 `session` 标签（如 "first"/"second"）：标签变了就**换一个 session**。
+      此前全程共用一个 session ⇒ 「跨会话记忆」两个场景根本跑不出真实行为
+      （记忆要么一直生效、要么一直不生效，测的都不是跨会话）。
+    - 引擎支持 `handle(identity=...)` 时，本场建一个**身份**（跨会话记忆的载体），
+      所有会话**共用**它——这正是「回访用户」的定义。
+      引擎不支持时（Phase 1 上线前）**不建**，行为与之前逐位相同。
+    - 跨会话场景但引擎不支持身份 ⇒ 场景判**红**（不是通过）：
+      测不了跨会话记忆 ≠ 跨会话记忆没问题。
     """
     engine = get_agent_engine()
     store = get_session_store()
-    session_id = store.create()
+    turns = scenario.get("turns") or []
+
+    # 会话标签 → session_id：标签变了 = **另一个会话**。
+    session_ids: dict[str, str] = {}
+
+    def _session_for(label: str) -> str:
+        if label not in session_ids:
+            session_ids[label] = store.create()
+        return session_ids[label]
+
+    # 跨会话场景需要一个**身份**，本场所有会话共用它。
+    identity = None
+    identity_error = ""
+    if _needs_identity(turns):
+        if not _engine_supports_identity(engine):
+            identity_error = (
+                "本场景跨会话，但引擎 handle 不接受 identity 参数——"
+                "跨会话记忆无法评测（Phase 1 未接线？）"
+            )
+        else:
+            try:
+                identity, _token, _created = _identity_factory()(db)
+                db.commit()
+            except Exception as exc:  # noqa: BLE001 - 接线问题要记下来，不能崩掉整轮
+                identity_error = f"身份创建失败：{type(exc).__name__}: {exc}"
 
     turn_results: list[dict] = []
     failures: list[str] = []
@@ -279,13 +368,20 @@ async def run_scenario(
     seen_recommended: set[str] = set()
     vacuous: list[str] = []
 
-    for idx, turn in enumerate(scenario.get("turns") or [], start=1):
+    for idx, turn in enumerate(turns, start=1):
         user = turn.get("user") or ""
+        label = str(turn.get("session") or "")
+        session_id = _session_for(label)
         try:
-            out = await engine.handle(db, session_id, user)
+            if identity is None:
+                out = await engine.handle(db, session_id, user)
+            else:
+                out = await engine.handle(db, session_id, user, identity=identity)
         except Exception as exc:  # noqa: BLE001 - 场景失败要记下来，不能让一个场景崩掉整轮
             failures.append(f"第 {idx} 轮异常: {type(exc).__name__}: {exc}")
-            turn_results.append({"turn": idx, "user": user, "error": type(exc).__name__})
+            turn_results.append(
+                {"turn": idx, "user": user, "error": type(exc).__name__, "session": label}
+            )
             break
 
         recommended = _recommended_names(out)
@@ -312,6 +408,7 @@ async def run_scenario(
             {
                 "turn": idx,
                 "user": user,
+                "session": label,
                 "answer": _answer_text(out),
                 "recommended": recommended,
                 "need_clarification": bool(getattr(out, "need_clarification", False)),
@@ -320,12 +417,15 @@ async def run_scenario(
             }
         )
 
+    if identity_error:
+        failures.append(identity_error)
+
     # ⚠️ **空转自检**：若整场对话**一次都没推荐出车**，
     # 那么 `not_recommended` 断言是**恒真的**——它「通过」不是因为行为正确，
     # 而是因为什么都没发生。这种场景必须标成**无效**，不能计入通过。
     # 这正是本仓反复记录的「不可能变红」陷阱的另一种形态。
     no_recommendation = not any_recommendation
-    if no_recommendation and scenario.get("turns"):
+    if no_recommendation and turns:
         failures.append(
             "本场景全程未产出任何推荐——`not_recommended` 断言恒真，场景无效"
             "（检查：库内该价位/车身/能源档是否真有在售车系）"
@@ -335,7 +435,9 @@ async def run_scenario(
     return {
         "id": scenario.get("id"),
         "scenario": scenario.get("scenario"),
-        "turns": len(scenario.get("turns") or []),
+        "turns": len(turns),
+        "sessions": len(session_ids),
+        "cross_session": _needs_identity(turns),
         "passed": not failures,
         "no_recommendation": no_recommendation,
         "vacuous_assertion": bool(vacuous),
@@ -353,6 +455,23 @@ def load_scenarios(path: str) -> list[dict]:
     if isinstance(payload, dict):
         return list(payload.get("scenarios") or [])
     return list(payload)
+
+
+def split_enabled(scenarios: list[dict]) -> tuple[list[dict], list[dict]]:
+    """按 `enabled` 拆成「可跑」与「未启用」两堆。
+
+    ## 为什么必须拆
+
+    题库里 `enabled: false` 的场景是**依赖尚未落地的能力**（如跨会话记忆）。
+    框架若照跑，这些场景必然红 → 「通过率」被未落地的能力拉低，
+    看报告的人会误判「功能坏了」；更糟的是有人会去**改断言**让它变绿。
+
+    所以默认**只跑 enabled 的**，未启用的单独报数（不计入分母）。
+    要强行跑（看它到底为什么红）用 `--include-disabled`。
+    """
+    enabled = [s for s in scenarios if s.get("enabled", True)]
+    disabled = [s for s in scenarios if not s.get("enabled", True)]
+    return enabled, disabled
 
 
 async def _run_all(
@@ -379,6 +498,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", default="", help="报告输出路径（JSON）")
     parser.add_argument("--scenario", default="", help="只跑某个场景类型")
     parser.add_argument("--limit", type=int, default=0, help="最多跑多少个场景")
+    parser.add_argument(
+        "--include-disabled",
+        action="store_true",
+        help="连 enabled=false 的场景一起跑（默认只跑 enabled 的）",
+    )
     args = parser.parse_args(argv)
 
     scenarios = load_scenarios(args.scenarios)
@@ -387,12 +511,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.scenario:
         scenarios = [s for s in scenarios if s.get("scenario") == args.scenario]
+    enabled, disabled = split_enabled(scenarios)
+    if args.include_disabled:
+        enabled = scenarios
     if args.limit:
-        scenarios = scenarios[: args.limit]
+        enabled = enabled[: args.limit]
 
     session = get_session_factory()()
     try:
-        results, by_kind = asyncio.run(_run_all(session, scenarios))
+        results, by_kind = asyncio.run(_run_all(session, enabled))
     finally:
         session.close()
 
@@ -401,13 +528,26 @@ def main(argv: list[str] | None = None) -> int:
     print(f"多轮场景：{passed}/{total} 通过")
     for k in sorted(by_kind):
         print(f"  {k}: {by_kind[k]}")
+    if disabled:
+        reasons = Counter(
+            str(s.get("reason_disabled") or "未标注原因") for s in disabled
+        )
+        print(f"  跳过未启用场景 {len(disabled)} 个（不计入分母）：")
+        for reason, n in reasons.most_common():
+            print(f"    - {reason}：{n}")
 
     if args.report:
         rp = Path(args.report)
         rp.parent.mkdir(parents=True, exist_ok=True)
         rp.write_text(
             json.dumps(
-                {"total": total, "passed": passed, "by_kind": dict(by_kind), "results": results},
+                {
+                    "total": total,
+                    "passed": passed,
+                    "skipped_disabled": len(disabled),
+                    "by_kind": dict(by_kind),
+                    "results": results,
+                },
                 ensure_ascii=False,
                 indent=1,
             ),

@@ -261,7 +261,202 @@ def test_scenario_with_recommendation_is_not_flagged(db_session: Session):
     assert "no_recommendation" in res
 
 
-# ── 预算类断言（2026-10-21：改查结构化口径）──────────────────────────────
+# ── 跨会话：标签切换 + 身份接线（2026-10-21）──────────────────────────────
+# 题库里「回访用户记忆」「删掉的记忆」两个场景要测的是**跨会话**行为。
+# 框架此前全程共用一个 session_id ⇒ 测的其实是「同会话内还记不记得」
+# （记忆要么一直生效、要么一直不生效，**都不是跨会话**）。
+#
+# 这里用假引擎验证**框架的接线**（标签→会话映射、身份创建与传递），
+# 真实行为由分支 8 合入后跑真库验证。
+
+
+class _FakeEngine:
+    """记录每次 handle 调用的假引擎。"""
+
+    def __init__(self, *, with_identity: bool = False) -> None:
+        self.calls: list[tuple[str, str, object]] = []
+        self.with_identity = with_identity
+
+    async def handle(self, db, session_id, message, **kwargs):  # noqa: ANN001
+        self.calls.append((session_id, message, kwargs.get("identity")))
+        return AgentMessageOut(session_id=session_id, explanation="收到")
+
+
+class _FakeEngineWithIdentity(_FakeEngine):
+    """支持 `identity` 参数的假引擎（Phase 1 接线后的形状）。"""
+
+    async def handle(self, db, session_id, message, *, identity=None):  # noqa: ANN001
+        self.calls.append((session_id, message, identity))
+        return AgentMessageOut(session_id=session_id, explanation="收到")
+
+
+class _FakeStore:
+    """假会话存储：每次 create 给一个递增 id，便于断言「是否换了会话」。"""
+
+    def __init__(self) -> None:
+        self.n = 0
+        self.created: list[str] = []
+
+    def create(self) -> str:
+        self.n += 1
+        sid = f"sess-{self.n}"
+        self.created.append(sid)
+        return sid
+
+
+def _patch_engine(monkeypatch, engine, store) -> None:  # noqa: ANN001
+    monkeypatch.setattr(mt, "get_agent_engine", lambda: engine)
+    monkeypatch.setattr(mt, "get_session_store", lambda: store)
+
+
+def test_session_label_switches_to_a_new_session(monkeypatch, db_session: Session):
+    """标签变了 ⇒ **另一个会话**；标签相同 ⇒ 同一会话。"""
+    engine = _FakeEngine()
+    store = _FakeStore()
+    _patch_engine(monkeypatch, engine, store)
+
+    scenario = {
+        "id": "x1",
+        "scenario": "returning_user_memory",
+        "turns": [
+            {"user": "预算8到12万", "assert": [], "session": "first"},
+            {"user": "按之前说的来", "assert": [], "session": "second"},
+            {"user": "还有吗", "assert": [], "session": "second"},
+        ],
+    }
+    res = asyncio.run(mt.run_scenario(db_session, scenario))
+
+    sids = [c[0] for c in engine.calls]
+    assert sids[0] != sids[1], "标签变了必须换会话"
+    assert sids[1] == sids[2], "同一标签的多轮应留在同一会话"
+    assert res["sessions"] == 2
+    assert res["cross_session"] is True
+
+
+def test_turns_without_label_share_one_session(monkeypatch, db_session: Session):
+    """没标 `session` 的轮次 ⇒ 全部落在**同一个**会话（保持旧行为）。"""
+    engine = _FakeEngine()
+    store = _FakeStore()
+    _patch_engine(monkeypatch, engine, store)
+
+    scenario = {
+        "id": "x2",
+        "scenario": "reject_then_no_recommend",
+        "turns": [
+            {"user": "a", "assert": []},
+            {"user": "b", "assert": []},
+        ],
+    }
+    res = asyncio.run(mt.run_scenario(db_session, scenario))
+
+    sids = {c[0] for c in engine.calls}
+    assert len(sids) == 1
+    assert res["sessions"] == 1
+    assert res["cross_session"] is False
+
+
+def test_cross_session_creates_one_identity_shared_by_all_sessions(
+    monkeypatch, db_session: Session
+):
+    """跨会话场景 ⇒ 建**一个**身份，本场所有会话共用它（回访用户的定义）。"""
+    engine = _FakeEngineWithIdentity()
+    store = _FakeStore()
+    _patch_engine(monkeypatch, engine, store)
+
+    created: list[int] = []
+
+    def _fake_factory():
+        def _make(db):  # noqa: ANN001
+            created.append(1)
+            return ("IDENTITY-1", "plaintext-token", True)
+
+        return _make
+
+    monkeypatch.setattr(mt, "_identity_factory", _fake_factory)
+
+    scenario = {
+        "id": "x3",
+        "scenario": "returning_user_memory",
+        "turns": [
+            {"user": "预算8到12万", "assert": [], "session": "first"},
+            {"user": "按之前说的来", "assert": [], "session": "second"},
+        ],
+    }
+    res = asyncio.run(mt.run_scenario(db_session, scenario))
+
+    assert len(created) == 1, "身份只应建一次"
+    assert [c[2] for c in engine.calls] == ["IDENTITY-1", "IDENTITY-1"]
+    assert engine.calls[0][0] != engine.calls[1][0], "两个会话必须不同"
+    assert not any("身份创建失败" in f for f in res["failures"]), res["failures"]
+
+
+def test_cross_session_without_engine_support_is_red_not_green(
+    monkeypatch, db_session: Session
+):
+    """引擎不支持 `identity` ⇒ 场景判**红**（不是通过）。
+
+    「测不了跨会话记忆」≠「跨会话记忆没问题」——
+    悄悄降级成「不建身份」会让断言恒真，又一次**假通过**。
+    """
+    engine = _FakeEngine()  # 不接受 identity
+    store = _FakeStore()
+    _patch_engine(monkeypatch, engine, store)
+
+    scenario = {
+        "id": "x4",
+        "scenario": "returning_user_memory",
+        "turns": [
+            {"user": "预算8到12万", "assert": [], "session": "first"},
+            {"user": "按之前说的来", "assert": [], "session": "second"},
+        ],
+    }
+    res = asyncio.run(mt.run_scenario(db_session, scenario))
+
+    assert res["passed"] is False
+    assert any("identity" in f for f in res["failures"]), res["failures"]
+
+
+def test_identity_creation_failure_is_recorded(monkeypatch, db_session: Session):
+    """身份创建炸了 ⇒ 记成失败并继续跑，**不崩掉整轮**评测。"""
+    engine = _FakeEngineWithIdentity()
+    store = _FakeStore()
+    _patch_engine(monkeypatch, engine, store)
+
+    def _boom():
+        raise RuntimeError("身份表不存在")
+
+    monkeypatch.setattr(mt, "_identity_factory", _boom)
+
+    scenario = {
+        "id": "x5",
+        "scenario": "returning_user_memory",
+        "turns": [
+            {"user": "a", "assert": [], "session": "first"},
+            {"user": "b", "assert": [], "session": "second"},
+        ],
+    }
+    res = asyncio.run(mt.run_scenario(db_session, scenario))
+
+    assert res["passed"] is False
+    assert any("身份创建失败" in f for f in res["failures"]), res["failures"]
+
+
+# ── 只跑 enabled 的场景 ────────────────────────────────────────────────────
+# 题库里 `enabled: false` 的场景依赖**尚未落地**的能力；框架若照跑，
+# 「通过率」会被未落地的能力拉低，看报告的人会误判成「功能坏了」，
+# 更糟的是有人会去**改断言**让它变绿。
+
+
+def test_split_enabled_separates_disabled_scenarios():
+    scenarios = [
+        {"id": "a", "enabled": True},
+        {"id": "b", "enabled": False, "reason_disabled": "依赖 Phase 1"},
+        {"id": "c"},  # 没写 enabled ⇒ 视为可跑
+    ]
+    enabled, disabled = mt.split_enabled(scenarios)
+    assert [s["id"] for s in enabled] == ["a", "c"]
+    assert [s["id"] for s in disabled] == ["b"]
+
 # 此前用裸字符串 `mentions '10'` / `not_mentions '12'`：预算值在正文里必然与
 # **车价**混在一起（12-18 万档里有 12.99 万的车），于是两个方向都会误判：
 # 「不提到 12」把正确答案判成失败（假否定），「提到 10」也会因推荐了 8.28 万而失败。

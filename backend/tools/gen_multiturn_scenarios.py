@@ -14,9 +14,19 @@
 1. `reject_then_no_recommend`（50）—— 拒过的那台，下一轮还推不推？
    **同会话**，当前系统可测。
 2. `returning_user_memory`（50）—— 回访用户的记忆是否生效？
-   **跨会话**，依赖 Phase 1 的持久化身份与偏好记忆 → 先落题面，标 `enabled: false`。
+   **跨会话**，依赖 Phase 1 的持久化身份与偏好记忆 → 默认标 `enabled: false`。
 3. `memory_deleted`（50）—— 删掉的记忆是否真的不生效？
    **跨会话**，同上。
+
+## 跨会话场景默认关，用开关打开
+
+两个记忆场景要跑，前提是**跨会话**真的跨了：Phase 1 已合入（引擎 `handle`
+支持 `identity`）且 `DURABLE_PREFS_MODE=on`（`off`/`shadow` 模式**不回填**记忆，
+断言必然红）。所以默认 `enabled: false`，用 `--enable-memory-scenarios` 打开。
+
+评测框架默认**只跑 enabled 的场景**（未启用的单独报数、不计入分母）——
+否则「通过率」会被未落地的能力拉低，看报告的人会误判成「功能坏了」，
+更糟的是有人会去**改断言**让它变绿。
 
 ## 需求句必须**可满足**（2026-10-21 修正）
 
@@ -38,6 +48,7 @@
 
 用法：
     python tools/gen_multiturn_scenarios.py --out eval/multiturn.json
+    python tools/gen_multiturn_scenarios.py --out eval/multiturn.json --enable-memory-scenarios
 """
 from __future__ import annotations
 
@@ -249,7 +260,9 @@ def gen_reject_scenarios(rng: random.Random, requirements: list[dict]) -> list[d
     return out
 
 
-def gen_returning_scenarios(rng: random.Random, requirements: list[dict]) -> list[dict]:
+def gen_returning_scenarios(
+    rng: random.Random, requirements: list[dict], *, enabled: bool = False
+) -> list[dict]:
     """场景 2：回访用户的记忆是否生效？（跨会话，依赖 Phase 1）"""
     out = []
     for i, req in enumerate(requirements):
@@ -261,7 +274,7 @@ def gen_returning_scenarios(rng: random.Random, requirements: list[dict]) -> lis
                 "id": f"mt_return_{i + 1:04d}",
                 "scenario": "returning_user_memory",
                 # 跨会话：需要 Phase 1 的持久化身份与偏好记忆，尚未实现 → 先不启用
-                "enabled": False,
+                "enabled": enabled,
                 "reason_disabled": "依赖 Phase 1：持久化身份 + 偏好记忆（尚未实现）",
                 "turns": [
                     {
@@ -287,7 +300,9 @@ def gen_returning_scenarios(rng: random.Random, requirements: list[dict]) -> lis
     return out
 
 
-def gen_memory_deleted_scenarios(rng: random.Random, requirements: list[dict]) -> list[dict]:
+def gen_memory_deleted_scenarios(
+    rng: random.Random, requirements: list[dict], *, enabled: bool = False
+) -> list[dict]:
     """场景 3：删掉的记忆是否真的不生效？（跨会话，依赖 Phase 1）"""
     out = []
     for i, req in enumerate(requirements):
@@ -298,7 +313,7 @@ def gen_memory_deleted_scenarios(rng: random.Random, requirements: list[dict]) -
             {
                 "id": f"mt_delete_{i + 1:04d}",
                 "scenario": "memory_deleted",
-                "enabled": False,
+                "enabled": enabled,
                 "reason_disabled": "依赖 Phase 1：持久化身份 + 记忆删除接口（尚未实现）",
                 "turns": [
                     {
@@ -330,6 +345,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="eval/multiturn.json", help="输出路径")
     parser.add_argument("--count", type=int, default=50, help="每个场景多少题")
     parser.add_argument("--seed", type=int, default=20261020, help="随机种子（固定以保证可复现）")
+    parser.add_argument(
+        "--enable-memory-scenarios",
+        action="store_true",
+        help=(
+            "启用两个跨会话记忆场景（默认关）。需要：Phase 1 已合入"
+            "（引擎 handle 支持 identity）+ DURABLE_PREFS_MODE=on"
+            "（off/shadow 模式不回填记忆，断言必然红）"
+        ),
+    )
     args = parser.parse_args(argv)
 
     rng = random.Random(args.seed)
@@ -342,8 +366,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     scenarios = (
         gen_reject_scenarios(rng, requirements)
-        + gen_returning_scenarios(rng, requirements)
-        + gen_memory_deleted_scenarios(rng, requirements)
+        + gen_returning_scenarios(
+            rng, requirements, enabled=args.enable_memory_scenarios
+        )
+        + gen_memory_deleted_scenarios(
+            rng, requirements, enabled=args.enable_memory_scenarios
+        )
     )
 
     out = Path(args.out)
