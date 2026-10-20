@@ -700,6 +700,36 @@ def _passenger_options(profile: UserProfile) -> list[str]:
     return ["1~2人", "3~5人", "5人以上"]
 
 
+#: 「拒绝推荐」的表述（2026-10-21）。
+#:
+#: 只认**带指示词**的否定：「不喜欢这台」「不要这辆」「别推它」。
+#: 裸的「不要」（如「不要 SUV」「不要电车」）是**硬约束**，走 `avoid` /
+#: 品牌排除那条路——两者混在一起会把一整类车误伤成一款车。
+_REJECT_RE = re.compile(r"(不喜欢|不要|别推|不想要|看腻)[^，。！？\n]{0,4}(这台|这辆|它|这个)")
+
+
+def _apply_rejection(profile: UserProfile, message: str) -> str:
+    """处理「不喜欢这台」：把**最近推荐的最后一款**加入排除集。
+
+    返回给用户看的回执（空串 = 这句话不是拒绝）。
+
+    为什么是「最后一款」：用户看的是卡片，说「这台」指的是他刚看到的那张。
+    若本轮给了多张确有歧义，所以回执里说清是「刚推荐的那款」——
+    用户说车名可以再纠正（诚实性：不假装确定）。
+
+    只在**会话内**生效：跨会话要靠反馈表 + 影子调参（Phase 2 的另一半）。
+    """
+    if not _REJECT_RE.search(message):
+        return ""
+    last = list(profile.last_recommended_variant_ids or [])
+    if not last:
+        return "我还没推荐过车呢——你说个车名或需求，我来挑。"
+    vid = last[-1]
+    if vid not in profile.rejected_variant_ids:
+        profile.rejected_variant_ids = [*profile.rejected_variant_ids, vid]
+    return "已排除刚推荐的那款，换一批给你看。"
+
+
 def _profile_summary(profile: UserProfile) -> str:
     """已收集画像的一句话复述（用于「已记住：…」引导）。"""
     parts: list[str] = []
@@ -1232,6 +1262,19 @@ class AgentEngine:
         soft_probe.apply_probe_answer(profile, message)
         await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         structured = bool(hints)
+        # 「不喜欢这台」→ 把最近推荐的那一款加入排除集（计划「拒绝后不再推」）。
+        #
+        # ⚠️ 两处讲究：
+        # 1) 必须在本轮推荐**之前**落地，否则这一轮还会把它推出来；
+        # 2) **不额外加一次落盘**——画像下方那次「吸收变更」的无条件写会把它一起
+        #    持久化（`tests/test_profile_persistence.py` 钉死了无条件落盘恰好两处，
+        #    中间插一次写会破坏那个结构契约）。
+        # 3) 要 `structured = True`：这句话本身不含任何硬约束，但它是**明确的信号**，
+        #    不置位就会被当成闲聊 → 掉进 LLM 对话分支 → 用户看到的是一句无关的回话，
+        #    推荐根本没重出。
+        reject_note = _apply_rejection(profile, message)
+        if reject_note:
+            structured = True
 
         # 0) 闲聊/能力咨询 → 自然回复（大模型 + 检索佐证）
         if is_chatty(message):
@@ -1542,6 +1585,9 @@ class AgentEngine:
         result = {**result, "variants": top}
 
         reasons = self._build_reasons(profile, result)
+        if reject_note:
+            # 用户刚拒绝的那一款已排除——口径变化必须对用户可见（与解锁说明同一原则）
+            reasons.insert(0, reject_note)
         if unlock_note:
             # 口径变化必须对用户可见：先说明「已不再限定在某车系」，再给推荐理由
             reasons.insert(0, unlock_note)

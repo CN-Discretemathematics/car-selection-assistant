@@ -394,6 +394,12 @@ def recommendation_tool(
         price_cond.append(OfficialPrice.price_cny <= profile.budget.max)
     stmt = stmt.where(VehicleVariant.id.in_(select(OfficialPrice.variant_id).where(*price_cond)))
 
+    # 用户**明确拒绝过**的款型（会话内，2026-10-21）：硬过滤下推——
+    # 「不喜欢这台」之后这台不该再出现在候选里（计划「拒绝后不再推」）。
+    # 只在**会话内**生效；跨会话要靠反馈表 + 影子调参（Phase 2 的另一半）。
+    if profile.rejected_variant_ids:
+        stmt = stmt.where(~VehicleVariant.id.in_(profile.rejected_variant_ids))
+
     # ── 座位数下推（H2-A，2026-10-03）────────────────────────────────────
     # 此前「≥N 座」只能在 Python 侧判：读 spec_facts 里的座位数事实，而事实必须
     # 先把款型物化出来才读得到——**结构性的循环依赖**，所以 `candidates_scanned`
@@ -550,6 +556,10 @@ def recommendation_tool(
                 continue
             if variant.body_type and variant.body_type in body_avoid:
                 continue
+        # 被用户明确拒绝过的款型：SQL 侧已下推，这里是**同口径的兜底**
+        # （本仓惯例：下推 + Python 兜底，两处口径必须一致）
+        if profile.rejected_variant_ids and variant.id in profile.rejected_variant_ids:
+            continue
         seats = _extract_seats(facts)
         # ⚠️ 这一行**必须保留**：它是下推的兜底，不是冗余。
         # `seat_count` 为 NULL 有两种情况——真的没座位事实，或**回填还没跑**。
