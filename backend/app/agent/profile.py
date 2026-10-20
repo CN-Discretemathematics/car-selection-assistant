@@ -33,7 +33,7 @@ import 写进函数体。那处延迟 import 是**疤痕**，不是设计。
 from __future__ import annotations
 
 from app.agent.schemas import Budget, UserProfile
-from app.agent.weights import WEIGHT_CEILING
+from app.agent.weights import DEFAULT_WEIGHTS, WEIGHT_CEILING
 
 
 def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
@@ -94,4 +94,18 @@ def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
         for dim, w in hints["weights"].items():
             merged = profile.weights.get(dim, 0.0) + float(w)
             profile.weights[dim] = round(min(merged, WEIGHT_CEILING), 3)
+        # 首要维度（2026-10-21，计划 §1.2）：取「这一轮被用户抬高」的维度里权重最高的。
+        #
+        # ⚠️ **不是**「默认权重最高的维度」——默认里 budget 最高（0.30），那是评分口径，
+        # 不是用户的偏好。判据必须是「被抬高」（> 默认值）。
+        #
+        # ⚠️ **只影响文案组织，不动打分与排序**（计划原文的硬约束）：
+        # 这里只写画像的一个字段，排序仍由 8 维软评分决定。
+        raised = [
+            dim
+            for dim, w in hints["weights"].items()
+            if float(w) > DEFAULT_WEIGHTS.get(dim, 0.0) + 1e-9
+        ]
+        if raised:
+            profile.top_dim = max(raised, key=lambda d: float(hints["weights"][d]))
     return profile

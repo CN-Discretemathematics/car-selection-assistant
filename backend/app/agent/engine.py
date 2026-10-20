@@ -643,6 +643,7 @@ def _profile_summary(profile: UserProfile) -> str:
 
 
 
+
 def _join_names(names: list[str]) -> str:
     """多值拼接。
 
@@ -849,6 +850,29 @@ def collect_tradeoffs(top: list[dict], limit: int = 4) -> list[str]:
                 if len(out) >= limit:
                     break
     return out
+
+
+def _explain_system_prompt(profile: UserProfile) -> str:
+    """解释模块的 system 提示。
+
+    单独抽成纯函数（2026-10-21）：提示词此前内联在 `_explain` 里，
+    **没法单测**——于是「先讲用户最在意的维度」这句只有 A/B 观测（易被改掉而无人察觉），
+    现在有一条用例直接钉住提示内容（`test_llm_prompt_leads_with_the_top_dimension`）。
+
+    首要维度（计划 §1.2）：用户**明确抬高**的那个维度 → 点名并要求**先讲它**，
+    再讲取舍与妥协。没有 `top_dim` 时提示**一个字都不改**。
+    """
+    system = (
+        "你是汽车选车助手的解释模块。只能使用下面给定的候选数据，逐条引用其中的价格、配置与来源；"
+        "禁止编造价格、销量、优惠、库存或任何数据中没有的内容；缺失信息如实说明；"
+        "不使用表格，不超过 200 字。"
+    )
+    if profile.top_dim and profile.top_dim in _DIM_LABELS:
+        system += (
+            f"用户最在意的是「{_DIM_LABELS[profile.top_dim]}」——"
+            f"**先讲这个维度**，再讲取舍与妥协；"
+        )
+    return system
 
 
 class AgentEngine:
@@ -2477,11 +2501,7 @@ class AgentEngine:
                 },
                 ensure_ascii=False,
             )
-            system = (
-                "你是汽车选车助手的解释模块。只能使用下面给定的候选数据，逐条引用其中的价格、配置与来源；"
-                "禁止编造价格、销量、优惠、库存或任何数据中没有的内容；缺失信息如实说明；"
-                "不使用表格，不超过 200 字。"
-            )
+            system = _explain_system_prompt(profile)
             resp = await self._llm.chat(
                 [{"role": "system", "content": system}, {"role": "user", "content": context}],
                 temperature=0.3,
@@ -2529,8 +2549,19 @@ class AgentEngine:
             if evidence:
                 snippets = "；".join(f"{_clip_evidence(e['text'])}" for e in evidence[:2])
                 evidence_desc = f"官方资料佐证：{snippets}。"
+            # 首要维度（计划 §1.2）：在句首点名用户最在意的维度——「先讲最在意的维度，再讲代价」。
+            # ⚠️ **只改文案组织，不改打分与排序**（计划原文的硬约束）。
+            # ⚠️ 没有 top_dim 时**一个字都不改**（常见场景逐位不变）。
+            #
+            # ⚠️ 这里**刻意不**把首要维度塞进「匹配项」：`matched` 是这台车**已验证达标**的项
+            # （预算/用途/能源/座位），而首要维度只是**用户在意**的方向——库里可能压根
+            # 没有这个维度的数据（`dims` 0.5 中性 = 无此数据，不是「弱」）。硬塞进去等于
+            # 替这台车认领一个没核实过的达标项＝编造（设计原则第 1 条）。
+            top_label = _DIM_LABELS.get(profile.top_dim or "")
+            priority_desc = f"按你最看重的{top_label}排的，" if top_label else ""
             return (
                 f"为你推荐 {names} 等 {len(top)} 款在售款型{budget_desc}。"
+                f"{priority_desc}"
                 f"首选 {_brand_series(first)}（官方指导价 {first['price_cny'] / 10000:g} 万元，"
                 f"匹配项：{'、'.join(first['matched']) or '综合评分领先'}）。"
                 f"注意妥协项：{'；'.join(first['tradeoffs'][:2]) or '无明显妥协'}。"
