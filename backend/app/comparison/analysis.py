@@ -14,7 +14,9 @@
 """
 from __future__ import annotations
 
+import copy
 import re
+import time
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
@@ -174,8 +176,50 @@ def _pick_fact(facts: dict[str, dict], dim: Dimension) -> dict | None:
     return candidates[0]
 
 
+#: 差异分析的**短 TTL 缓存**（2026-10-21，修 P4 缺陷台账 H7）。
+#:
+#: 为什么需要：对比页每次查看会调**两个**端点——`/comparisons/analysis`
+#: （面板的确定性结论）与 `/comparisons/analysis/ai-comment`（LLM 一句话点评）——
+#: 两者要的是**同一份**分析，于是 `analyze_comparison` 被完整跑了两遍
+#: （每遍对每个款型做十几次库查询）。
+#:
+#: 为什么不改成「前端把分析结果传回来」：那份数据要进 LLM 的提示词，
+#: **由客户端提供事实 = 允许客户端伪造事实**。事实必须由服务端算。
+#:
+#: 为什么 TTL 很短（30s）：面板是一次性快照视图，30s 内的价格/配置变动
+#: 不构成用户可感知的不一致；过期后必然重算，**不会长期陈旧**。
+_ANALYSIS_CACHE_TTL_SECONDS = 30.0
+#: 缓存条目上限（对比页的访问组合很少，整体清空比 LRU 更简单也更可预测）。
+_ANALYSIS_CACHE_MAX_ENTRIES = 64
+#: variant_ids → (写入时刻, 分析结果)
+_analysis_cache: dict[tuple[int, ...], tuple[float, dict]] = {}
+
+
+def reset_analysis_cache() -> None:
+    """清空差异分析缓存（测试辅助）。"""
+    _analysis_cache.clear()
+
+
 def analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
-    """对 2~5 个款型做确定性差异分析，返回结构化结论（全部来自库内事实）。"""
+    """对 2~5 个款型做确定性差异分析，返回结构化结论（全部来自库内事实）。
+
+    2026-10-21（H7）：加**短 TTL 缓存**——对比页每次查看会调两个端点
+    （面板结论 + LLM 点评），两者要的是同一份分析，此前被完整算了两遍。
+    """
+    key = tuple(sorted(set(variant_ids)))
+    now = time.time()
+    hit = _analysis_cache.get(key)
+    if hit is not None and now - hit[0] < _ANALYSIS_CACHE_TTL_SECONDS:
+        return copy.deepcopy(hit[1])
+    analysis = _analyze_comparison(db, list(key))
+    if len(_analysis_cache) >= _ANALYSIS_CACHE_MAX_ENTRIES:
+        _analysis_cache.clear()
+    _analysis_cache[key] = (now, analysis)
+    # 返回副本：调用方可能改它（LLM 点评会把结论塞进提示词），缓存里的原件不能被改。
+    return copy.deepcopy(analysis)
+
+
+def _analyze_comparison(db: Session, variant_ids: list[int]) -> dict:
     evidence = [vehicle_evidence(db, vid) for vid in variant_ids]
     rows = [e for e in evidence if "error" not in e]
     if len(rows) < 2:
