@@ -233,7 +233,9 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 
 **P3 的真实收益是可测性而非行为**：拆完后 `_score_variant` 可对手工构造的 `CandidateBundle` 做纯单测——
 而 `brand_series_count` 语义错误与 `tradeoffs` 死代码正是当时**无法被单测捕获**的缺陷类型。
-（`tradeoffs` 已于 2026-10-02 修活并补上单测；`brand_series_count` 仍待产品定口径。）
+（`tradeoffs` 已于 2026-10-02 修活并补上单测；`brand_series_count` 亦已于 2026-10-03
+改为全库口径，`tests/test_brand_scale_full_catalog.py` 钉住——本条曾长期挂着「待产品定口径」，
+实际早已修完：**台账不标「已修」= 下一个人重做一遍**。）
 
 **P3.3 `analysis.py::analyze_comparison`（295 行）** — 按维度处理类型拆为：冲突键收集 / flag 维度 / numeric 维度（含单位换算与不可换算分支）/ 缺口与 leader 计算。
 **必须不变**：各 `note` 文本串、比较口径、单位换算后「原值 ≈ 规范值」的展示格式。
@@ -275,12 +277,12 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | --- | --- |
 | `backend/app/agent/engine.py`（`_shadow_route`） | `llm_elapsed_ms` 只计最后一次重试，**低估**重试样本开销 —— ✅ **已修**：改为总墙钟，并新增 `llm_last_attempt_ms`。⚠️ 切流判据 4 用的是**回答级**耗时日志，不受此字段影响；只影响 shadow 诊断的 p50/p95 |
 | `backend/app/agent/engine.py` | 单轮 8 次串行 `set_profile` Redis 往返（审计原记「4 次」，实测为 8）—— ✅ **2026-10-03 部分收敛**（P5.4 / M4）：品牌合并/解锁/重锁三处的 3 次**连续**写合并为 1 次无条件写，8 → 6。剩余 6 处各有不可替代职责（早退前 1、退路分支 3、解锁后 1、脏画像自愈 1），不再合并 |
-| `backend/app/agent/engine.py:1786-1788` | 全量 history 无 token 预算注入 prompt |
+| `backend/app/agent/engine.py`（`_chat_reply` 的历史注入） | ✅ **已修（2026-10-21）**：全量 history 注入 prompt，**无预算**——会话存储最多 50 条 × 2000 字 = 100K 字，中文 1 字 ≈ 1 token，64K 上下文的模型会**直接拒收**（用户看到降级回答而不是他的问题），且这份历史**每轮重发**、成本与延迟随轮数线性涨。修法：新增叶子 module `app/agent/history_budget.py`（纯计算、不碰 db，符合 2026-10-20 的收拢方向）——按**字符**预算（token 的保守代理）保留**最近**的对话、修掉「assistant 开口」的半轮、截断时在 system 提示里**明说**省略了多少条（静默截断会让模型以为看到了全部对话）。常见场景（50 条 × 30 字 ≈ 1500 字）**行为逐位不变**；变异测试 5/5 |
 | `backend/app/agent/tools.py` `tradeoffs` | **整条链曾是死代码**——`recommendation_tool` 从不 append，消费链恒空 —— ✅ **2026-10-02 已修活**（纯计算版取舍叙事，见 `docs/sales-agent-proposal.md` L3）。同时修 `engine.py` `break` 只跳出内层的上限失效 bug |
-| `backend/app/agent/tools.py:397-399` | `brand_series_count` 统计**过滤后候选集**而非品牌规模，跨查询不可比 |
+| `backend/app/agent/tools.py` `brand_series_count` | ✅ **已修（2026-10-03）**：原先在**过滤后的候选集**上累加，于是「品牌规模」这个**品牌的固有属性**随用户筛选条件变化（筛得越窄规模越小 → `maintenance` 维的「维修网络」代理跟着抖）。现已改为**全库口径**，与筛选无关；`tests/test_brand_scale_full_catalog.py` 钉住（A 的兄弟一被挡，A 的品牌规模不该变小） |
 | `backend/app/agent/engine.py:354` | ⚠️ **本条为审计误判，已更正**：`"MPV"` 键**不是死条目**。偏好路径用小写化的 `msg_low` 匹配（`"mpv" in msg_low`），而「不要…」的 avoid 路径用的是**原始 message**、大小写敏感（`"MPV" in message`）——两个键各覆盖一种输入，删掉大写键会让「不要MPV」漏掉排除项。真正的问题是**两条路径大小写处理不一致**（一个 lower 一个原样），统一它属行为变更，需产品拍板 |
 | `backend/app/agent/series_qa.py:390-400` | 多车系路径硬编码只处理 2 个车系（解析层最多返回 4 个）—— ✅ **已修**（2026-10-05，PR #70 的 `0ae87be`）：对比行由 `values[0] vs values[1]` 改为对全部车系 `" vs ".join(values)`（现 `series_qa.py:637`），开头与小结的「两款车」改为按 N 选措辞（`_count_phrase`），三车及以上改用 `_summary_for_many` 报整体跨度；`tests/test_multi_series_compare.py` 端到端钉住（台账第三十节 (e)） |
-| `backend/app/agent/session.py:35-39` | `_prune()` O(n) 且每次操作都跑，活跃 session 无上限 |
+| `backend/app/agent/session.py`（`_prune`） | ✅ **已修**：`_prune()` 曾是 O(n) 且**每次操作都跑**、活跃 session 无上限。现改为**节流**（30s 窗口）+ **硬上限** `MAX_SESSIONS = 2000`（超限按最久未活跃淘汰，与 TTL 同一把尺子）；`tests/test_session_store_bounds.py` 钉住 |
 | `backend/app/agent/llm_router.py:135` | 模块级 LRU 无 prompt 版本键，prompt 改了旧判定活到重启 —— ✅ **已修**：key 并入 `ROUTER_VERSION`，改提示词时 +1 即自然失效（未加 TTL：容量已有 LRU 淘汰，且路由裁决的时效性问题用版本键解决更直接） |
 | `backend/app/sources/autohome_sku.py:112,123` | 库层零重试；tools 层固定 3s、无退避无抖动 |
 | `backend/app/retrieval/zilliz.py:302-305` | 缓存 key 在 embedder 无 `model` 属性时回落为字面量 `"embed"` |

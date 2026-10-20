@@ -76,6 +76,7 @@ from app.agent.answer_contract import (
     tool_result_universe,
     validate_tool_answer,
 )
+from app.agent.history_budget import select_history, truncation_note
 from app.agent.llm_router import (
     ROUTER_MODEL_ENV,
     ROUTER_VERSION,
@@ -2391,8 +2392,16 @@ class AgentEngine:
                 )
             try:
                 history = await run_in_threadpool(self._store.history, session_id)
+                # 2026-10-21（M 项）：历史**按预算**注入，不再整段塞进去——
+                # 最坏 50 条 × 2000 字 = 100K 字，64K 上下文的模型会**直接拒收**。
+                kept_history, dropped = select_history(history[:-1])
                 msgs: list[dict] = [{"role": "system", "content": system}]
-                msgs.extend({"role": m["role"], "content": m["content"]} for m in history[:-1])
+                if dropped:
+                    # 明说上下文不完整（静默截断会让模型以为看到了全部对话）
+                    msgs[0]["content"] = system + truncation_note(dropped)
+                msgs.extend(
+                    {"role": m["role"], "content": m["content"]} for m in kept_history
+                )
                 msgs.append({"role": "user", "content": message})
                 resp = await self._llm.chat(msgs, temperature=0.6)
                 text = (resp["choices"][0]["message"]["content"] or "").strip()
