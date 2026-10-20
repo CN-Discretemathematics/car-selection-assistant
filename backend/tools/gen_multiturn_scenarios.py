@@ -153,6 +153,62 @@ def _recommended_series(db, turn: str) -> list[str]:
     return [v.series_name for v in out.recommended_variants or []]
 
 
+def _price_bucket(band: tuple[int, int]) -> int:
+    """预算档归到**5 万一档**的价位桶（与 `audit_multiturn_corpus` 同一口径 ✓）。
+
+    用桶而不是原始档：原始档有 20 种（每种 1-6 题）⇒ 统计意义≈1；
+    桶有 8 种 ⇒ 每桶能分到 6 题左右 ✓。
+    """
+    return (int(band[0]) // 5) * 5
+
+
+def _stratified_order(pool: list[dict], rng: random.Random) -> list[dict]:
+    """按（能源 × 价位桶）**两层轮转**排序候选。
+
+    ## 为什么不能均匀抽样
+
+    实测（2026-10-21，分支 24 的审计工具）：均匀抽样出来的题库
+    **燃油 41 / 纯电 8 / 插混 1 / 增程 0**，价位桶也集中在两个（5-10 万 21、
+    10-15 万 15 = 72%）⇒ 能源与价位这两个变量**几乎没有覆盖**
+    ⇒ 50 题在这些维度上的统计意义≈5（计划 §七「50 题/场景足以判定」的怀疑成真）。
+
+    ## 两层轮转
+
+    1. **能源**之间轮转 ⇒ 四种能源各占约 1/4；
+    2. 每个能源内部再按**价位桶**轮转 ⇒ 每个（能源 × 桶）格都有机会被抽到。
+
+    抽不满时（某些格没有候选）自动退化成「有多少给多少」✓。
+    """
+    by_energy: dict[str, list[dict]] = {}
+    for cand in pool:
+        by_energy.setdefault(cand["_energy"], []).append(cand)
+
+    # 每个能源内部按价位桶轮转 → 每条序列
+    seqs: list[list[dict]] = []
+    for _energy, items in sorted(by_energy.items()):
+        by_bucket: dict[int, list[dict]] = {}
+        for cand in items:
+            by_bucket.setdefault(cand["_bucket"], []).append(cand)
+        for bucket_items in by_bucket.values():
+            rng.shuffle(bucket_items)
+        buckets = sorted(by_bucket)
+        pending = {b: list(by_bucket[b]) for b in buckets}
+        seq: list[dict] = []
+        while any(pending.values()):
+            for b in buckets:
+                if pending[b]:
+                    seq.append(pending[b].pop())
+        seqs.append(seq)
+
+    # 能源之间轮转
+    ordered: list[dict] = []
+    for i in range(max((len(s) for s in seqs), default=0)):
+        for seq in seqs:
+            if i < len(seq):
+                ordered.append(seq[i])
+    return ordered
+
+
 def sample_requirements(db, rng: random.Random, count: int) -> list[dict]:
     """从库里抽 count 个**可满足、且被拒那台真会被推荐**的需求。
 
@@ -196,21 +252,25 @@ def sample_requirements(db, rng: random.Random, count: int) -> list[dict]:
         words = [ENERGY_WORDS[e] for e in (energies or []) if e in ENERGY_WORDS]
         if not words:
             continue
+        energy_cn = rng.choice(words)
+        band = _band_for(float(pmin))
         pool.append(
             {
                 "series_name": name,
                 "brand": brand,
                 "body_cn": BODY_WORDS[body],
-                "energy_cn": rng.choice(words),
+                "energy_cn": energy_cn,
                 "usage_cn": rng.choice(USAGE_BY_BODY[body]),
-                "band": _band_for(float(pmin)),
+                "band": band,
                 "passengers": rng.choice(PASSENGERS),
+                # 分层的两个键（见 `_stratified_order`）
+                "_energy": energy_cn,
+                "_bucket": _price_bucket(band),
             }
         )
-    rng.shuffle(pool)
 
     kept: list[dict] = []
-    for cand in pool:
+    for cand in _stratified_order(pool, rng):
         if len(kept) >= count:
             break
         try:
