@@ -8,6 +8,27 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+# ── 车系款型覆盖率 ──────────────────────────────────────────────────────────
+class CoverageOut(BaseModel):
+    """车系款型覆盖率。
+
+    「真缺口」与「全部停售」**分开计**——后者是上游标记的真实状态，
+    详情页显示「暂无在售款型数据」本就正确，**不是回补目标**。
+    混在一起会让回补指标永不收敛（2026-10-20 复核纠正）。
+    """
+
+    #: 在售车系（车系与品牌都 active）
+    series_active: int
+    #: 有**至少一个款型**（不论是否在售）的车系
+    series_with_variants: int
+    #: 有**在售款型**的车系
+    series_on_sale: int
+    #: **真缺口**：完全没有款型 → 回补目标
+    gap_no_variants: int
+    #: 有款型但**全部停售** → 数据完整，不是缺口
+    gap_only_off_sale: int
+
+
 # ── 流程图 ────────────────────────────────────────────────────────────────
 class GraphNodeOut(BaseModel):
     id: str
@@ -76,6 +97,9 @@ class RagStatusOut(BaseModel):
     strategy: StrategyOut
     runs_logged: int
     db_counts: dict[str, int | None] | None = None
+    #: 车系款型覆盖率。**独立于 db_counts**——db_counts 是索引重建的触发条件，
+    #: 而覆盖率会随回补单调下降，并进去会让「回补一批款型」触发全量索引重建。
+    coverage: CoverageOut | None = None
 
 
 # ── 运行轨迹 / 试运行 ──────────────────────────────────────────────────────

@@ -465,6 +465,23 @@ function StatusTab({ token, onError }: TabProps) {
             <p className="text-xs text-gray-400">不可用</p>
           )}
         </StatusCard>
+        <StatusCard title="车系款型覆盖">
+          {status.coverage ? (
+            <>
+              <ul className="space-y-0.5 text-xs text-gray-600">
+                <li>在售车系：{status.coverage.series_active.toLocaleString()}</li>
+                <li>有在售款型：{status.coverage.series_on_sale.toLocaleString()}</li>
+                <li>真缺口（无款型）：{status.coverage.gap_no_variants.toLocaleString()}</li>
+              </ul>
+              <p className="mt-2 text-xs text-gray-500">
+                全部停售 {status.coverage.gap_only_off_sale.toLocaleString()} 个——数据完整，
+                不计入回补
+              </p>
+            </>
+          ) : (
+            <p className="text-xs text-gray-400">不可用</p>
+          )}
+        </StatusCard>
       </div>
 
       <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200/80 bg-white p-5 shadow-sm">
