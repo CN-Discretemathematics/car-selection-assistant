@@ -23,7 +23,8 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.common.models import MonthlySales, SourceDocument, SpecFact, VehicleSeries, VehicleVariant
+from app.catalog import services as catalog
+from app.common.models import SourceDocument, SpecFact, VehicleSeries, VehicleVariant
 from app.rag.ingest import get_ingest_graph, run_ingest
 from app.rag.pipeline import build_query_graph
 from app.rag.rerank import get_reranker
@@ -294,7 +295,10 @@ def get_status(db: Session | None = None) -> dict:
     }
     if db is not None:
         status["db_counts"] = dict(zip(("documents", "facts", "series", "variants"), _counts(db)))
-        latest = db.scalar(select(func.max(MonthlySales.month)))
+        # 口径收口到 catalog.services（2026-10-21，P6.2）：水位对比要的是
+        # 「库里最新有没有新销量」→ **任意口径**（含 wholesale / insurance），
+        # 与用户看得到的零售/门户口径刻意不同。
+        latest = catalog.latest_sales_month_strict(db, sales_types=None)
         # 销量月份转 YYYYMM 整数（2026-08 → 202608），与 RagStatusOut.db_counts 的 int 字段一致
         status["db_counts"]["latest_sales_month"] = _as_yyyymm(latest)
     # 无 db 时也补齐字段（db_sales_month=None）：消费者按「字段恒在」判断，避免缺字段被当成新鲜
