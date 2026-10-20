@@ -42,6 +42,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -412,6 +413,97 @@ def forget(db: Session, identity: AnonymousIdentity, key: str) -> bool:
     if rows:
         db.flush()
     return bool(rows)
+
+
+# ── 记忆删除（用户说「把之前记的预算忘掉」）────────────────────────────────
+#: 删除请求的动词。
+_FORGET_VERB_RE = re.compile(
+    r"(忘掉|忘记|删掉|删除|清除|清空|别记|不要记|不用记|不再记)"
+)
+#: **指代记忆**的词。删除动词 + 指代记忆，**两者都要有**才算删除请求——
+#: 否则「删除 SUV」这种约束变更会被误判成「忘掉车形记忆」（实测口径：宁可漏判不可错判）。
+_FORGET_REF_RE = re.compile(r"(之前|上次|以前|记的|说过|我的|原来|前面)")
+
+#: 主体词 → 被跟踪的键。
+_FORGET_SUBJECTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("budget", (r"预算", r"价格", r"价位")),
+    ("usage", (r"用途", r"场景", r"用车")),
+    ("passengers", (r"人数", r"几个人", r"坐几")),
+    ("energy_preference", (r"能源", r"动力类型", r"纯电", r"插混", r"增程", r"燃油")),
+    ("body_type", (r"车身", r"轿车", r"suv", r"mpv", r"皮卡")),
+    ("avoid", (r"排除项", r"不要的", r"不想要的")),
+    ("brand_exclude", (r"品牌", r"牌子")),
+)
+
+#: 键 → 用户看得懂的名字（回执用）。
+_FORGET_KEY_LABELS: dict[str, str] = {
+    "usage": "用途",
+    "body_type": "车身类型",
+    "energy_preference": "能源偏好",
+    "budget": "预算",
+    "passengers": "人数",
+    "avoid": "排除项",
+    "brand_exclude": "品牌排除项",
+}
+
+
+def detect_forget_request(message: str) -> list[str]:
+    """用户要忘掉哪些记忆？空列表 = 不是删除请求。
+
+    判据（**两者都要有**）：删除动词 + 指代记忆的词。
+    「把之前记的预算忘掉」「别记我的预算了」「删掉上次说的用途」→ 命中 ✓；
+    「删除 SUV」「预算 20 万」→ **不命中**（前者是约束变更，后者是普通诉求）✓。
+    """
+    text = message or ""
+    if not _FORGET_VERB_RE.search(text) or not _FORGET_REF_RE.search(text):
+        return []
+    if re.search(r"(全部|所有|都忘|都删)", text):
+        return [spec.key for spec in TRACKED_KEYS]
+    keys: list[str] = []
+    for key, patterns in _FORGET_SUBJECTS:
+        if key in keys:
+            continue
+        if any(re.search(p, text, re.IGNORECASE) for p in patterns):
+            keys.append(key)
+    return keys
+
+
+def forget_keys(
+    db: Session,
+    identity: AnonymousIdentity | None,
+    keys: list[str],
+) -> list[str]:
+    """执行删除：把**跨会话记忆**里那几个键的行删掉。
+
+    返回真删掉了的键。
+
+    ⚠️ **不动会话画像**（当前对话里已谈定的条件继续用）——与设置页的撤回端点
+    （`DELETE /agent/preferences/{id}`）**同一语义**，两处口径不许分叉。
+    代价是：用户说完「忘掉」后，这段对话里仍按之前的预算推荐——
+    所以回执必须说清范围（见 `forget_reply`），否则就是骗人。
+    """
+    cleared: list[str] = []
+    if identity is None:
+        return cleared
+    for key in keys:
+        if forget(db, identity, key):
+            cleared.append(key)
+    return cleared
+
+
+def forget_reply(keys: list[str]) -> str:
+    """删除回执（**口径变化必须对用户可见**——与解锁说明同一原则）。
+
+    范围要说清：删掉的是**跨会话记忆**；当前这段对话里已谈定的条件仍在
+    （要立刻改就直接说新的预算/条件）。
+    """
+    if not keys:
+        return "你之前记的条件里没有这一项。"
+    names = "、".join(_FORGET_KEY_LABELS.get(k, k) for k in keys)
+    return (
+        f"已忘掉之前记的{names}——之后的对话不再按它筛；"
+        "这段对话里要改条件，直接说新的就行。"
+    )
 
 
 # ── 读 ──────────────────────────────────────────────────────────────────────

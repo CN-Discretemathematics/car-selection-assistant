@@ -40,7 +40,10 @@ from app.agent.llm_router import (
     route_with_llm,
 )
 from app.agent.preferences import (
+    detect_forget_request,
     effective_brand_exclusions,
+    forget_keys,
+    forget_reply,
     persist_hints,
     restore_into_profile,
 )
@@ -1315,6 +1318,19 @@ class AgentEngine:
         # 表现为「用户点了没反应」。
         soft_probe.apply_probe_answer(profile, message)
         await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
+        # 记忆**删除**（用户说「把之前记的预算忘掉」）。
+        # ⚠️ 必须在**回填之后**（回填刚把旧记忆并回画像，删除要连库里那几行一起清，
+        # 否则用户说「忘掉预算」却发现下一段对话还是按那个预算推荐）；
+        # 也必须在上面那次**无条件落盘之后**——契约钉死了「第一次落盘早于所有 return」
+        # （tests/test_profile_persistence.py），早退分支之前必须已经落过一次盘。
+        # 本分支**不额外落盘**：删的是跨会话记忆，会话画像不动（与设置页撤回同一语义）✓。
+        want_forget = detect_forget_request(message) if identity is not None else []
+        if want_forget:
+            cleared = await run_in_threadpool(forget_keys, db, identity, want_forget)
+            reply = forget_reply(cleared)
+            forget_out = AgentMessageOut(session_id=session_id, explanation=reply)
+            await self._emit(session_id, reply, forget_out)
+            return forget_out
         structured = bool(hints)
 
         # 0) 闲聊/能力咨询 → 自然回复（大模型 + 检索佐证）
