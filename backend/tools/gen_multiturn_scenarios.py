@@ -18,6 +18,19 @@
 3. `memory_deleted`（50）—— 删掉的记忆是否真的不生效？
    **跨会话**，同上。
 
+## 需求句必须**可满足**（2026-10-21 修正）
+
+旧版生成器用**硬编码**的品牌 / 车身 / 能源 / 价位组合拼需求句，两个后果：
+
+1. 需求句**缺「用途」**——那是引擎的必需项（`next_clarification` 会问「主要用途是什么？」），
+   于是引擎**从不推荐**、只反问 ⇒ 断言恒真。实测：旧生成器的 50 道题全部被判
+   「无推荐→断言恒真」，**一道都没真跑起来**；
+2. 硬编码组合**库里未必有这种车**（如「埃安的轿车」——埃安没有轿车）⇒ 同样出不了推荐。
+
+⇒ 改为**从库里抽真实车系**（与单轮题库生成器 `gen_eval_questions.py` 同一范式）：
+题面里的品牌 / 车身 / 能源 / 价位 / 用途**都从那台车派生**，
+需求句**按构造即可满足** ✓，且被拒的那台**就是需求里那台**（断言不是恒真）。
+
 ## 锚点用字符串
 
 单轮题库的 410 道题里 406 道的 `anchors.series_id` 指向的车与题面说的不是同一台
@@ -33,43 +46,17 @@ import json
 import random
 from pathlib import Path
 
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path)
+from sqlalchemy import func, select  # noqa: E402
+
+from app.common.database import get_session_factory  # noqa: E402
+from app.common.models import Brand, OfficialPrice, VehicleSeries, VehicleVariant  # noqa: E402
+
 # ── 变量表 ──────────────────────────────────────────────────────────────────
 #
-# 取值来自真实库的常见组合（品牌、价位、车身、能源）。
-# **不硬编码库内 id**——只用名字，题库在任何库上都能跑。
-
-BRANDS = [
-    "比亚迪", "大众", "丰田", "本田", "吉利", "长安", "奇瑞", "长城",
-    "五菱", "红旗", "蔚来", "小鹏", "理想", "问界", "埃安", "零跑",
-]
-
-#: 预算的「口语描述」——**不能**用作断言词。
-#:
-#: 回答里预算是这么说的（`engine._priority_phrase` / `_profile_summary`）：
-#:     「预算 10-12 万」「预算不超 20 万」「预算 18 万以上」
-#: **绝不会说「十万出头」**——那只是本生成器里的内部描述。
-#: 断言必须用**回答里真会出现的数字**，否则 50 道题会全挂。
-#:
-#: 故断言用「预算下限的万位数」这种一定出现的形式。
-BUDGETS = [
-    (80000, 120000, "10"),
-    (120000, 180000, "12"),
-    (180000, 250000, "18"),
-    (250000, 350000, "25"),
-]
-
-BODY_TYPES = [
-    ("轿车", "sedan"),
-    ("SUV", "suv"),
-    ("MPV", "mpv"),
-]
-
-ENERGY = [
-    ("纯电", "BEV"),
-    ("插混", "PHEV"),
-    ("增程", "EREV"),
-    ("燃油", "ICE"),
-]
+# **不硬编码库内 id**——只用名字，题库在任何库上都能跑；
+# 但**品牌 / 车身 / 能源 / 用途 / 价位从库里抽**（见 `sample_requirements`），
+# 否则需求句可能库里根本满足不了（实测：旧生成器 50 道题全部「无推荐→断言恒真」）。
 
 PASSENGERS = [3, 4, 5]
 
@@ -84,6 +71,143 @@ REJECT_PHRASES = [
     "这个品牌我不想要",
 ]
 
+# ── 从库里抽真实车系（需求句必须**可满足**）────────────────────────────────
+#: 用途 → 与之**相容**的车身。引擎把用途下推成车身约束
+#: （通勤→轿车；家庭/长途→SUV/MPV，见 `tools.py` 的 usage 过滤），
+#: 用途与车身不相容 ⇒ 候选集恒空 ⇒ 又是「无推荐→断言恒真」。
+USAGE_BY_BODY: dict[str, tuple[str, ...]] = {
+    "sedan": ("通勤",),
+    "suv": ("家用", "长途自驾"),
+    "mpv": ("家用", "长途自驾"),
+}
+
+#: 能源枚举 → 题面用词（引擎 `engine._ENERGY_HINTS` 的键）。
+ENERGY_WORDS: dict[str, str] = {
+    "BEV": "纯电",
+    "PHEV": "插混",
+    "EREV": "增程",
+    "HEV": "油混",
+    "ICE": "燃油",
+}
+
+#: 车身枚举 → 题面用词（引擎 `engine._BODY_HINTS` 的键，匹配时统一小写）。
+BODY_WORDS: dict[str, str] = {"sedan": "轿车", "suv": "SUV", "mpv": "MPV"}
+
+
+def _band_for(price: float) -> tuple[int, int]:
+    """该价格所在的**窄**预算档（万元）：floor 到 ceil。
+
+    为什么窄：档宽时（如 8-12 万）同价位的兄弟车太多，被抽中的那台可能
+    压根不在 top-5 ⇒「它不该再被推荐」**恒真**（实测：宽档下 43/50 通过、
+    7 条恒真——那 7 条正是「被拒的车是同品牌的兄弟，没进榜」）。
+    窄档把候选压到个位数 ⇒ 被拒的那台确实在榜里，断言才真的在验行为。
+    """
+    wan = price / 10000
+    lo = int(wan)
+    hi = lo if abs(wan - lo) < 1e-6 else lo + 1
+    return (lo, hi)
+
+
+def _recommended_series(db, turn: str) -> list[str]:
+    """跑一次**真实推荐**，返回被推荐的车系名。
+
+    用来确认「被拒的那台」确实在榜里——否则「它不该再被推荐」是**恒真**的
+    （实测：宽预算档下 7/50 恒真，窄档下仍有 5/50）。
+    走引擎的真实路径（`respond`），不自己复现一遍筛选逻辑（复现＝会漂）。
+    """
+    import asyncio
+
+    from app.agent.engine import get_agent_engine
+    from app.agent.session import get_session_store
+
+    engine = get_agent_engine()
+    store = get_session_store()
+    out = asyncio.run(engine.respond(db, store.create(), turn))
+    return [v.series_name for v in out.recommended_variants or []]
+
+
+def sample_requirements(db, rng: random.Random, count: int) -> list[dict]:
+    """从库里抽 count 个**可满足、且被拒那台真会被推荐**的需求。
+
+    每项含：车系名（被拒的那台）、品牌、车身、能源、用途、预算档、人数。
+
+    ⚠️ 逐个候选**验一遍**（跑真实推荐）——同品牌的兄弟车会把被抽中的那台挤出
+    top-5，断言于是恒真（实测 5/50）。验过才收 ⇒ 50 道题每一道都在验行为。
+    """
+    rows = db.execute(
+        select(
+            VehicleSeries.name,
+            VehicleSeries.body_type,
+            VehicleSeries.energy_types,
+            Brand.name,
+            func.min(OfficialPrice.price_cny),
+            func.max(OfficialPrice.price_cny),
+        )
+        .join(Brand, Brand.id == VehicleSeries.brand_id)
+        .join(VehicleVariant, VehicleVariant.series_id == VehicleSeries.id)
+        .join(OfficialPrice, OfficialPrice.variant_id == VehicleVariant.id)
+        .where(
+            VehicleSeries.active_status == "active",
+            Brand.active_status == "active",
+            VehicleVariant.status == "on_sale",
+            OfficialPrice.effective_to.is_(None),
+            OfficialPrice.price_type == "official_msrp",
+        )
+        .group_by(
+            VehicleSeries.id,
+            VehicleSeries.name,
+            VehicleSeries.body_type,
+            VehicleSeries.energy_types,
+            Brand.name,
+        )
+    ).all()
+
+    pool: list[dict] = []
+    for name, body, energies, brand, pmin, _pmax in rows:
+        if body not in USAGE_BY_BODY or pmin is None:
+            continue
+        words = [ENERGY_WORDS[e] for e in (energies or []) if e in ENERGY_WORDS]
+        if not words:
+            continue
+        pool.append(
+            {
+                "series_name": name,
+                "brand": brand,
+                "body_cn": BODY_WORDS[body],
+                "energy_cn": rng.choice(words),
+                "usage_cn": rng.choice(USAGE_BY_BODY[body]),
+                "band": _band_for(float(pmin)),
+                "passengers": rng.choice(PASSENGERS),
+            }
+        )
+    rng.shuffle(pool)
+
+    kept: list[dict] = []
+    for cand in pool:
+        if len(kept) >= count:
+            break
+        try:
+            recommended = _recommended_series(db, _recommend_turn(cand))
+        except Exception:  # noqa: BLE001 —— 单个候选验不过不该让整批失败
+            continue
+        if cand["series_name"] in recommended:
+            kept.append(cand)
+    return kept
+
+
+def _recommend_turn(req: dict) -> str:
+    """需求句：品牌 / 车身 / 能源 / 用途 / 预算 / 人数**全部来自那台真实车系**。
+
+    ⚠️ 品牌必须写成**硬约束**（「只要X的…」）：写成「X的…」时品牌只是偏好，
+    同价位的兄弟车照样进 top-5，被拒的那台可能压根没被推荐过 ⇒
+    「它不该再被推荐」恒真（实测 39/50 恒真，只有 11/50 真验到了）。
+    """
+    lo_w, hi_w = req["band"]
+    return (
+        f"预算{lo_w}到{hi_w}万，只要{req['brand']}的{req['body_cn']}，{req['energy_cn']}的，"
+        f"{req['usage_cn']}为主，家里{req['passengers']}口人用"
+    )
+
 #: 「再推荐」的各种说法
 REASK_PHRASES = [
     "再推荐几款",
@@ -93,40 +217,21 @@ REASK_PHRASES = [
     "继续推荐",
 ]
 
-#: 首批用于「拒过」的具体车系（真实库里常见、且跨品牌不容易重名）
-REJECT_CARS = [
-    "星愿", "汉", "海豹", "宋PLUS", "秦PLUS", "卡罗拉", "凯美瑞", "轩逸",
-    "思域", "CR-V", "RAV4", "途观L", "H6", "CS75PLUS", "缤越", "缤果",
-    "AION Y", "小鹏P7", "蔚来ES6", "理想L7", "问界M7", "零跑C11", "极氪001",
-    "Model 3", "Model Y", "小米SU7", "智界S7", "岚图FREE", "深蓝S7",
-]
+#: 被拒的那台车**就是需求里抽到的那台**（`sample_requirements`）⇒ 断言不恒真：
+#: 旧版从硬编码列表里随机挑，可能挑一台压根不在推荐列表里的车，
+#: 于是「它不该再被推荐」这条断言**恒真**（通过但什么都没验）。
 
 
-def _recommend_turn(rng: random.Random, brand: str, budget, body_cn: str, energy_cn: str, passengers: int) -> str:
-    lo, hi, _desc = budget
-    lo_w = lo // 10000
-    hi_w = hi // 10000
-    return (
-        f"预算{lo_w}到{hi_w}万，{brand}的{body_cn}，{energy_cn}的，"
-        f"家里{passengers}口人用"
-    )
-
-
-def gen_reject_scenarios(rng: random.Random, count: int) -> list[dict]:
+def gen_reject_scenarios(rng: random.Random, requirements: list[dict]) -> list[dict]:
     """场景 1：拒过的那台，下一轮还推不推？"""
     out = []
-    for i in range(count):
-        brand = rng.choice(BRANDS)
-        budget = rng.choice(BUDGETS)
-        body_cn, _body = rng.choice(BODY_TYPES)
-        energy_cn, _e = rng.choice(ENERGY)
-        passengers = rng.choice(PASSENGERS)
-        car = rng.choice(REJECT_CARS)
+    for i, req in enumerate(requirements):
         reason = rng.choice(REJECT_PHRASES)
         reask = rng.choice(REASK_PHRASES)
+        car = req["series_name"]
 
         turns = [
-            {"user": _recommend_turn(rng, brand, budget, body_cn, energy_cn, passengers), "assert": []},
+            {"user": _recommend_turn(req), "assert": []},
             {"user": f"{car}不要，{reason}", "assert": []},
             {
                 "user": reask,
@@ -144,16 +249,12 @@ def gen_reject_scenarios(rng: random.Random, count: int) -> list[dict]:
     return out
 
 
-def gen_returning_scenarios(rng: random.Random, count: int) -> list[dict]:
+def gen_returning_scenarios(rng: random.Random, requirements: list[dict]) -> list[dict]:
     """场景 2：回访用户的记忆是否生效？（跨会话，依赖 Phase 1）"""
     out = []
-    for i in range(count):
-        brand = rng.choice(BRANDS)
-        budget = rng.choice(BUDGETS)
-        body_cn, _body = rng.choice(BODY_TYPES)
-        energy_cn, _e = rng.choice(ENERGY)
-        passengers = rng.choice(PASSENGERS)
-        lo, hi, _desc = budget
+    for i, req in enumerate(requirements):
+        lo, hi = req["band"]
+        lo, hi = lo * 10000, hi * 10000
 
         out.append(
             {
@@ -164,7 +265,7 @@ def gen_returning_scenarios(rng: random.Random, count: int) -> list[dict]:
                 "reason_disabled": "依赖 Phase 1：持久化身份 + 偏好记忆（尚未实现）",
                 "turns": [
                     {
-                        "user": _recommend_turn(rng, brand, budget, body_cn, energy_cn, passengers),
+                        "user": _recommend_turn(req),
                         "assert": [],
                         "session": "first",
                     },
@@ -186,16 +287,12 @@ def gen_returning_scenarios(rng: random.Random, count: int) -> list[dict]:
     return out
 
 
-def gen_memory_deleted_scenarios(rng: random.Random, count: int) -> list[dict]:
+def gen_memory_deleted_scenarios(rng: random.Random, requirements: list[dict]) -> list[dict]:
     """场景 3：删掉的记忆是否真的不生效？（跨会话，依赖 Phase 1）"""
     out = []
-    for i in range(count):
-        brand = rng.choice(BRANDS)
-        budget = rng.choice(BUDGETS)
-        body_cn, _body = rng.choice(BODY_TYPES)
-        energy_cn, _e = rng.choice(ENERGY)
-        passengers = rng.choice(PASSENGERS)
-        lo, hi, _desc = budget
+    for i, req in enumerate(requirements):
+        lo, hi = req["band"]
+        lo, hi = lo * 10000, hi * 10000
 
         out.append(
             {
@@ -205,7 +302,7 @@ def gen_memory_deleted_scenarios(rng: random.Random, count: int) -> list[dict]:
                 "reason_disabled": "依赖 Phase 1：持久化身份 + 记忆删除接口（尚未实现）",
                 "turns": [
                     {
-                        "user": _recommend_turn(rng, brand, budget, body_cn, energy_cn, passengers),
+                        "user": _recommend_turn(req),
                         "assert": [],
                         "session": "first",
                     },
@@ -236,10 +333,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     rng = random.Random(args.seed)
+    with get_session_factory()() as db:
+        requirements = sample_requirements(db, rng, args.count)
+    if len(requirements) < args.count:
+        print(
+            f"⚠️ 库里只抽到 {len(requirements)} 个可满足的需求（要 {args.count} 个）——"
+            f"请检查库里在售车系的价格档与车身/能源标注。"
+        )
     scenarios = (
-        gen_reject_scenarios(rng, args.count)
-        + gen_returning_scenarios(rng, args.count)
-        + gen_memory_deleted_scenarios(rng, args.count)
+        gen_reject_scenarios(rng, requirements)
+        + gen_returning_scenarios(rng, requirements)
+        + gen_memory_deleted_scenarios(rng, requirements)
     )
 
     out = Path(args.out)

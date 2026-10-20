@@ -18,9 +18,18 @@
     recommended       回答里应出现该车系
     mentions          回答里应提到某关键词
     not_mentions      回答里不应提到某关键词
+    budget_in         本轮采用的**预算口径**应是该区间（查 response.filters，不查正文）
+    budget_not_in     本轮采用的预算口径不应是该区间
 
 「这台车在不在推荐列表里」是**可枚举的事实**，不是需要理解语义的判断——
 用 judge 反而引入噪声与成本。仓库既有纪律也要求「零人工标注」。
+
+## 预算类断言为什么查**结构化口径**（2026-10-21）
+
+预算值在正文里必然与**车价**混在一起：12-18 万档里真实存在 12.99 万 / 12.68 万的车，
+于是裸字符串 `not_mentions '12'` 会把**正确答案**判成失败（假否定 ⇒ 低估能力），
+`mentions '10'` 也会因推荐了 8.28 万的车而判失败。两个方向都会误判 ⇒ 改查
+`response.filters` 的 `budget_min` / `budget_max`。
 
 ## 锚点用稳定字符串，不用数字 id
 
@@ -194,6 +203,17 @@ def _check_budget_assertion(out: Any, assertion: dict, kind: str) -> None:
         )
 
 
+def _car_in_names(car: str, names: set[str], db: Session | None = None) -> bool:
+    """`car`（题面里的车系名）是否出现在推荐过的车系名集合里。
+
+    用 `_car_needles` 的同一套写法（品牌前缀 / 库内别名都算命中），
+    免得「断言恒真自检」与断言本身用两套匹配口径。
+    """
+    needles = _car_needles(car, db)
+    normalized = {_norm(n) for n in names}
+    return any(_norm(n) in normalized for n in needles)
+
+
 def check_assertion(
     out: Any, assertion: dict, db: Session | None = None
 ) -> None:
@@ -253,6 +273,11 @@ async def run_scenario(
     started = time.perf_counter()
     # 本场景是否产出过推荐——用于**自检**（见返回值的 `no_recommendation`）。
     any_recommendation = False
+    # 断言恒真自检（第二层）：`not_recommended(X)` 只有在 **X 之前真的被推荐过**时
+    # 才有意义。若 X 从未出现在推荐里，这条断言「通过」不是因为行为正确，而是因为
+    # 什么都没发生——与「全程无推荐」同类，必须标成无效。
+    seen_recommended: set[str] = set()
+    vacuous: list[str] = []
 
     for idx, turn in enumerate(scenario.get("turns") or [], start=1):
         user = turn.get("user") or ""
@@ -269,11 +294,19 @@ async def run_scenario(
 
         turn_failures = []
         for assertion in turn.get("assert") or []:
+            if assertion.get("type") == "not_recommended":
+                car = assertion.get("car")
+                if car and not _car_in_names(car, seen_recommended, db):
+                    vacuous.append(
+                        f"第 {idx} 轮：被断言的车「{car}」此前**从未被推荐过**——"
+                        f"「它不该再被推荐」恒真，断言无效"
+                    )
             try:
                 check_assertion(out, assertion, db)
             except AssertionFailed as exc:
                 turn_failures.append(str(exc))
         failures.extend(f"第 {idx} 轮：{f}" for f in turn_failures)
+        seen_recommended.update(recommended)
 
         turn_results.append(
             {
@@ -297,6 +330,7 @@ async def run_scenario(
             "本场景全程未产出任何推荐——`not_recommended` 断言恒真，场景无效"
             "（检查：库内该价位/车身/能源档是否真有在售车系）"
         )
+    failures.extend(vacuous)
 
     return {
         "id": scenario.get("id"),
@@ -304,6 +338,7 @@ async def run_scenario(
         "turns": len(scenario.get("turns") or []),
         "passed": not failures,
         "no_recommendation": no_recommendation,
+        "vacuous_assertion": bool(vacuous),
         "failures": failures,
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
         "turn_results": turn_results,
@@ -330,6 +365,8 @@ async def _run_all(
         results.append(res)
         if res.get("no_recommendation"):
             label = "INVALID(无推荐→断言恒真)"
+        elif res.get("vacuous_assertion"):
+            label = "INVALID(被断言的车从未被推荐过→断言恒真)"
         else:
             label = "PASS" if res["passed"] else "FAIL"
         by_kind[f"{res['scenario']}:{label}"] += 1

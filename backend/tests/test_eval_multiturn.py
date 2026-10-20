@@ -209,6 +209,44 @@ def test_scenario_without_any_recommendation_is_invalid(db_session: Session):
     assert any("未产出任何推荐" in f for f in res["failures"])
 
 
+def test_assertion_on_a_never_recommended_car_is_invalid(db_session: Session):
+    """**第二层**恒真自检：被断言的那台车**从未被推荐过** → 场景无效。
+
+    「全程有推荐」不等于「断言在验行为」：被拒的那台若是同品牌的兄弟车
+    （压根没进 top-5），「它不该再被推荐」就恒真——通过但什么都没验。
+    实测：这一层自检把「50/50 通过」打回 **11/50 真通过**。
+
+    ⚠️ 本用例**必须先有推荐**（库里种一台车）——否则「全程无推荐」那条自检
+    也会让场景变红，用例就变成**测不出自己**（仓库反复警告的空转断言）。
+    """
+    from tests.seed import make_brand, make_series, make_source, make_variant, make_year
+
+    src = make_source(db_session)
+    brand = make_brand(db_session, name="在场品牌", source=src)
+    series = make_series(db_session, brand, name="在场车系", source=src)
+    year = make_year(db_session, series)
+    make_variant(
+        db_session, series, year, config_version="标准版", energy_type="BEV",
+        price_cny="150000", source=src,
+    )
+    db_session.commit()
+
+    scenario = {
+        "id": "s3",
+        "scenario": "reject_then_no_recommend",
+        "turns": [
+            {"user": "预算20万，通勤，两三个人", "assert": []},
+            # 断言的是**另一台**车（不在榜里）→ 恒真
+            {"user": "再推荐几款", "assert": [{"type": "not_recommended", "car": "压根没推过的车"}]},
+        ],
+    }
+    res = asyncio.run(mt.run_scenario(db_session, scenario))
+    assert res["no_recommendation"] is False, res  # 前提：确实有推荐，排除另一条自检的干扰
+    assert res["vacuous_assertion"] is True, res
+    assert res["passed"] is False
+    assert any("从未被推荐过" in f for f in res["failures"]), res["failures"]
+
+
 def test_scenario_with_recommendation_is_not_flagged(db_session: Session):
     """只要**有过一次**推荐，就不算「无推荐」，走正常判据。"""
     scenario = {
