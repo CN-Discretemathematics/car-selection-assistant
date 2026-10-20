@@ -59,6 +59,38 @@ def _ask(client: TestClient, session_id: str, message: str) -> dict:
     return resp.json()
 
 
+def test_named_car_rejection_excludes_that_series(client: TestClient, db_session: Session):
+    """**点名式**拒绝：「甲车系不要」→ 那个车系不再被推。
+
+    为什么要有它：指代式（「不喜欢这台」）只排除**一款**，用户点名的是**车系**——
+    只排掉其中一款，同系其它款照样推上来，等于没拒绝。
+    """
+    _seed_three_cars(db_session)
+    sid = _create_session(client)
+    first = _ask(client, sid, "预算20万，通勤，两三个人")
+    assert first.get("recommended_variants"), "前提：这一轮应当有推荐"
+
+    second = _ask(client, sid, "甲车系不要，太贵了")
+    names = {v["series_name"] for v in second.get("recommended_variants", [])}
+    assert "甲车系" not in names, f"点名的车系还在推荐里：{names}"
+    assert any("已排除" in r for r in second.get("reasons", [])), (
+        f"排除必须对用户可见：{second.get('reasons')}"
+    )
+
+
+def test_body_type_exclusion_is_not_a_rejection(client: TestClient, db_session: Session):
+    """「不要 SUV」是**硬约束**（avoid 路径），不是拒绝——两者不能混。
+
+    判据：只有「解析成真实车系的名字」才算点名式拒绝；SUV 是车身类型 ✗。
+    """
+    _seed_three_cars(db_session)
+    sid = _create_session(client)
+    _ask(client, sid, "预算20万，通勤，两三个人")
+    second = _ask(client, sid, "不要SUV")
+    reasons = " ".join(second.get("reasons", []))
+    assert "已排除" not in reasons, f"硬约束被误当成拒绝：{second.get('reasons')}"
+
+
 def test_rejected_variant_is_not_recommended_again(client: TestClient, db_session: Session):
     """拒绝后下一轮**不再**推它。"""
     _seed_three_cars(db_session)
