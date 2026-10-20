@@ -1257,7 +1257,14 @@ class AgentEngine:
                 # 此前却在 sink 为空时完全不留痕（独立审查 P2-1 实测）。
                 if decision_sink is not None:
                     decision_sink.append((_EARLY_RETURN_VARIANT_DIFF, profile, []))
-                return await self._variant_diff_reply(db, session_id, target[0], target[1], message)
+                return await self._variant_diff_reply(
+                    db,
+                    session_id,
+                    target[0],
+                    target[1],
+                    message,
+                    energy_preference=list(profile.energy_preference or []),
+                )
 
         # ── 意图路由（P0 决策/执行解耦）───────────────────────────────────────
         # 0.6 之后的确定性分支（对比差异分析 → 车系问答 → 品牌盘点 → 全库盘点计数 →
@@ -2148,9 +2155,22 @@ class AgentEngine:
         series: VehicleSeries,
         brand: Brand | None,
         message: str,
+        energy_preference: list[str] | None = None,
     ) -> AgentMessageOut:
-        """同车系「版本差异」回答：确定性文本 + 各版本候选卡片（可直接加入对比）。"""
-        text, rows = await run_in_threadpool(build_variant_diff_answer, db, series, brand, message)
+        """同车系「版本差异」回答：确定性文本 + 各版本候选卡片（可直接加入对比）。
+
+        `energy_preference`：用户本轮点名的能源（「纯电版」⇒ ["BEV"]）——
+        版本清单**只列该能源的款型**（2026-10-21：此前无视它，用户问纯电版
+        却拿到增程版的清单 ⇒ 答非所问）。
+        """
+        text, rows = await run_in_threadpool(
+            build_variant_diff_answer,
+            db,
+            series,
+            brand,
+            message,
+            energy_preference=energy_preference,
+        )
         citations: list[Citation] = []
         source_ids = sorted({r["source_id"] for r in rows if r.get("source_id")})
         if source_ids:
