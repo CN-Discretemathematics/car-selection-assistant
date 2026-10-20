@@ -220,15 +220,7 @@ python tools/import_data.py payload.json --dry-run
 
 ```powershell
 cd backend
-<<<<<<< HEAD
-<<<<<<< HEAD
-python -m pytest -q                   # 1450 用例（随迭代增长，以实际输出为准）
-=======
-python -m pytest -q                   # 1450 用例（随迭代增长，以实际输出为准）
->>>>>>> refactor/knowledge-consolidation
-=======
-python -m pytest -q                   # 1450 用例（随迭代增长，以实际输出为准）
->>>>>>> feat/top-dim-narrative
+python -m pytest -q                   # 1311 用例（随迭代增长，以实际输出为准）
 cd ..\web
 npx tsc --noEmit                      # 前端类型检查
 ```
