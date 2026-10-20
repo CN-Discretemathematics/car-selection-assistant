@@ -262,7 +262,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | H2 | `backend/app/agent/tools.py` 硬约束 stmt | 无 SQL LIMIT，全量物化；销量子查询无月份谓词 —— ⚠️ **已加可观测化未改行为**：见 P5.1 节。LIMIT 会静默改变推荐结果，需先跑检索评测对齐基线 |
 | H3 | `backend/app/agent/engine.py` 14 处 | `async def` 内裸调同步 `Session`，阻塞事件循环 |
 | H4 | `backend/app/agent/series_qa.py` | 两条最热问答路径的 N+1 —— ✅ **已修**（P5.2）→ `catalog.services.variants_current_prices` / `variants_facts`，5 例逐条等价性回归（性能优化的前提是结果逐字相同） |
-| H5 | `backend/app/agent/engine.py:677-679` | shadow 任务异常从未取回，静默死亡 |
+| H5 | `backend/app/agent/engine.py` 的 `_on_shadow_done` | ✅ **已修（2026-10-02），2026-10-21 补守卫**：原实现只 `discard` 从不调 `task.exception()`，而 `_shadow_route` 内部只兜底了 `route_with_llm` 一段——其后的 `arbitrate_route` / `log_shadow_record` 一旦抛异常，任务**静默死亡**，唯一痕迹是 asyncio 在 GC 时打的 "Task exception was never retrieved"，那行**不在** `app.agent.router.shadow` 日志流里，`shadow_report.py` 解析不到。修法即取回异常并落 warning。⚠️ 该修复此前**无任何测试钉住**（删掉 `task.exception()` 全量测试依然全绿），2026-10-21 补两条守卫（异常必落 warning 日志 / 取消的任务不算异常）+ 3 个变异点全部被抓住 |
 | H6 | `backend/app/sources/autohome_sku.py:25-28` | `MOBILE_UA` 伪装 iPhone，与 README 合规声明矛盾 —— ✅ **已修并实测**（2026-10-03）：改用 `fetcher.DEFAULT_USER_AGENT`，直调 `fetch_sku_config` 抓 3 个车系（8433/8529/8171）款型 4/8/9 条、配置组 21/22/23 组，无 403 无空数据 → 对方不拦非浏览器 UA，改动零代价 |
 | H7 | `web/app/compare/page.tsx:49,63,126,160` | 4 请求串行瀑布；后端每次查看执行**两次** `analyze_comparison` |
 | H8 | `web/app/ops/rag/page.tsx:296-311` | ⚠️ **已修，但审计描述的机制是错的**（2026-10-03）：unmount 清理函数**本来就在**，「重复点击留孤儿 interval」也**不可达**（按钮在 `busy` 期间 disabled）。真实泄漏是**竞态**——点 dense 重建后立刻离开页面，清理跑完时 interval 还没被创建（它要等 `runReindex` 的网络往返 resolve），续段随后照样 setInterval，再无人清理，每 2.5s 打一次后端。已加 `mountedRef` 守卫三处（await 之后 / 轮询回调首行 / 创建前清旧） |
@@ -291,7 +291,8 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `web/app/components/Pagination.tsx:65,79,90,99` | ✅ **已修一半（2026-10-03）**：3 处裸 `<a href>` 已换 `next/link`（翻页不再整页重载），禁用态改 `<span>`（`Link` 的 `href` 必填，且无 href 的 `<a>` 观感上仍像可点）。⚠️ `<form method="get">` **刻意保留**：原生 GET 不依赖 JS 即可工作（渐进增强），隐藏域已把筛选参数带过去；改成 `router.push` 需加客户端边界并手工重建 query 串，那才是会真丢筛选的地方。理由写在源码里并由测试守住 |
 
 **修复顺序**（先易后难、先安全后性能）：C1 → C2 → H5 → H3 → H1 → H6 → H10 → M 项 → H2/H4（性能，需评测兜底）。
-C1/C2/H10 已于 2026-10-02 / 2026-10-04 完成。
+C1/C2/H5/H10 已于 2026-10-02 / 2026-10-04 完成；H5 的**回归守卫**于 2026-10-21 补齐
+（修复在、守卫不在，等于修好了也会被改回去——台账不标「已修」同理会让下一个人重做一遍）。
 
 **H10 的两条诚实声明（2026-10-04 实测，务必别当成「性能优化已上线」）**：
 
