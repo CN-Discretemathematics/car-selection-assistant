@@ -40,6 +40,14 @@ from app.agent.llm_router import (
     route_with_llm,
 )
 from app.agent.rejection_shadow import brand_exclusion_delta
+from app.agent.preferences import (
+    detect_forget_request,
+    effective_brand_exclusions,
+    forget_keys,
+    forget_reply,
+    persist_hints,
+    restore_into_profile,
+)
 from app.agent.routing import (
     asks_brand_count,
     asks_brand_lineup,
@@ -95,7 +103,14 @@ from app.common.config import get_settings
 from app.common.database import get_session_factory
 from app.common.enums import NEW_ENERGY_TYPES, expand_avoid, expand_energy_prefs
 from app.common.llm import LLMClient, LLMError, get_llm_client
-from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, VehicleVariant
+from app.common.models import (
+    AnonymousIdentity,
+    Brand,
+    OfficialPrice,
+    Source,
+    VehicleSeries,
+    VehicleVariant,
+)
 from app.comparison.analysis import analyze_comparison, render_analysis_text
 
 # 预算正则唯一定义在 series_constraints（评审 C2：流水线约束解析复用同一实现），
@@ -1293,13 +1308,23 @@ class AgentEngine:
             },
         )
 
-    async def handle(self, db: Session, session_id: str, message: str) -> AgentMessageOut:
+    async def handle(
+        self,
+        db: Session,
+        session_id: str,
+        message: str,
+        *,
+        identity: AnonymousIdentity | None = None,
+    ) -> AgentMessageOut:
         """respond() 的对外入口：包一层回答级耗时结构化日志（每次请求一条）。
 
         路由模式（AGENT_ROUTER_MODE）在这里读取**一次**并传入 respond()，保证同一次
         请求内模式一致。耗时日志 logger "app.agent.respond"，单行 JSON
         {sid(匿名), mode, elapsed_ms}——llm 模式切流判据第 4 条
         （P95 回答延迟增幅 ≤300ms，对比 regex 基线）的数据来源。
+
+        `identity`：匿名身份（跨会话记忆）。**为 None 时行为与接入前完全一致**——
+        记忆的读写都在 `DURABLE_PREFS_MODE=off` 时短路。
         """
         router_mode = get_router_mode()
         started = time.perf_counter()
@@ -1310,7 +1335,12 @@ class AgentEngine:
         decision_sink: list = []
         try:
             out = await self.respond(
-                db, session_id, message, router_mode=router_mode, decision_sink=decision_sink
+                db,
+                session_id,
+                message,
+                router_mode=router_mode,
+                decision_sink=decision_sink,
+                identity=identity,
             )
         except Exception:
             failed = True
@@ -1361,18 +1391,75 @@ class AgentEngine:
         message: str,
         router_mode: str = "regex",
         decision_sink: list | None = None,
+        *,
+        identity: AnonymousIdentity | None = None,
     ) -> AgentMessageOut:
         """一次用户消息的完整回答（原 handle() 主体；handle() 只包耗时日志与模式读取）。
 
         decision_sink：shadow 模式的决策回传通道——respond() 把 (决策, 画像) 追加进去，
         由 handle() 在**回答产出后**统一派发 shadow 旁路（避免与回答链路 LLM 调用并发，
         I-20260918-01）。其余模式忽略。
+
+        identity：匿名身份（跨会话记忆）。为 None 或 DURABLE_PREFS_MODE=off 时，
+        记忆的读写全部短路，**行为与接入前逐位相同**。
         """
         await run_in_threadpool(self._store.append_message, session_id, "user", message)
 
         profile = await _load_profile(self._store, session_id)
         hints = extract_hints(message)
+        # 0.5) 车系识别与品牌硬约束（「只要奔驰」）——**提到记忆回填之前**。
+        #
+        # 为什么（2026-10-21）：记忆里可能有「不要比亚迪」，而用户这轮说「我要比亚迪」。
+        # 品牌排除项要靠**本轮的品牌要求**才能消解冲突，否则旧记忆会把用户明说的
+        # 正向约束直接删掉 → 推荐结果空掉，用户只看到「没有合适的车」。
+        #
+        # ⚠️ 只把**解析**提前；品牌 hints 的**合并**仍在原处（下面），
+        # 否则 `structured` 的赋值顺序会变（「我强调过了，只要奔驰」这类只重申
+        # 约束、不含购车意图词的消息会掉进通用对话分支，2026-09 回归）。
+        wants_unlock = bool(_UNLOCK_RE.search(message))
+        resolved = await run_in_threadpool(resolve_series, db, message)
+        brand_hints = await run_in_threadpool(
+            resolve_brand_mentions,
+            db,
+            message,
+            series_names=[s.name for s, _brand in resolved],
+            assume_constraint=(
+                asks_brand_lineup(message)
+                or asks_catalog_count(message)
+                or asks_brand_count(db, message)
+            ),
+        )
+        # 跨会话记忆**回填**：旧记忆先并进画像。
+        # ⚠️ 必须在下面 merge_profile(hints) **之前**——用户改了主意时，
+        # 「这一轮说的」必须压过「上次记的」。
+        # turn_hints 一并传入：回填要靠它判断「本轮的正面诉求压过记忆里的旧排除」
+        # （例如本轮说「SUV 也行」，而记忆里还挂着「不要 SUV」）。
+        # brand_exclusions 由 preferences 算好（它要查库解析品牌名 + 消解冲突）。
+        brand_exclusions = await run_in_threadpool(
+            effective_brand_exclusions, db, identity, profile, brand_hints
+        )
+        await run_in_threadpool(
+            restore_into_profile,
+            db,
+            identity,
+            profile,
+            turn_hints=hints,
+            brand_exclusions=brand_exclusions,
+        )
         profile = merge_profile(profile, hints)
+        # 跨会话记忆**写入**：把本轮**明说**的线索落库。
+        # ⚠️ 只写 `hints`（= extract_hints 的结果，确定性正则抽自用户原话），
+        # **不写模型推断的**——推断猜错会静默砍掉整个候选集。
+        # off 模式下 persist_hints 直接返回空列表，**行为与接入前逐位相同**。
+        # 走线程池：里面有一次 commit（写库要落盘），别占着事件循环。
+        await run_in_threadpool(
+            persist_hints,
+            db,
+            identity,
+            hints,
+            brand_exclusions=brand_exclusions,
+            evidence_span=message[:200],
+        )
         # L1 软偏好抽取（sales-agent-proposal §3 L1）。默认 AGENT_SOFT_PREF_MODE=off，
         # 此时下面只多一次 env 读取、**不发起任何 LLM 调用**，行为与接入前逐位相同——
         # 提案 §6 第 2 步要求「先只输出结构化、不接入回答」，先离线评测抽取质量。
@@ -1396,6 +1483,19 @@ class AgentEngine:
         # 表现为「用户点了没反应」。
         soft_probe.apply_probe_answer(profile, message)
         await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
+        # 记忆**删除**（用户说「把之前记的预算忘掉」）。
+        # ⚠️ 必须在**回填之后**（回填刚把旧记忆并回画像，删除要连库里那几行一起清，
+        # 否则用户说「忘掉预算」却发现下一段对话还是按那个预算推荐）；
+        # 也必须在上面那次**无条件落盘之后**——契约钉死了「第一次落盘早于所有 return」
+        # （tests/test_profile_persistence.py），早退分支之前必须已经落过一次盘。
+        # 本分支**不额外落盘**：删的是跨会话记忆，会话画像不动（与设置页撤回同一语义）✓。
+        want_forget = detect_forget_request(message) if identity is not None else []
+        if want_forget:
+            cleared = await run_in_threadpool(forget_keys, db, identity, want_forget)
+            reply = forget_reply(cleared)
+            forget_out = AgentMessageOut(session_id=session_id, explanation=reply)
+            await self._emit(session_id, reply, forget_out)
+            return forget_out
         structured = bool(hints)
         # 0) 闲聊/能力咨询 → 自然回复（大模型 + 检索佐证）
         if is_chatty(message):
@@ -1407,9 +1507,10 @@ class AgentEngine:
 
         # 0.5) 车系识别与锁定（必须在「无购车意图 → 普通对话」gate 之前：
         #       「星愿和零跑A10选哪个」不含购车关键词，但提到具体车系，必须走确定性链路）
-        wants_unlock = bool(_UNLOCK_RE.search(message))
-        resolved = await run_in_threadpool(resolve_series, db, message)
-
+        #
+        # ⚠️ 车系/品牌的**解析**已提到本函数开头（记忆回填之前，见那里的说明）；
+        # 这里只做「品牌 hints 并进画像」。
+        #
         # 「不喜欢这台」/「甲车系不要」→ 把那一款（那个车系）加入排除集（计划「拒绝后不再推」）。
         #
         # ⚠️ 四处讲究：
@@ -1422,23 +1523,11 @@ class AgentEngine:
         #    推荐根本没重出。
         # 4) 必须在**车系解析之后**：点名式拒绝（「甲车系不要」）要靠解析结果判断
         #    「这个名字是不是真车系」——「不要 SUV」里的 SUV 是车身类型（硬约束 ✗）。
+        #    （合流注：`resolved` 现在由函数开头那次解析给出，位置更早、语义不变。）
         reject_note = _apply_rejection(profile, message, db=db, resolved=resolved)
         if reject_note:
             structured = True
 
-        # 品牌硬约束（「只要奔驰」）：需查库把品牌名解析成 brand_id；且必须结合车系解析结果
-        # 消歧——「银河星愿怎么样」里的「银河」属于车系名，不是品牌约束（2026-09 回归）。
-        brand_hints = await run_in_threadpool(
-            resolve_brand_mentions,
-            db,
-            message,
-            series_names=[s.name for s, _brand in resolved],
-            assume_constraint=(
-                asks_brand_lineup(message)
-                or asks_catalog_count(message)
-                or asks_brand_count(db, message)
-            ),
-        )
         if brand_hints:
             profile = merge_profile(profile, brand_hints)
             # 品牌线索也算「结构化输入」：否则「我强调过了，只要奔驰」这类只重申约束、

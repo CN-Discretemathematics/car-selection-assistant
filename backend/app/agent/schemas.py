@@ -1,6 +1,8 @@
 """Agent API Schema。"""
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -12,7 +14,20 @@ class Budget(BaseModel):
 
 
 class UserProfile(BaseModel):
-    """结构化用户画像（13.1）。事实只来自用户对话，不落账户存储。"""
+    """结构化用户画像（13.1）。
+
+    事实只来自用户对话。
+
+    2026-10-20：原 docstring 写「不落账户存储」——那是**刻意的产品决定**，
+    已由 [ADR-0001](../../docs/adr/0001-profile-persisted-across-sessions.md) 推翻：
+    跨会话记忆要求把**用户明说过的**偏好持久化。
+    推翻后的口径：
+    - **画像的来源**仍然只有用户对话与数据库——模型推断不直接进画像；
+    - **跨会话**通过 `preference_memories` 持久化，**只存封闭词表内的、
+      用户明说或确认过的**条目（见 `app/agent/preferences.py`）；
+    - 推断类记忆**不得**涉及 `body_type` / `energy_preference` / `budget`
+      （猜错会静默砍掉整个候选集）。
+    """
 
     budget: Budget = Field(default_factory=Budget)
     region: str | None = None
@@ -120,3 +135,35 @@ class AgentMessageOut(BaseModel):
     # 设了就不渲染推荐卡片（AgentChat.tsx:430）。软偏好缺失时阻塞推荐属于拖沓，
     # 真人销售是「先给你看车，再问一句你更看重什么」。
     followup: Clarification | None = None
+
+
+# ── 匿名身份与跨会话偏好记忆 ────────────────────────────────────────────────
+
+
+class IdentityOut(BaseModel):
+    """领取匿名身份的结果。
+
+    `token` 是**明文凭据**，客户端要自己保存并随
+    `Authorization: Bearer <token>` 带上。**只在新建时给一次**——
+    之后库里只有哈希，无法再取回（这是刻意的：明文可重置，泄漏的哈希不可反推）。
+    """
+
+    identity_id: int
+    token: str
+    #: True = 这是新建的身份（token 有效）；False = 已存在的身份（token 为空）
+    created: bool
+
+
+class PreferenceMemoryOut(BaseModel):
+    """一条已记住的偏好（供用户自查 / 纠正）。"""
+
+    id: int
+    category: str
+    key: str
+    value: str
+    #: explicit | inferred | behavioral
+    source_type: str
+    confidence: float
+    confirmed: bool
+    created_at: datetime
+    expires_at: datetime | None = None
