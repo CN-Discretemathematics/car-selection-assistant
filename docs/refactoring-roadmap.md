@@ -260,7 +260,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | --- | --- | --- |
 | H1 | `backend/app/agent/session.py:107` 等四个 getter | Redis 首次不可达即**永久锁存**进程内实现，多 worker 脑裂 |
 | H2 | `backend/app/agent/tools.py` 硬约束 stmt | 无 SQL LIMIT，全量物化；销量子查询无月份谓词 —— ⚠️ **已加可观测化未改行为**：见 P5.1 节。LIMIT 会静默改变推荐结果，需先跑检索评测对齐基线 |
-| H3 | `backend/app/agent/engine.py` 14 处 | `async def` 内裸调同步 `Session`，阻塞事件循环 |
+| H3 | `backend/app/agent/engine.py` 14 处 | ✅ **已修（2026-10-21）**：`async def` 内**裸调同步 `Session`**（实测真实阻塞点 9 处：推荐 / 版本差异 / 车系问答三条回答链各查一次 `Source`、5 处 `_source_citations`、1 处 `_unlock_note`）——真 I/O 发生在**结果被消费**那一刻（`.all()`），不是 `db.scalars()` 本身，所以只包住调用不包住消费等于没修。修法：新增唯一实现 `_source_names`（此前「查 Source」4 处各写一遍）+ 9 处统一 `await run_in_threadpool(...)`。**结果逐字不变**（全量用例守住）+ 变异测试 5/5 + AST 契约守卫（async 函数里不得直接碰同步 DB，helper 集合算**传递闭包**——抽出一个 helper 就让守卫失明，变异测试实测踩到） |
 | H4 | `backend/app/agent/series_qa.py` | 两条最热问答路径的 N+1 —— ✅ **已修**（P5.2）→ `catalog.services.variants_current_prices` / `variants_facts`，5 例逐条等价性回归（性能优化的前提是结果逐字相同） |
 | H5 | `backend/app/agent/engine.py:677-679` | shadow 任务异常从未取回，静默死亡 |
 | H6 | `backend/app/sources/autohome_sku.py:25-28` | `MOBILE_UA` 伪装 iPhone，与 README 合规声明矛盾 —— ✅ **已修并实测**（2026-10-03）：改用 `fetcher.DEFAULT_USER_AGENT`，直调 `fetch_sku_config` 抓 3 个车系（8433/8529/8171）款型 4/8/9 条、配置组 21/22/23 组，无 403 无空数据 → 对方不拦非浏览器 UA，改动零代价 |
@@ -291,7 +291,9 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `web/app/components/Pagination.tsx:65,79,90,99` | ✅ **已修一半（2026-10-03）**：3 处裸 `<a href>` 已换 `next/link`（翻页不再整页重载），禁用态改 `<span>`（`Link` 的 `href` 必填，且无 href 的 `<a>` 观感上仍像可点）。⚠️ `<form method="get">` **刻意保留**：原生 GET 不依赖 JS 即可工作（渐进增强），隐藏域已把筛选参数带过去；改成 `router.push` 需加客户端边界并手工重建 query 串，那才是会真丢筛选的地方。理由写在源码里并由测试守住 |
 
 **修复顺序**（先易后难、先安全后性能）：C1 → C2 → H5 → H3 → H1 → H6 → H10 → M 项 → H2/H4（性能，需评测兜底）。
-C1/C2/H10 已于 2026-10-02 / 2026-10-04 完成。
+C1/C2/H10 已于 2026-10-02 / 2026-10-04 完成；**H3 已于 2026-10-21 修完**
+（9 处裸调同步 DB 统一进线程池，「查 Source」收敛为唯一实现 `_source_names`）。
+下一项是 H1。
 
 **H10 的两条诚实声明（2026-10-04 实测，务必别当成「性能优化已上线」）**：
 

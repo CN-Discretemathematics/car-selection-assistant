@@ -36,6 +36,7 @@ r"""两处口径统一的**不变式**（2026-10-03 产品拍板后落地）。
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -121,13 +122,33 @@ def test_source_citations_no_longer_accepts_a_limit_argument():
 
 
 def test_no_call_site_passes_limit():
-    # 2026-10-05：4 → 5（新增「销量榜」确定性分支的引用）。
-    # **真实不变式是下面那条**（任何调用点都不得传 limit）；计数只是「所有调用点
-    # 都被这条断言覆盖到」的代理，漏了一个就静默失守，故仍硬编码。
-    calls = re.findall(r"(?<!def )_source_citations\((?:[^()]|\([^()]*\))*\)", _SRC, re.S)
-    assert len(calls) == 5, f"应有 5 个调用点，实际 {len(calls)}"
-    for c in calls:
-        assert "limit" not in c, f"调用点仍在传 limit：{c[:80]}"
+    """任何调用点都不得传 limit——**两种形式都算**。
+
+    2026-10-21（H3）：调用点改成了 `await run_in_threadpool(_source_citations, ...)`
+    ——函数以**引用**形式传给线程池，不再是「调用表达式」。原先用正则数「调用文本」
+    的办法因此一个都数不到（本条当场变红）。
+
+    改用 AST：取引用点（`_source_citations` 这个名字出现的所有位置），
+    再逐个检查**所在调用**有没有 `limit` 关键字——直接调用与作为实参传入都覆盖到。
+    计数仍是「所有调用点都被这条断言覆盖到」的代理，故仍硬编码。
+    """
+    tree = ast.parse(_SRC)
+    refs = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Name) and n.id == "_source_citations"
+    ]
+    assert len(refs) == 5, f"应有 5 个引用点，实际 {len(refs)}"
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        fn = n.func
+        called = fn.id if isinstance(fn, ast.Name) else None
+        passed = [a.id for a in n.args if isinstance(a, ast.Name)]
+        if "_source_citations" not in passed and called != "_source_citations":
+            continue
+        for kw in n.keywords:
+            assert kw.arg != "limit", f"调用点仍在传 limit（行 {n.lineno}）"
 
 
 def test_citation_limit_constant_is_the_single_source():
