@@ -315,6 +315,24 @@ def _first_free_span(
 RESOLVE_SERIES_LIMIT = 6
 
 
+def load_series_pairs(
+    db: Session, series_ids: list[int]
+) -> list[tuple[VehicleSeries, Brand | None]]:
+    """按 id 取 (车系, 品牌) 对；查不到的直接跳过（不留 None 坑下游）。
+
+    2026-10-20：自 `agent/engine.py` 原样迁移（与 `app/agent/turn.py` 的画像推进
+    同批）。放在本模块是因为它是**车系查询**，与 `resolve_series` 同域——
+    留在 engine 则 turn 必须反向 import engine，成环。
+    """
+    out: list[tuple[VehicleSeries, Brand | None]] = []
+    for series_id in series_ids:
+        series = db.get(VehicleSeries, series_id)
+        if series is None:
+            continue
+        out.append((series, db.get(Brand, series.brand_id)))
+    return out
+
+
 def resolve_series(
     db: Session, message: str
 ) -> list[tuple[VehicleSeries, Brand | None]]:

@@ -39,8 +39,17 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_SRC = (Path(__file__).resolve().parents[2] / "backend" / "app" / "agent" / "engine.py").read_text(
-    encoding="utf-8"
+# 2026-10-20：画像解析知识（`_BODY_HINTS` / `_ENERGY_HINTS` / `_negated_values`
+# / `_negation_here` 等）从 `engine.py` 搬进了 `app/agent/turn.py`——
+# 它们与 `extract_hints` 同域，原来散在 engine 里，画像解析要跨文件找。
+#
+# 本文件的不变式**依然成立**（表里没有大写键、否定路径收小写文本），
+# 只是断言的目标文件变了。故这里**同时读两个文件**：
+# 知识在哪就在哪被断言，不因为搬家而让不变式失效。
+_AGENT_DIR = Path(__file__).resolve().parents[2] / "backend" / "app" / "agent"
+_SRC = "\n".join(
+    (_AGENT_DIR / name).read_text(encoding="utf-8")
+    for name in ("engine.py", "turn.py")
 )
 
 

@@ -220,7 +220,11 @@ python tools/import_data.py payload.json --dry-run
 
 ```powershell
 cd backend
-python -m pytest -q                   # 1415 用例（随迭代增长，以实际输出为准）
+<<<<<<< HEAD
+python -m pytest -q                   # 1440 用例（随迭代增长，以实际输出为准）
+=======
+python -m pytest -q                   # 1440 用例（随迭代增长，以实际输出为准）
+>>>>>>> refactor/knowledge-consolidation
 cd ..\web
 npx tsc --noEmit                      # 前端类型检查
 ```
