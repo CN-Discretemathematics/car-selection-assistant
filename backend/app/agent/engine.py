@@ -62,6 +62,7 @@ from app.agent.schemas import (
     Clarification,
     RecommendedVariant,
     UserProfile,
+    llm_profile_view,
 )
 from app.agent.series_qa import (
     NEGATION_RE,
@@ -2529,7 +2530,11 @@ class AgentEngine:
         try:
             context = json.dumps(
                 {
-                    "profile": profile.model_dump(),
+                    # ⚠️ 画像进模型上下文必须走 `llm_profile_view`：它去掉内部 id
+                    # （locked_series_ids / brand_ids …）。实测模型会把这些主键
+                    # 原样写进用户可见文案（「并锁定了车系 ID 905」）——既泄漏内部 id，
+                    # 又是一个用户根本问不出处的数字。
+                    "profile": llm_profile_view(profile),
                     "candidates": result["variants"][:5],
                     "sources": source_names,
                     "evidence": evidence or [],

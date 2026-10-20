@@ -53,6 +53,35 @@ class UserProfile(BaseModel):
     last_recommended_variant_ids: list[int] = Field(default_factory=list)
 
 
+#: 画像里**只对内部有意义**的字段：值是内部主键（车系 id / 款型 id / 品牌 id）。
+#:
+#: 它们**不能进模型的上下文**——用户看不懂，而模型会把它们原样写进用户可见文案。
+#: 实测（2026-10-21，可追问率那笔的附带发现）：用户锁定某车系而候选为空时，
+#: 模型在回答里写了「并锁定了**车系 ID 905**」——既泄漏内部 id，
+#: 又是一个用户根本问不出处的数字（画像里确实有，但它是主键，不是事实）。
+#:
+#: 可读的同义字段（`brand_labels` / `brand_exclude_labels`）**保留** ✓——
+#: 解释模块需要知道「用户要什么品牌」，那说的是名字而不是主键。
+_INTERNAL_ID_FIELDS: tuple[str, ...] = (
+    "locked_series_ids",
+    "last_recommended_variant_ids",
+    "rejected_variant_ids",
+    "brand_ids",
+    "brand_exclude_ids",
+)
+
+
+def llm_profile_view(profile: UserProfile) -> dict:
+    """给**模型**看的画像视图：去掉内部 id 字段，其余原样。
+
+    只用于 LLM 上下文（解释模块）；落盘、内部计算、接口返回仍用完整画像 ✓。
+    """
+    data = profile.model_dump()
+    for field in _INTERNAL_ID_FIELDS:
+        data.pop(field, None)
+    return data
+
+
 class SessionOut(BaseModel):
     session_id: str
 
