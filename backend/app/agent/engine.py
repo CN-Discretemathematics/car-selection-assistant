@@ -6,6 +6,54 @@ DeepSeek 只负责解释生成；车辆事实一律来自工具与数据库（�
 """
 from __future__ import annotations
 
+#: engine 的**公开导入面**。
+#:
+#: 2026-10-20 的知识收拢把若干实现搬到了别处（`turn.py` 画像推进 /
+#: `weights.py` 权重 / `profile.py` 画像合并 / `routing.py` 意图 /
+#: `series_index.py` 车系查询），但**导入面不能破**——仓库内外有这些名字是
+#: 「从 app.agent.engine import」的。
+#:
+#: 声明 `__all__` 是为了让 ruff 知道这些 import 是**有意的 re-export**
+#: （否则 F401 会报「imported but unused」）。
+#:
+#: ⚠️ 本清单只列**确实有人 import** 的名字，不是所有 import——
+#: 否则它会变成「import 面快照」，将来新增一个内部 import 也要改它。
+__all__ = [
+    "AgentEngine",
+    "CITATION_LIMIT",
+    "TOOL_LOOP_MAX_STEPS",
+    "UserProfile",
+    "_BODY_HINTS",
+    "_COMPARE_FOLLOWUP_RE",
+    "_ENERGY_HINTS",
+    "_SHADOW_RETRY_DELAYS",
+    "_USAGE_HINTS",
+    "_WEIGHT_DIM_KEYWORDS",
+    "_WEIGHT_RAISE",
+    "_brand_series",
+    "_budget_options",
+    "_clip_evidence",
+    "_dispatch_tool",
+    "_load_profile",
+    "_mentions_variant",
+    "_negated_values",
+    "_passenger_options",
+    "_priority_phrase",
+    "_retrieve_chat_evidence",
+    "_source_citations",
+    "_variant_label",
+    "asks_brand_lineup",
+    "asks_catalog_count",
+    "asks_tool_assist",
+    "collect_tradeoffs",
+    "energy_asked_in",
+    "extract_hints",
+    "get_agent_engine",
+    "mentions_known_brand",
+    "merge_profile",
+    "next_clarification",
+]
+
 import asyncio
 import hashlib
 import json
@@ -15,12 +63,11 @@ import random
 import re
 import time
 
-from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from app.agent import conversation_log, known_facts, soft_prefs, soft_probe
+from app.agent import conversation_log, known_facts, soft_probe
 from app.agent.answer_contract import (
     answer_numbers_allowed,
     check_catalog_overview_text,
@@ -39,8 +86,9 @@ from app.agent.llm_router import (
     log_shadow_record,
     route_with_llm,
 )
+from app.agent.profile import merge_profile
 from app.agent.routing import (
-    asks_brand_count,
+    _COMPARE_FOLLOWUP_RE,
     asks_brand_lineup,
     asks_catalog_count,
     asks_general_advice,
@@ -57,7 +105,6 @@ from app.agent.routing import (
 )
 from app.agent.schemas import (
     AgentMessageOut,
-    Budget,
     Citation,
     Clarification,
     RecommendedVariant,
@@ -69,15 +116,26 @@ from app.agent.series_qa import (
     asks_variant_diff,
     build_series_qa_answer,
     build_variant_diff_answer,
-    negates_series,
     should_answer,  # noqa: F401  # re-export：保持既有导入面（评审二轮建议 5）
 )
 from app.agent.session import SessionStore, get_session_store
+from app.agent.weights import (
+    DIM_LABELS as _DIM_LABELS,
+    USAGE_HINTS as _USAGE_HINTS,
+    WEIGHT_DIM_KEYWORDS as _WEIGHT_DIM_KEYWORDS,
+    WEIGHT_RAISE as _WEIGHT_RAISE,
+)
+from app.agent.turn import (
+    _BODY_HINTS,
+    _ENERGY_HINTS,
+    _load_profile,
+    _negated_values,
+    advance_profile,
+    advance_series_locks,
+    extract_hints,
+)
 from app.agent.tools import (
-    _DIM_LABELS,
-    DEFAULT_WEIGHTS,
     TOOL_SCHEMAS,
-    WEIGHT_CEILING,
     comparison_tool,
     citation_verifier,
     recommendation_tool,
@@ -88,7 +146,7 @@ from app.agent.tools import (
     vehicle_search,
 )
 from app.catalog import services as catalog
-from app.catalog.brands import brand_series_overview, resolve_brand_mentions
+from app.catalog.brands import brand_series_overview
 from app.catalog.series_index import display_name, resolve_series
 from app.common.enums import NEW_ENERGY_TYPES, expand_avoid, expand_energy_prefs
 from app.common.llm import LLMClient, LLMError, get_llm_client
@@ -102,15 +160,9 @@ from app.comparison.analysis import analyze_comparison, render_analysis_text
 # 座位/人数解析已于 2026-10-05 收敛为 `parse_passengers` 单一实现：此前本文件自带一份
 # `_parse_count` + 组号取数，等于允许存在「只取数字、丢掉开区间后缀」的第二个实现，
 # 「5人以上」因此被当成 5 座。规则必须只有一个归属，否则口径必然漂移。
-from app.catalog.series_constraints import (  # noqa: E402
-    BUDGET_BARE_RE as _BUDGET_BARE_RE,
-    BUDGET_MAX_RE as _BUDGET_MAX_RE,
-    BUDGET_MIN_LOOSE_RE as _BUDGET_MIN_LOOSE_RE,
-    BUDGET_MIN_RE as _BUDGET_MIN_RE,
-    BUDGET_RANGE_BOTH_RE as _BUDGET_RANGE_BOTH_RE,
-    BUDGET_RANGE_RE as _BUDGET_RANGE_RE,
-    parse_passengers as _parse_passengers,
-)
+# 2026-10-20：预算正则与 `parse_passengers` 已随 `extract_hints` 搬进
+# `app/agent/turn.py`——它们是**画像解析**的依赖，与 extract_hints 同域。
+# engine 自己不再解析预算，故此处不再 import。
 
 # ── 意图路由（P0 解耦）──────────────────────────────────────────────────────
 # 路由正则与判定谓词（is_chatty / has_car_intent / asks_* / mentions_known_brand /
@@ -120,19 +172,14 @@ from app.catalog.series_constraints import (  # noqa: E402
 # answer_numbers_allowed 迁移到 app/agent/answer_contract.py（P2 回答契约），
 # 同样由本模块 re-export。
 
-# 用户明确要求「看其他车」：清空已锁定车系，回到广泛推荐。
-# 收窄为明确句式（评审 P1：「另外…」「再看…」等话语词不得误清空锁定）
-_UNLOCK_RE = re.compile(
-    r"(看看其他|看看别的|其他车|别的车|其他选择|别的选择|还有什么选择|更多选择|"
-    r"换个|换一换|换别的|不要只看|不只看|都看看|别的车型|其他车型)"
-)
-# 2026-10-05（用户拍板）：本轮只点名一台、另一台在**会话历史**里时的对比标记。
-# 有了它才把锁定车系并入 resolved——否则「它的续航够不够」这种参数追问
-# 会被误当成两车对比（实测该问法应走单车系档案）。
-_COMPARE_FOLLOWUP_RE = re.compile(
-    r"(对比|比较|相比|哪个好|哪款好|哪个更好|差在哪|差多少|区别|差别|不一样|"
-    r"比一下|比起|比呢|跟.{1,8}比|和.{1,8}比|与.{1,8}比)"
-)
+# 2026-10-20：`_UNLOCK_RE` / `_COMPARE_FOLLOWUP_RE` 搬进 `app/agent/routing.py`
+# ——它们是**路由判定**的一部分（决定「本轮是否解锁锁定车系」「本轮是否是对比跟随」），
+# 而 routing 已被 engine 与 turn 共同依赖，放那里不成环；留在 engine 则 turn 必须
+# 反向 import engine，成环。
+# 2026-10-20：`_NEGATION_WORDS` / `_NEGATION_FRIENDS` / `_negated_values` /
+# `_negation_here` / `_DE` / `_CLAUSE_SPLIT_RE` / `_NEGATION_WINDOW` 一并搬进
+# `app/agent/turn.py`——**否定解析**是与 `extract_hints` 同域的知识，
+# 原来散在 engine 里，画像解析要跨文件找。
 
 #: `respond()` 里在 `decision_sink.append` **之前** return 的两条分支所填的哨兵决策。
 #:
@@ -399,23 +446,6 @@ def _retrieve_chat_evidence(
     # 守住了诚实性底线（它如实说「没有电池相关数据」而不是编一个），但那是运气不是
     # 保证——换一个问题未必守得住。用户拍板：只追问，不检索。
     return []
-# 两条匹配路径（偏好 `body` / avoid 排除项）现已**统一用小写化的 msg_low**，
-# 因此这张表**只需要小写键**。此前偏好路径用 msg_low、avoid 路径用原始 message，
-# 于是不得不同时留「MPV」与「mpv」两个键——当时功能没坏，但看起来像冗余，
-# 删掉大写键就会让「不要MPV」静默漏掉排除项（2026-10-03 统一后消除该陷阱）。
-_BODY_HINTS = {"轿车": "sedan", "suv": "suv", "mpv": "mpv"}
-_ENERGY_HINTS = {
-    "纯电": "BEV",
-    "插混": "PHEV",
-    "插电混动": "PHEV",
-    "增程": "EREV",
-    "油混": "HEV",
-    "混动": "HEV",
-    "燃油": "ICE",
-    "油车": "ICE",
-    "汽油": "ICE",
-    "新能源": "new_energy",
-}
 # 能源 token → 中文（盘点范围与推荐理由共用同一套说法）
 _ENERGY_LABEL = {
     "BEV": "纯电",
@@ -434,238 +464,16 @@ _ENERGY_LABEL = {
 #      系统推荐用户明确排斥的车；
 #   ② 无词边界的子串匹配 →「不要**太贵的**SUV」把 SUV 排除，而 avoid 直接下推
 #      SQL `NOT body_type IN (...)`，等于把用户唯一想要的车型从候选集删掉。
-_NEGATION_WORDS: tuple[str, ...] = (
-    "不要", "不考虑", "不想", "不需要", "不喜欢", "不打算", "讨厌", "排除", "别",
-)
+#
+# 2026-10-20：`_NEGATION_WORDS` / `_NEGATION_FRIENDS` / `_negated_values` /
+# `_negation_here` / `_DE` / `_CLAUSE_SPLIT_RE` / `_NEGATION_WINDOW` 一并搬进
+# `app/agent/turn.py`——**否定解析**是与 `extract_hints` 同域的知识，
+# 原来散在 engine 里，画像解析要跨文件找。
 # 假朋友：中文不做词边界就会命中「差**别**」「**别**克」。这条不是洁癖——
 # 本人审计脚本把语料里 41 处「别」全当否定，报出 7 条「误判」，7 条全是假的。
 _NEGATION_FRIENDS: tuple[tuple[str, str], ...] = (("差", "别"), ("别", "克"))
-# 否定词与关键词之间的最大字距（防止跨半句乱指）
-_NEGATION_WINDOW = 12
-# 分句符：否定作用域不跨这些符号（「不喜欢轿车，SUV可以」里的 SUV 不受影响）
-_CLAUSE_SPLIT_RE = re.compile(r"[，,。；;！!？?\s]")
-_DE = "的"
 
 
-def _negation_here(text: str, idx: int) -> bool:
-    """text[idx:] 是否以一个**真实**的否定词开头（已排除「差别」「别克」）。"""
-    for word in _NEGATION_WORDS:
-        if not text.startswith(word, idx):
-            continue
-        if word == "别" and idx > 0 and text[idx - 1] == "差":
-            continue  # 「差别」
-        if text.startswith("别克", idx):
-            continue  # 品牌名
-        return True
-    return False
-
-
-def _negated_values(msg_low: str) -> list[str]:
-    """返回被否定修饰的车型/能源值（已去重排序）。
-
-    逐个关键词判定：它**自己所在分句**的前缀里有没有否定词，且否定词与它之间
-    没有「的」。「的」是这条规则的关键——「不要太贵的SUV」里否定作用在「贵的」
-    上，SUV 是正向需求；「不要MPV」里否定直接管住 MPV。
-    """
-    out: set[str] = set()
-    for table in (_ENERGY_HINTS, _BODY_HINTS):
-        for key, value in table.items():
-            k = key.lower()
-            start = msg_low.find(k)
-            while start != -1:
-                clause_prefix = _CLAUSE_SPLIT_RE.split(msg_low[:start])[-1]
-                window = clause_prefix[-_NEGATION_WINDOW:]
-                hit = next(
-                    (i for i in range(len(window)) if _negation_here(window, i)),
-                    None,
-                )
-                if hit is not None and _DE not in window[hit:]:
-                    out.add(value)
-                    break
-                start = msg_low.find(k, start + 1)
-    return sorted(out)
-
-
-_USAGE_HINTS = {
-    "上下班": "通勤",
-    "通勤": "通勤",
-    "日常": "通勤",
-    "代步": "通勤",
-    "每天": "通勤",
-    "平时": "通勤",
-    "上班": "通勤",
-    "家用": "家庭",
-    "家庭": "家庭",
-    "带娃": "家庭",
-    "接送孩子": "家庭",
-    "接送": "家庭",
-    "买菜": "家庭",
-    "家人": "家庭",
-    "长途": "长途",
-    "自驾": "长途",
-    "旅游": "长途",
-    "出差": "商务",
-    "商务": "商务",
-    "接待": "商务",
-    "办公": "商务",
-}
-
-# 评分维度关键词 → recommendation_tool 的 8 维权重键（§17.2 软评分）
-#
-# 2026-10-03（sales-agent-proposal L2 补齐）：新增词条的判定标准只有一条——
-# **这个维度在 recommendation_tool 里真的被计算，且这一轮真的被测到。**
-# sales-agent-proposal §2 举的典型销售话术「我最看重后排和家用」此前两个都落空：
-# 「后排」不在表里，「家用」在 _USAGE_HINTS 里但没有权重入口，用户的强调被静默丢弃。
-_WEIGHT_DIM_KEYWORDS: tuple[tuple[str, str], ...] = (
-    # 用途：8 维里**唯独没有关键词入口**的维度（DEFAULT_WEIGHTS 给它 0.15，最高）。
-    # 词表取 _USAGE_HINTS 键的**子集**，这是刻意的结构约束：只有同时也会写进
-    # profile.usage 的词，才能让 tools 侧把 usage 计入 measured 集合。
-    # 给 usage 加权却测不到 = 白白稀释其它维度而换不来任何排序变化。
-    # 该不变量由 tests/test_agent.py::test_usage_weight_keywords_are_measurable 钉住。
-    ("通勤", "usage"), ("上下班", "usage"), ("代步", "usage"),
-    ("家用", "usage"), ("家庭", "usage"), ("带娃", "usage"),
-    ("接送", "usage"), ("买菜", "usage"),
-    ("长途", "usage"), ("自驾", "usage"), ("旅游", "usage"),
-    ("出差", "usage"), ("商务", "usage"),
-    # 空间（space 由 length_mm 车长归一）：补销售高频的「后排/坐人」说法
-    ("大空间", "space"), ("空间", "space"), ("后排", "space"),
-    ("坐人", "space"), ("载人", "space"),
-    ("动力", "power"), ("性能", "power"), ("马力", "power"), ("加速", "power"),
-    ("续航", "energy"), ("油耗", "energy"), ("能耗", "energy"), ("电耗", "energy"),
-    ("智驾", "intelligence"), ("智能", "intelligence"), ("辅助驾驶", "intelligence"),
-    ("车机", "intelligence"), ("科技", "intelligence"),
-    ("舒适", "comfort"), ("舒服", "comfort"), ("隔音", "comfort"),
-    ("保养", "maintenance"), ("维修", "maintenance"), ("省心", "maintenance"),
-    ("售后", "maintenance"), ("网点", "maintenance"), ("配件", "maintenance"),
-    ("性价比", "budget"), ("价格", "budget"),
-)
-# ⚠️ 「安全 / 碰撞 / 气囊」**刻意不映射到任何维度**（契约由测试钉住，见
-# tests/test_agent.py::test_safety_emphasis_is_deliberately_unmapped）：
-# 8 个维度的公式里**没有任何一个读安全类 fact_key**——budget←价格、usage←用途×车身、
-# space←length_mm、energy←能源类型、power←功率、comfort/intelligence←配置类事实键、
-# maintenance←品牌规模+销量活跃度。把「我最看重安全」映射到其中任何一个，都不会让排序
-# 更安全，只会让用户以为系统听懂了他最在意的东西——**用行为冒充理解**，比不回答更糟。
-# 真要支持，需要先加一个真读安全事实的维度（数据 + 公式 + 归一化），属新增能力，
-# 不是往这张表里加词能解决的。
-_EMPHASIS_RE = re.compile(
-    r"(优先|最看重|比较看重|更看重|特别看重|最在意|比较在意|更在意|主要看|重点|看重|在乎|重视|希望)"
-)
-# 单次强调的权重**增量**。⚠️ tools 侧 `profile.weights` 是**绝对权重（覆盖）**而非累加器，
-# 所以这里必须发出「默认值 + 增量」的绝对值，不能只发裸增量——
-# 否则默认本就高于增量的维度会被**反向压低**：「主要看价格」→ budget 由 0.30 掉到 0.20，
-# 用户越强调价格，系统越不看重价格（2026-10-03 实测发现，此前注释写「增量/叠加」而代码是覆盖）。
-_WEIGHT_RAISE = 0.2
-
-
-def extract_hints(message: str) -> dict:
-    """从自然语言中提取可确定的结构化线索（确定性解析，不依赖模型）。"""
-    hints: dict = {}
-    msg_low = message.lower()
-
-    # 预算解析顺序（评审 P1：此前「20万到30万之间」回落到 bare 把下限当上限）：
-    # ① 双侧带万区间 ② 单侧万区间 ③ 上限 ④ 下限 ⑤ 约 N 万起（多万/出头） ⑥ 裸数字=上限
-    m = _BUDGET_RANGE_BOTH_RE.search(message)
-    if m:
-        hints["budget"] = {"min": float(m.group(1)) * 10000, "max": float(m.group(2)) * 10000}
-    else:
-        m = _BUDGET_RANGE_RE.search(message)
-        if m:
-            hints["budget"] = {"min": float(m.group(1)) * 10000, "max": float(m.group(2)) * 10000}
-        else:
-            m = _BUDGET_MAX_RE.search(message)
-            if m:
-                hints["budget"] = {"max": float(m.group(1)) * 10000}
-            else:
-                m = _BUDGET_MIN_RE.search(message)
-                if m:
-                    hints["budget"] = {"min": float(m.group(1)) * 10000}
-                else:
-                    m = _BUDGET_MIN_LOOSE_RE.search(message)
-                    if m:
-                        hints["budget"] = {"min": float(m.group(1)) * 10000}
-                    else:
-                        m = _BUDGET_BARE_RE.search(message)
-                        if m:
-                            hints["budget"] = {"max": float(m.group(1)) * 10000}  # 单独数字按「不超过」理解
-
-    seats = _parse_passengers(message)
-    if seats is not None:
-        hints["passengers"] = seats
-
-    body = [value for key, value in _BODY_HINTS.items() if key in msg_low]
-    if body:
-        hints["body_type"] = sorted(set(body))
-
-    energy = []
-    for key, value in _ENERGY_HINTS.items():
-        if key in msg_low:
-            energy.append(value)
-    # 「插电混动/插电式混动」同时包含「混动」会双重命中 PHEV+HEV（评审 M3）：
-    # 含「插电」时按插混理解，除非用户同时明确提及「油混/双擎/轻混」
-    if "插电" in message and "HEV" in energy and not any(k in message for k in ("油混", "双擎", "轻混")):
-        energy.remove("HEV")
-        if "PHEV" not in energy:
-            energy.append("PHEV")
-    if energy:
-        hints["energy_preference"] = sorted(set(energy))
-
-    usage = [value for key, value in _USAGE_HINTS.items() if key in message]
-    # 「自己用/个人开」等（匹配短语避免「你自己看着办」误判）
-    if re.search(r"(自己用|自己开|自己坐|个人用|个人开|就我|就我自己)", message):
-        if "通勤" not in usage:
-            usage.append("通勤")
-    if usage:
-        hints["usage"] = sorted(set(usage))
-
-    if "充电" in message:
-        if "不能" in message or "没有" in message or "不方便" in message:
-            hints["charging_tolerance"] = False
-        else:
-            hints["charging_tolerance"] = True
-
-    # 否定句 → avoid（2026-10-03 重写：从「全句级判定」改为**按分句 + 邻近 + 的字边界**）
-    #
-    # 此前是 `if "不要" in message or "不考虑" in message:`——只要句子里出现否定词，
-    # **句中所有**车型/能源关键词一律进 avoid。两个已确认的缺陷（见提案 §4.3）：
-    #   ① 词表只有 2 个词：「不想开MPV」「不喜欢轿车」进不了否定分支，
-    #      落进**偏好**路径 → 推荐用户明确排斥的车；
-    #   ② 无词边界的子串匹配：「不要**太贵的**SUV」里的「不要」否定的不是 SUV，
-    #      语义是「要 SUV、但别太贵」——旧实现把 SUV **排除**掉，
-    #      而 avoid 直接下推 SQL NOT body_type IN (...)，等于把用户唯一想要的车型删了。
-    #
-    # 现在逐个关键词判定「它自己前面那一小段里有没有否定」：
-    #   - 分句：只在本分句内找否定（「不喜欢轿车，SUV可以」里的 SUV 不受影响）；
-    #   - 邻近：否定词与关键词之间不超过 _NEGATION_WINDOW 字；
-    #   - 「的」：否定词与关键词之间有「的」→ 否定作用在「的」之前，关键词是**正向需求**；
-    #   - 假朋友：中文不做词边界就会把「差别」「别克」当成否定词（本人审计脚本实测踩过：
-    #     把语料里 41 处「别」全当否定，报出 7 条「误判」——7 条全是假的）。
-    negated = _negated_values(msg_low)
-    if negated:
-        hints["avoid"] = negated
-        # 同词同时命中「偏好」与「避开」时以避开为准（评审 L2）：
-        # 如「不要燃油车」→ avoid=[ICE]，不得同时写入 energy_preference=[ICE]。
-        # 过滤后为空则删除键：空列表会让 structured=bool(hints) 误判为
-        # 「本轮有车型信息」，把纯闲聊（含「不要」字样）错推进追问链路（评审 M-R2）
-        for key in ("energy_preference", "body_type"):
-            if key in hints:
-                kept = [e for e in hints[key] if e not in negated]
-                if kept:
-                    hints[key] = kept
-                else:
-                    hints.pop(key)
-
-    # 评分权重线索（评审 M-R10/§17.2「权重来自用户对话」落地）：
-    # 含强调词（优先/最看重/主要看…）且句中点到评分维度时，给出该维度的权重加成。
-    # 例：「空间优先，动力也要强」→ weights={space:0.30, power:0.30}
-    # （默认值 0.10 + 增量 0.2；发绝对值的原因见 _WEIGHT_RAISE 处的注释）
-    if _EMPHASIS_RE.search(message):
-        dims = sorted({dim for kw, dim in _WEIGHT_DIM_KEYWORDS if kw in message})
-        if dims:
-            hints["weights"] = {
-                dim: round(DEFAULT_WEIGHTS.get(dim, 0.0) + _WEIGHT_RAISE, 3) for dim in dims
-            }
-
-    return hints
 
 
 # 「还差一项」引导：缺失字段 → (问题, 示例选项)
@@ -720,47 +528,6 @@ def _profile_summary(profile: UserProfile) -> str:
     return "；".join(parts)
 
 
-def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
-    if hints.get("budget"):
-        profile.budget = Budget(**hints["budget"])
-    if hints.get("passengers") is not None:
-        profile.passengers = hints["passengers"]
-    if hints.get("body_type"):
-        profile.body_type = hints["body_type"]
-    if hints.get("energy_preference"):
-        profile.energy_preference = hints["energy_preference"]
-    # 品牌硬约束（用户明确「只要奔驰」等）：并入而非覆盖——会话内多次提及取并集；
-    # 否定项优先：说了「不要奔驰」就不再把它当正向约束
-    if hints.get("brand_ids") or hints.get("brand_exclude_ids"):
-        labels = dict(zip(profile.brand_ids, profile.brand_labels))
-        labels.update(dict(zip(hints.get("brand_ids") or [], hints.get("brand_labels") or [])))
-        excluded = set(profile.brand_exclude_ids) | set(hints.get("brand_exclude_ids") or [])
-        # 排除项的可读名同样要累积（2026-10-05）：此前只有 ids，追问回执**结构上就
-        # 写不出被排除的是哪个品牌**，于是用户说过的「别推荐比亚迪」在回执里凭空消失。
-        excl_labels = dict(zip(profile.brand_exclude_ids, profile.brand_exclude_labels, strict=False))
-        excl_labels.update(
-            dict(zip(hints.get("brand_exclude_ids") or [],
-                     hints.get("brand_exclude_labels") or [], strict=False))
-        )
-        kept_ids = (set(profile.brand_ids) | set(hints.get("brand_ids") or [])) - excluded
-        profile.brand_ids = sorted(kept_ids)
-        profile.brand_exclude_ids = sorted(excluded)
-        profile.brand_labels = [labels.get(bid, str(bid)) for bid in profile.brand_ids]
-        profile.brand_exclude_labels = [excl_labels.get(bid, str(bid)) for bid in excluded]
-    if hints.get("usage"):
-        profile.usage = hints["usage"]
-    if hints.get("charging_tolerance") is not None:
-        profile.charging_tolerance = hints["charging_tolerance"]
-    if hints.get("avoid"):
-        profile.avoid = sorted(set(profile.avoid) | set(hints["avoid"]))
-    # 权重线索跨轮累加（如第一轮「空间优先」0.30，后来说「再看重动力」动力也 0.30）。
-    # 上限 WEIGHT_CEILING：重复强调同一维度会线性累加，没有上限时一句车可以叠到 3.0，
-    # 那等于「只看这一个维度」，与综合推荐的产品意图相悖（2026-10-03）。
-    if hints.get("weights"):
-        for dim, w in hints["weights"].items():
-            merged = profile.weights.get(dim, 0.0) + float(w)
-            profile.weights[dim] = round(min(merged, WEIGHT_CEILING), 3)
-    return profile
 
 
 def _join_names(names: list[str]) -> str:
@@ -891,37 +658,6 @@ def next_clarification(profile: UserProfile) -> Clarification | None:
             missing=["passengers"],
         )
     return None
-
-
-async def _load_profile(store: SessionStore, session_id: str) -> UserProfile:
-    """从 store 取回画像并反序列化；**脏数据自愈**，不把异常抛给调用方。
-
-    2026-10-02（Critical）：原实现是裸的
-    `UserProfile(**await run_in_threadpool(store.get_profile, session_id))`。
-    任何一次校验失败——部署时改了 UserProfile 的字段类型、Redis 里被半写、
-    历史脏值——都会让 `ValidationError` 逃出 `respond`，于是该 session
-    **之后每一次请求恒 500 且不自愈**，用户只能靠「新对话」重置。
-    也就是说：一次 schema 变更 = 一次线上批量 500。
-
-    自愈策略：**丢弃脏画像、按空画像重新播种**，并记 error 级日志。
-    丢的是缓存态（约束可从后续对话重新收集），不是用户资产；相比整条会话
-    卡死，这是明显更好的降级——也符合「失败要显式」的诚实性原则。
-    """
-    raw = await run_in_threadpool(store.get_profile, session_id)
-    try:
-        return UserProfile(**raw)
-    except (ValidationError, TypeError) as err:
-        # TypeError 同样要接：raw 根本不是映射（被写成 list / 字符串 / 数字）时，
-        # `**raw` 抛的是 TypeError 而非 ValidationError。两者都是「脏数据」，
-        # 自愈策略一致。
-        logging.getLogger("app.agent.router").error(
-            "会话画像反序列化失败，已重建为空画像: session=%s %s: %s",
-            session_id, type(err).__name__, err,
-        )
-        fresh = UserProfile()
-        # 重写回 store：否则下一轮还会读到同一份脏数据、每轮都走重建分支
-        await run_in_threadpool(store.set_profile, session_id, fresh.model_dump())
-        return fresh
 
 
 # 回答里的来源引用条数上限（多数回答类型只展示前 3 个来源，避免引用刷屏）
@@ -1205,33 +941,15 @@ class AgentEngine:
         """
         await run_in_threadpool(self._store.append_message, session_id, "user", message)
 
-        profile = await _load_profile(self._store, session_id)
-        hints = extract_hints(message)
-        profile = merge_profile(profile, hints)
-        # L1 软偏好抽取（sales-agent-proposal §3 L1）。默认 AGENT_SOFT_PREF_MODE=off，
-        # 此时下面只多一次 env 读取、**不发起任何 LLM 调用**，行为与接入前逐位相同——
-        # 提案 §6 第 2 步要求「先只输出结构化、不接入回答」，先离线评测抽取质量。
-        # 闸门与回退全在 soft_prefs.run_if_enabled 内部，本行不承载任何逻辑。
-        await soft_prefs.run_if_enabled(profile, message)
-        # 已补齐的字段从 unknowns 中移除（评审 M1）：unknowns 语义 = 「最近一次追问未答」，
-        # 而非永久未知——否则用户后补的字段永远不会再次校验/追问
-        for answered in ("budget", "usage", "passengers"):
-            if answered == "budget" and (profile.budget.min is not None or profile.budget.max is not None):
-                profile.unknowns = [u for u in profile.unknowns if u != "budget"]
-            elif answered == "usage" and profile.usage:
-                profile.unknowns = [u for u in profile.unknowns if u != "usage"]
-            elif answered == "passengers" and profile.passengers is not None:
-                profile.unknowns = [u for u in profile.unknowns if u != "passengers"]
-        # L4：用户在**回答**软缺口追问（「你更看重哪一点」→「空间」）。
-        # 这条路独立于 extract_hints 的强调词路径——后者要求出现「最看重/主要看」
-        # 等词，而用户点完选项通常**只回一个词**（「空间」），没有强调词可匹配。
-        # 权重值取 engine._WEIGHT_RAISE，与正则路径同一个数。
-        #
-        # ⚠️ 必须在 set_profile **之前**：放后面的话权重改了却没落盘，下一轮又变回原样，
-        # 表现为「用户点了没反应」。
-        soft_probe.apply_probe_answer(profile, message)
+        # 段一 · 画像推进（载入 → 合并线索 → L1 → unknowns → L4）。
+        # 2026-10-20：整段收进 `app/agent/turn.py::advance_profile`。
+        # 原来这 30 行里的顺序靠注释维护（尤其「必须在 set_profile 之前」那句），
+        # 现在顺序是 module 内部的实现细节，调用方不再需要知道。
+        turn = await advance_profile(self._store, session_id, message)
+        profile = turn.profile
+        hints = turn.hints
+        structured = turn.structured
         await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
-        structured = bool(hints)
 
         # 0) 闲聊/能力咨询 → 自然回复（大模型 + 检索佐证）
         if is_chatty(message):
@@ -1243,76 +961,14 @@ class AgentEngine:
 
         # 0.5) 车系识别与锁定（必须在「无购车意图 → 普通对话」gate 之前：
         #       「星愿和零跑A10选哪个」不含购车关键词，但提到具体车系，必须走确定性链路）
-        wants_unlock = bool(_UNLOCK_RE.search(message))
-        resolved = await run_in_threadpool(resolve_series, db, message)
-        # 品牌硬约束（「只要奔驰」）：需查库把品牌名解析成 brand_id；且必须结合车系解析结果
-        # 消歧——「银河星愿怎么样」里的「银河」属于车系名，不是品牌约束（2026-09 回归）。
-        brand_hints = await run_in_threadpool(
-            resolve_brand_mentions,
-            db,
-            message,
-            series_names=[s.name for s, _brand in resolved],
-            assume_constraint=(
-                asks_brand_lineup(message)
-                or asks_catalog_count(message)
-                or asks_brand_count(db, message)
-            ),
+        #
+        # 2026-10-20：整段收进 `app/agent/turn.py::advance_series_locks`
+        # （车系解析 → 品牌约束并入 → 锁定/解锁状态机 → 对比跟随合并）。
+        # **闲聊早退在上面**——所以闲聊消息不推进锁定，这一条边界保持不变。
+        resolved, brand_structured, wants_unlock = await advance_series_locks(
+            db, message, profile
         )
-        if brand_hints:
-            profile = merge_profile(profile, brand_hints)
-            # 品牌线索也算「结构化输入」：否则「我强调过了，只要奔驰」这类只重申约束、
-            # 不含购车意图词的消息会掉进通用对话分支，由模型凭记忆回答（实测又答成
-            # 「奔驰只有三款纯电」）——必须回到确定性链路，用累计画像重出推荐。
-            structured = True
-        # 2026-10-02（P5.4 / M4）：原先这里有 3 次**连续**的 set_profile
-        # （品牌合并后 / 解锁后 / 重新锁定后），写的是同一个 profile 对象——
-        # 后一次必然覆盖前一次。生产存储是云 Redis（socket_timeout=3s），
-        # 每次都是一次串行往返，最坏情况一轮对话多付 3 次。
-        # 合并为**一次无条件写**：放在 987 所在位置之后，三种变更都已被吸收。
-        # 注：932 那次保留——`is_chatty` 会在此之后直接 return，那时
-        # 品牌/锁定逻辑尚未执行，那次写是唯一一次落盘机会。
-        # 评审 m2：否定词**直接指向**已锁定车系（「我不买星愿了，想要15万的燃油车」）
-        # 等同明确解锁——否则「锁定车系 ∩ 新硬约束」为空，推荐必然为空。
-        # 只按近距离共现判定：「不想要SUV了，看看银河星愿」否定的是车身形式，
-        # 不能把用户刚点名的车系解掉。
-        locked_now = set(profile.locked_series_ids)
-        negated_locked = any(
-            series.id in locked_now and negates_series(message, series.name)
-            for series, _brand in resolved
-        )
-        if profile.locked_series_ids and (wants_unlock or negated_locked):
-            if wants_unlock:
-                profile.locked_series_ids = []
-            else:
-                # 评审 m18：只解除**被否定**的车系——同句点名的其他锁定车系保留
-                # （「我不买星愿了，A10再看看」不得把 A10 一并移出锁定）
-                dropped = {
-                    s.id for s, _brand in resolved if negates_series(message, s.name)
-                }
-                profile.locked_series_ids = [i for i in profile.locked_series_ids if i not in dropped]
-        if resolved:
-            # 会话记忆：用户点名的车系持续锁定，直到明确要求「看其他车」；
-            # 否定语境（「我不买汉兰达」）不加锁（评审 P2）
-            if not wants_unlock and not NEGATION_RE.search(message):
-                mentioned = [s.id for s, _ in resolved]
-                profile.locked_series_ids = sorted(set(profile.locked_series_ids) | set(mentioned))
-
-        # 2026-10-05（用户拍板）：本轮只点名了一台、另一台**存在于会话历史**时，
-        # 把锁定的那台并入 resolved，否则对比意图整个丢失：
-        #   第1轮「汉怎么样」  -> 锁定汉，给了档案
-        #   第2轮「和汉L比呢」-> 本轮只解析出汉L 1 个车系，系统反问「预算大概多少？」
-        # 「汉L和汉哪个好」正常是因为两台都在本轮消息里。
-        # 只在**带对比/指代标记**时合并：否则「它的续航够不够」会被误当成两车对比。
-        if (
-            len(resolved) == 1
-            and profile.locked_series_ids
-            and _COMPARE_FOLLOWUP_RE.search(message)
-        ):
-            current = resolved[0][0].id
-            missing = [i for i in profile.locked_series_ids if i != current]
-            if missing:
-                extra = await run_in_threadpool(_load_series_pairs, db, missing[:1])
-                resolved = resolved + extra
+        structured = structured or brand_structured
         # 唯一一次落盘：无条件，覆盖上面品牌合并 / 解锁 / 重新锁定三种变更。
         # 原来分散在 3 处条件写里，任何一条分支漏写都会丢画像——统一到末尾后，
         # 「本轮结束前画像一定已持久化」成为结构性保证而非人工纪律。

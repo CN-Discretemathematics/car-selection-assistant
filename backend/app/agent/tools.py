@@ -14,6 +14,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.agent.schemas import UserProfile
+from app.agent.weights import (
+    DEFAULT_WEIGHTS,
+    DIM_LABELS,
+    TRADEOFF_GAP,
+    WEIGHT_CEILING,
+)
 from app.catalog import services as catalog
 from app.common.enums import NEW_ENERGY_TYPES, expand_avoid, expand_energy_prefs
 from app.common.models import (
@@ -24,6 +30,7 @@ from app.common.models import (
     VehicleSeries,
     VehicleVariant,
 )
+
 
 # ── 工具 1：vehicle_search ────────────────────────────────────────────────────
 def vehicle_search(
@@ -247,18 +254,21 @@ _COMFORT_CATEGORIES = ("舒适性", "内部配置", "外部配置")
 _INTELLIGENCE_CATEGORIES = ("智能驾驶", "智能座舱", "智能/辅助驾驶")
 
 # 取舍叙事的维度名（与 matched 的中文风格一致，面向用户）
-_DIM_LABELS = {
-    "budget": "预算吻合度",
-    "usage": "用途匹配",
-    "space": "空间",
-    "energy": "能耗",
-    "power": "动力",
-    "comfort": "舒适性配置",
-    "intelligence": "智能化配置",
-    "maintenance": "维护便利性",
-}
-# 落后幅度小于此值不算取舍——0.01 的差距是噪声，写出来只会稀释真正的信息
-_TRADEOFF_GAP = 0.2
+#
+# 2026-10-20：定义已搬到 `app/agent/weights.py`（与 DEFAULT_WEIGHTS / WEIGHT_CEILING
+# 同属一份知识）。此处保留**私有别名**以免改动本文件内所有 `_DIM_LABELS` 引用，
+# 并对外 re-export 公开名（`DEFAULT_WEIGHTS` 等）——外部模块历史上从这里 import，
+# 改路径会打断它们。
+_DIM_LABELS = DIM_LABELS
+_TRADEOFF_GAP = TRADEOFF_GAP
+
+__all__ = [
+    "DEFAULT_WEIGHTS",
+    "DIM_LABELS",
+    "TRADEOFF_GAP",
+    "WEIGHT_CEILING",
+    "recommendation_tool",
+]
 
 
 def _extract_seats(facts: dict[tuple[str, str], dict]) -> float | None:
@@ -310,23 +320,20 @@ def _tradeoff_gaps(
 _CANDIDATE_SCAN_WARN = 500
 
 
-# 8 维软评分默认权重（§17.2）。**模块级**而非函数内：engine.extract_hints 需要
-# 「默认 + 强调增量」算出绝对权重，若两处各写一份就会漂移（2026-10-03）。
-# 语义：profile.weights 里的值是**绝对权重**（覆盖），不是增量——API 直传权重
-# （POST /recommendations {"weights": {...}}）依赖这一点，故不在 tools 侧做叠加。
-DEFAULT_WEIGHTS: dict[str, float] = {
-    "budget": 0.30,
-    "usage": 0.15,
-    "space": 0.10,
-    "energy": 0.15,
-    "power": 0.10,
-    "comfort": 0.05,
-    "intelligence": 0.05,
-    "maintenance": 0.10,
-}
-# 单维权重上限：超过它意味着「只看这一个维度」，与「综合推荐」的产品意图相悖。
-# 重复说同一句强调会跨轮累加，没有上限时 profile 可以被一句话带到 3.0。
-WEIGHT_CEILING = 1.0
+# 8 维软评分默认权重（§17.2）与单维权重上限：
+#
+# 2026-10-20：定义已搬到 `app/agent/weights.py`，与 `WEIGHT_RAISE`（强调增量）、
+# `WEIGHT_DIM_KEYWORDS`（维度关键词）、`USAGE_HINTS`（用途词表）同属一份知识。
+#
+# 此前它们**散在三个 module**（tools / engine），导致 `engine` 顶层 import
+# `soft_prefs`、而 `soft_prefs` 又只能函数内反向 import `engine`——
+# **真实的循环依赖**，那 4 处延迟 import 是它的疤痕。
+# 团队当时已写下「两处各写一份必然漂移」（soft_prefs.py:723），
+# 却选择用延迟 import 打补丁而不是收拢 module：补丁挡住了崩溃，没挡住漂移。
+#
+# 语义不变：`profile.weights` 里的值是**绝对权重**（覆盖），不是增量——
+# API 直传权重（POST /recommendations {"weights": {...}}）依赖这一点，
+# 故不在 tools 侧做叠加。
 
 
 def recommendation_tool(
