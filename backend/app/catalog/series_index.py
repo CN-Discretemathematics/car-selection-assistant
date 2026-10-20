@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 from collections import Counter
-from typing import NamedTuple
+from typing import NamedTuple, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -96,7 +96,9 @@ def keyword_score(series: VehicleSeries, brand: Brand, needle: str) -> int | Non
 # 指纹 = (活跃车系数, max(id), max(车系名), max(校验时间), max(品牌名),
 #          在售款型数, max(款型 id))；
 # pytest 下每个测试都是新建内存库、指纹可能碰撞，直接禁用缓存。
-_resolve_cache: dict = {"fingerprint": None, "entries": ()}
+# 「variants」是款型名索引（D1.1），与车系名索引**共用同一份指纹**——
+# 款型增删改都会改指纹，因此不会各缓存各的、也不会读到过期的那份。
+_resolve_cache: dict = {"fingerprint": None, "entries": (), "variants": {}}
 
 # 款型显示名入索引的最短归一化长度（过短如「m5」「pro」跨车系撞名，误配风险大）
 _MIN_VARIANT_NAME_LEN = 6
@@ -235,6 +237,167 @@ def _load_name_entries(db: Session) -> tuple[tuple[str, int], ...]:
     return tuple(entries)
 
 
+# ── D1.1 款型名上下文消歧 ────────────────────────────────────────────────────
+def _load_variant_entries(db: Session) -> dict[str, list[tuple[int, int]]]:
+    """款型显示名 → [(variant_id, series_id)]（**保留撞名**，由上下文消歧）。
+
+    与 `_load_name_entries` 的差别就一处：那里**不敢**收被多个车系共享的款型名
+    （first-wins 会造出幽灵第二实体，把单车系问答误判成对比），于是**整体跳过**；
+    这里把撞名名**留下来**，交给 `resolve_variants` 按**上下文**消歧。
+
+    为什么值得留：库里的款型显示名**不含车系名**（「2026款 标准版」「2026款 Ultra」），
+    生产库实测 **103 个**归一化款型名被多个车系共享（「2026款 Ultra」→
+    理想L6/L8/L9+岚图泰山+智界V9）。跳过它们的后果是：用户点名了款型
+    （「IONIQ 5 N 2026款 标准版 的轴距」）也只能按**全系**给值（三档并列），
+    答非所问——实测语料 520 题里有 121 题点名款型、46 题的答案会因此变精确。
+    """
+    rows = db.execute(
+        select(VehicleVariant.id, VehicleVariant.display_name, VehicleVariant.series_id)
+        .join(VehicleSeries, VehicleSeries.id == VehicleVariant.series_id)
+        .where(VehicleVariant.status == "on_sale", VehicleSeries.active_status == "active")
+        # 确定性 ORDER BY：撞名款的候选顺序必须可复现——「取第一个候选」这种
+        # 写法（消歧失败时的兜底、以及守卫的反向验证）都依赖它稳定。
+        .order_by(VehicleVariant.series_id, VehicleVariant.id)
+    ).all()
+    index: dict[str, list[tuple[int, int]]] = {}
+    for vid, display, sid in rows:
+        norm = normalize_name(display or "")
+        if len(norm) < _MIN_VARIANT_NAME_LEN:
+            continue
+        bucket = index.setdefault(norm, [])
+        if (vid, sid) not in bucket:
+            bucket.append((vid, sid))
+    return index
+
+
+def _variant_index(db: Session) -> dict[str, list[tuple[int, int]]]:
+    """款型名索引（与车系名索引共用指纹缓存，不额外打查询）。"""
+    return _ensure_index(db)[1]
+
+
+def _ensure_index(db: Session) -> tuple[tuple[tuple[str, int], ...], dict[str, list[tuple[int, int]]]]:
+    """取（车系名索引, 款型名索引）——**两份一起刷新**。
+
+    ⚠️ 必须原子：此前车系名索引与款型名索引共用一份指纹缓存，但**只有车系那条路径**
+    会写缓存。于是「先解析车系、后解析款型」时，款型索引拿到的永远是首次刷新时
+    留下的空字典 → 款型**一个都解析不出来**（实测：引擎级 A/B 跑完 0 题变化）。
+    这就是「同一份缓存两个写者」的典型故障：写者不同、失效条件却相同。
+    """
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return _load_name_entries(db), _load_variant_entries(db)
+    fingerprint = _series_fingerprint(db)
+    if _resolve_cache["fingerprint"] != fingerprint:
+        _resolve_cache["fingerprint"] = fingerprint
+        _resolve_cache["entries"] = _load_name_entries(db)
+        _resolve_cache["variants"] = _load_variant_entries(db)
+    return _resolve_cache["entries"], _resolve_cache["variants"]
+
+
+def _all_spans(msg: str, norm: str) -> list[tuple[int, int]]:
+    """`norm` 在 `msg` 里的全部出现跨度（允许重叠，用于同名款型多次出现）。"""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        pos = msg.find(norm, start)
+        if pos < 0:
+            break
+        spans.append((pos, pos + len(norm)))
+        start = pos + 1
+    return spans
+
+
+def _nearest_context_series(
+    start: int,
+    end: int,
+    ctx_spans: list[tuple[int, int, int]],
+    allowed: set[int],
+) -> int | None:
+    """就近上下文车系：在 `allowed` 候选集里，挑**离这次出现最近**的那个车系名。
+
+    距离用两个跨度之间的**空隙**（重叠或相邻算 0）。
+    ⚠️ 并列最近时**不猜**（返回 None）——两个车系一样近，说明消息本身没给出
+    足够信息，认错款型比不认更糟（宁可退回全系口径）。
+    """
+    best_gap: int | None = None
+    best: set[int] = set()
+    for cs, ce, sid in ctx_spans:
+        if sid not in allowed:
+            continue
+        gap = max(cs - end, start - ce, 0)
+        if best_gap is None or gap < best_gap:
+            best_gap, best = gap, {sid}
+        elif gap == best_gap:
+            best.add(sid)
+    if best_gap is None or len(best) != 1:
+        return None
+    return next(iter(best))
+
+
+def resolve_variants(
+    db: Session,
+    message: str,
+    context_series: Sequence[tuple[VehicleSeries, Brand | None]] = (),
+) -> list[tuple[VehicleVariant, VehicleSeries]]:
+    """解析消息里点名的**具体款型**（D1.1 款型名上下文消歧）。
+
+    消歧规则（宁可漏判不可错判）：
+    - 款型名**唯一** → 直接命中；
+    - 款型名**撞名** → 看消息里**就近**的车系名：那个车系 ∈ 该款型的候选车系集
+      就归它；否则**不猜**（返回空 → 调用方退回全系口径）。
+
+    `context_series` 是**同句已解析出的车系**（消息局部上下文）。会话里锁定的车系
+    不在这里——那属于「跨轮上下文」，是另一件事，本函数不碰。
+    """
+    msg = normalize_name(message)
+    if not msg:
+        return []
+    index = _variant_index(db)
+    if not index:
+        return []
+    ctx_spans: list[tuple[int, int, int]] = []
+    for series, _brand in context_series:
+        for cand in (series.name, *(series.aliases or [])):
+            norm = normalize_name(cand or "")
+            if len(norm) < 2:
+                continue
+            pos = msg.find(norm)
+            if pos >= 0:
+                ctx_spans.append((pos, pos + len(norm), series.id))
+                break
+    picked: dict[int, tuple[int, int]] = {}  # variant_id → (series_id, 出现位置)
+    for norm, cands in sorted(
+        ((n, c) for n, c in index.items() if n in msg), key=lambda kv: -len(kv[0])
+    ):
+        by_series: dict[int, list[int]] = {}
+        for vid, sid in cands:
+            by_series.setdefault(sid, []).append(vid)
+        for start, end in _all_spans(msg, norm):
+            if len(by_series) == 1:
+                sid = next(iter(by_series))
+            else:
+                sid = _nearest_context_series(start, end, ctx_spans, set(by_series))
+                if sid is None:
+                    continue  # 上下文不足以消歧 → 不猜
+            for vid in by_series[sid]:
+                picked.setdefault(vid, (sid, start))
+    if not picked:
+        return []
+    variant_rows = db.execute(
+        select(VehicleVariant).where(VehicleVariant.id.in_(list(picked)))
+    ).scalars().all()
+    series_rows = db.execute(
+        select(VehicleSeries).where(VehicleSeries.id.in_({sid for sid, _ in picked.values()}))
+    ).scalars().all()
+    by_series_id = {s.id: s for s in series_rows}
+    out: list[tuple[VehicleVariant, VehicleSeries]] = []
+    for vid, (sid, _pos) in sorted(picked.items(), key=lambda kv: kv[1][1]):
+        variant = next((v for v in variant_rows if v.id == vid), None)
+        series = by_series_id.get(sid)
+        if variant is not None and series is not None:
+            out.append((variant, series))
+    return out
+
+
 def active_series_count(db: Session) -> int:
     """在售车系数——供回答里**声明覆盖范围**用。
 
@@ -254,9 +417,7 @@ def active_series_count(db: Session) -> int:
             or 0
         )
     fingerprint = _series_fingerprint(db)
-    if _resolve_cache["fingerprint"] != fingerprint:
-        _resolve_cache["fingerprint"] = fingerprint
-        _resolve_cache["entries"] = _load_name_entries(db)
+    entries, _variants = _ensure_index(db)
     return int(fingerprint[0])
 
 
@@ -341,14 +502,7 @@ def resolve_series_with_dropped(
     msg = normalize_name(message)
     if not msg:
         return [], []
-    if "PYTEST_CURRENT_TEST" in os.environ:
-        entries = _load_name_entries(db)
-    else:
-        fingerprint = _series_fingerprint(db)
-        if _resolve_cache["fingerprint"] != fingerprint:
-            _resolve_cache["fingerprint"] = fingerprint
-            _resolve_cache["entries"] = _load_name_entries(db)
-        entries = _resolve_cache["entries"]
+    entries, _variants = _ensure_index(db)
 
     candidates: list[tuple[str, int]] = [(norm, sid) for norm, sid in entries if norm in msg]
     chosen: list[tuple[int, int, int, str]] = []  # (start, end, series_id, norm)
@@ -822,3 +976,30 @@ def series_fact_rows(
     ).all():
         facts_by_series.setdefault(sid, []).append((key, value, unit, cycle))
     return facts_by_series
+
+
+def variant_fact_rows(
+    db: Session, variant_ids: list[int]
+) -> dict[int, list[tuple[str, str, str | None, str | None]]]:
+    """批量取若干**款型**的在售事实行（variant_id → [(key, value, unit, cycle)]）。
+
+    与 `series_fact_rows` 同口径，只是粒度从车系降到款型——D1.1 用它把
+    「你问的款型」的参数答准（而不是把全系多档值并列给用户）。
+    """
+    out: dict[int, list[tuple[str, str, str | None, str | None]]] = {}
+    ids = [int(i) for i in (variant_ids or []) if i]
+    if not ids:
+        return out
+    for vid, key, value, unit, cycle in db.execute(
+        select(
+            SpecFact.variant_id,
+            SpecFact.fact_key,
+            SpecFact.fact_value,
+            SpecFact.unit,
+            SpecFact.cycle,
+        )
+        .join(VehicleVariant, VehicleVariant.id == SpecFact.variant_id)
+        .where(VehicleVariant.id.in_(ids), VehicleVariant.status == "on_sale")
+    ).all():
+        out.setdefault(int(vid), []).append((key, value, unit, cycle))
+    return out
