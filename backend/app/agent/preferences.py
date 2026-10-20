@@ -516,7 +516,13 @@ def _now() -> datetime:
 def list_memories(
     db: Session, identity: AnonymousIdentity, *, include_expired: bool = False
 ) -> list[PreferenceMemory]:
-    """列出某身份的记忆。默认**排除已过期的**（推断类记忆会过期）。"""
+    """列出某身份的记忆。默认**排除已过期的**（推断类记忆会过期）。
+
+    ⚠️ 当前**没有**推断类记忆（`persist_hints` 只写 `source_type="explicit"`），
+    所以 `expires_at` 恒为 NULL ⇒ 这条过滤**永不命中**。
+    留着是为了将来放开推断类记忆时 TTL 有兜底（见 models.PreferenceMemory.expires_at
+    的注释与计划 §七 的结论）。
+    """
     stmt = select(PreferenceMemory).where(
         PreferenceMemory.identity_id == identity.id
     )

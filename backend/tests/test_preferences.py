@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import importlib.util
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import sqlalchemy as sa
@@ -285,6 +286,41 @@ def test_persist_keeps_usage_and_constraints(db_session: Session, durable_on):
     assert hints["usage"] == ["通勤"]
     assert hints["body_type"] == ["sedan"]
     assert hints["passengers"] == 2
+
+
+def test_written_memories_never_expire(db_session: Session, durable_on):
+    """写进去的记忆**永不过期**——只写用户明说的（`source_type="explicit"`）。
+
+    计划 §七 把「记忆陈旧错误的缓解（`expires_at`）无害」列为**未验证判断**。
+    实际查下来：当前设计下**没有推断类记忆**（推断猜错会静默砍掉整个候选集，一律不写），
+    ⇒ `expires_at` 恒为 NULL，过期过滤**永不命中** ⇒ 那条缓解是**恒等无害**的，
+    也因此**没有真正缓解任何东西**。
+
+    这条用例把「只写明说的」钉住：将来若放开推断类记忆，这里会先红 ⇒ 提醒
+    补上 TTL（否则陈旧的推断记忆会永久生效）。
+    """
+    identity, _ = _identity(db_session)
+    persist_hints(db_session, identity, {"usage": ["通勤"], "passengers": 2})
+    memories = list_memories(db_session, identity)
+    assert memories, "前提：这一轮确实写下了记忆"
+    for memory in memories:
+        assert memory.source_type == "explicit", memory.source_type
+        assert memory.expires_at is None, memory.expires_at
+
+
+def test_expired_memories_are_excluded_when_a_ttl_is_set(db_session: Session, durable_on):
+    """过期过滤**本身是通的**——只是当前没有会过期的记忆（见上一条）。
+
+    这里手动把 TTL 设成过去，验证过滤逻辑没坏：将来放开推断类记忆时它就是兜底。
+    """
+    identity, _ = _identity(db_session)
+    persist_hints(db_session, identity, {"usage": ["通勤"]})
+    memory = list_memories(db_session, identity)[0]
+    memory.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+    db_session.commit()
+
+    assert list_memories(db_session, identity) == []
+    assert len(list_memories(db_session, identity, include_expired=True)) == 1
 
 
 def test_persist_does_not_persist_weights(db_session: Session, durable_on):

@@ -426,7 +426,14 @@ class PreferenceMemory(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
-    #: 过期时间（推断类记忆用；用户明说的不设过期）
+    #: 过期时间（**预留**：推断类记忆才用；用户明说的不设过期）。
+    #:
+    #: ⚠️ 当前**没有**推断类记忆——`persist_hints` 只写 `source_type="explicit"`
+    #: （用户原话里正则抽出来的），推断猜错会静默砍掉整个候选集，一律不写。
+    #: ⇒ 这一列目前**恒为 NULL**，过期过滤**永不命中**。
+    #: 留着的理由：若将来放开推断类记忆，TTL 就是它们的兜底（见计划 §七
+    #: 「记忆陈旧错误的缓解（expires_at）无害」——当前设计下它**恒等无害**，
+    #: 也因此**没有真正缓解任何东西**）。
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
