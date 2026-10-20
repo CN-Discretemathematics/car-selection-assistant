@@ -39,6 +39,7 @@ from app.agent.llm_router import (
     log_shadow_record,
     route_with_llm,
 )
+from app.agent.preferences import persist_hints, restore_into_profile
 from app.agent.routing import (
     asks_brand_count,
     asks_brand_lineup,
@@ -92,7 +93,14 @@ from app.catalog.brands import brand_series_overview, resolve_brand_mentions
 from app.catalog.series_index import display_name, resolve_series
 from app.common.enums import NEW_ENERGY_TYPES, expand_avoid, expand_energy_prefs
 from app.common.llm import LLMClient, LLMError, get_llm_client
-from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, VehicleVariant
+from app.common.models import (
+    AnonymousIdentity,
+    Brand,
+    OfficialPrice,
+    Source,
+    VehicleSeries,
+    VehicleVariant,
+)
 from app.comparison.analysis import analyze_comparison, render_analysis_text
 
 # 预算正则唯一定义在 series_constraints（评审 C2：流水线约束解析复用同一实现），
@@ -1128,13 +1136,23 @@ class AgentEngine:
             },
         )
 
-    async def handle(self, db: Session, session_id: str, message: str) -> AgentMessageOut:
+    async def handle(
+        self,
+        db: Session,
+        session_id: str,
+        message: str,
+        *,
+        identity: AnonymousIdentity | None = None,
+    ) -> AgentMessageOut:
         """respond() 的对外入口：包一层回答级耗时结构化日志（每次请求一条）。
 
         路由模式（AGENT_ROUTER_MODE）在这里读取**一次**并传入 respond()，保证同一次
         请求内模式一致。耗时日志 logger "app.agent.respond"，单行 JSON
         {sid(匿名), mode, elapsed_ms}——llm 模式切流判据第 4 条
         （P95 回答延迟增幅 ≤300ms，对比 regex 基线）的数据来源。
+
+        `identity`：匿名身份（跨会话记忆）。**为 None 时行为与接入前完全一致**——
+        记忆的读写都在 `DURABLE_PREFS_MODE=off` 时短路。
         """
         router_mode = get_router_mode()
         started = time.perf_counter()
@@ -1145,7 +1163,12 @@ class AgentEngine:
         decision_sink: list = []
         try:
             out = await self.respond(
-                db, session_id, message, router_mode=router_mode, decision_sink=decision_sink
+                db,
+                session_id,
+                message,
+                router_mode=router_mode,
+                decision_sink=decision_sink,
+                identity=identity,
             )
         except Exception:
             failed = True
@@ -1196,18 +1219,39 @@ class AgentEngine:
         message: str,
         router_mode: str = "regex",
         decision_sink: list | None = None,
+        *,
+        identity: AnonymousIdentity | None = None,
     ) -> AgentMessageOut:
         """一次用户消息的完整回答（原 handle() 主体；handle() 只包耗时日志与模式读取）。
 
         decision_sink：shadow 模式的决策回传通道——respond() 把 (决策, 画像) 追加进去，
         由 handle() 在**回答产出后**统一派发 shadow 旁路（避免与回答链路 LLM 调用并发，
         I-20260918-01）。其余模式忽略。
+
+        identity：匿名身份（跨会话记忆）。为 None 或 DURABLE_PREFS_MODE=off 时，
+        记忆的读写全部短路，**行为与接入前逐位相同**。
         """
         await run_in_threadpool(self._store.append_message, session_id, "user", message)
 
         profile = await _load_profile(self._store, session_id)
         hints = extract_hints(message)
+        # 跨会话记忆**回填**：旧记忆先并进画像。
+        # ⚠️ 必须在下面 merge_profile(hints) **之前**——用户改了主意时，
+        # 「这一轮说的」必须压过「上次记的」。
+        # turn_hints 一并传入：回填要靠它判断「本轮的正面诉求压过记忆里的旧排除」
+        # （例如本轮说「SUV 也行」，而记忆里还挂着「不要 SUV」）。
+        await run_in_threadpool(
+            restore_into_profile, db, identity, profile, turn_hints=hints
+        )
         profile = merge_profile(profile, hints)
+        # 跨会话记忆**写入**：把本轮**明说**的线索落库。
+        # ⚠️ 只写 `hints`（= extract_hints 的结果，确定性正则抽自用户原话），
+        # **不写模型推断的**——推断猜错会静默砍掉整个候选集。
+        # off 模式下 persist_hints 直接返回空列表，**行为与接入前逐位相同**。
+        # 走线程池：里面有一次 commit（写库要落盘），别占着事件循环。
+        await run_in_threadpool(
+            persist_hints, db, identity, hints, evidence_span=message[:200]
+        )
         # L1 软偏好抽取（sales-agent-proposal §3 L1）。默认 AGENT_SOFT_PREF_MODE=off，
         # 此时下面只多一次 env 读取、**不发起任何 LLM 调用**，行为与接入前逐位相同——
         # 提案 §6 第 2 步要求「先只输出结构化、不接入回答」，先离线评测抽取质量。

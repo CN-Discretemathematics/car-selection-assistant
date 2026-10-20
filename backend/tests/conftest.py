@@ -56,6 +56,9 @@ for _router_env in (
     # 漏清会让「默认 off、行为不变」的测试在有 .env 的机器上偏移。
     "AGENT_SOFT_PREF_MODE",
     "AGENT_SOFT_PREF_TIMEOUT_MS",
+    # 跨会话偏好记忆（preferences）：同一道理——本机 .env 可能写了 on 调试值，
+    # 漏清会让「默认 off、行为与接入前逐位相同」的用例在有 .env 的机器上偏移。
+    "DURABLE_PREFS_MODE",
 ):
     os.environ.pop(_router_env, None)
 
