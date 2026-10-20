@@ -133,7 +133,10 @@ SCOPE_PATHS: dict[str, list[str]] = {
     # 此前一次 docs(sync)（f590eb2）同时改了 tools/pre-push-guard.py 与
     # skills/doc_sync_check.py 并推上远端：门禁可以改写评判自己的规则。
     # 改门禁现在必须用 chore / hygiene / skills（见 R10.2）。
-    "docs": ["docs/", "AGENTS.md", "README", "RAG.md", "LICENSE"],
+    # 2026-10-20：GLOSSARY.md（领域词表）进 docs scope。此前它不在任何 scope 的
+    # 允许路径里，导致「新增词表」这类纯文档提交只能靠 PUSH_GUARD_ALLOW 放行。
+    # 它与 AGENTS.md / README / RAG.md 同属根级规范文档，性质一致。
+    "docs": ["docs/", "AGENTS.md", "README", "RAG.md", "LICENSE", "GLOSSARY.md"],
     # 2026-10-02：docs/engineering-standards.md 等规范性文档成批落地，需要一个只覆盖
     # docs/ 的窄 scope——复用 "docs" 会顺带授权 tools/ 与 .githooks/（即门禁自身）。
     "standards": ["docs/"],
