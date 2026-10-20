@@ -34,6 +34,13 @@ class UserProfile(BaseModel):
     nice_to_have: list[str] = Field(default_factory=list)
     avoid: list[str] = Field(default_factory=list)
     weights: dict[str, float] = Field(default_factory=dict)
+    # 首要维度（2026-10-21，计划 §1.2）：用户**明确抬高**的那个维度
+    # （「我最看重动力」→ power）。只用于**文案组织**——先讲用户最在意的维度，
+    # 再讲代价；**不动打分与排序**（排序仍由 8 维软评分决定）。
+    #
+    # ⚠️ 不是「默认权重最高的维度」：默认里 budget 最高（0.30），那是评分口径，
+    # 不是用户的偏好。判据是**这一轮被抬高**的那些维度。
+    top_dim: str | None = None
     # L4 软缺口追问：已经问过用户「更看重哪一点」的维度键（space/energy/power…）。
     # 非空即**别再问**——真人销售不会把同一个问题问两遍。
     # 存的是**维度键**而不是文案：文案会改，键不会。
