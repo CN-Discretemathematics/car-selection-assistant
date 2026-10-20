@@ -60,6 +60,11 @@ def _parse_turn1(text: str) -> dict:
     m = _BUDGET_RE.search(text)
     if m:
         out["price_band"] = f"{m.group(1)}-{m.group(2)}万"
+        # **分档要按桶算**：多轮题库的需求句用**窄档**（每台车自己的价位，
+        # 否则同品牌的兄弟车会把被拒那台挤出 top-5 ⇒ 断言恒真），按原始档分层
+        # 会得到「每格 1 题」的假结论 ⇒ 分层用 5 万一桶。
+        lo = int(m.group(1))
+        out["price_bucket"] = f"{(lo // 5) * 5}-{(lo // 5) * 5 + 5}万"
     m = _BRAND_RE.search(text)
     if m:
         out["brand"] = m.group(1)
@@ -99,8 +104,8 @@ def audit(corpus: dict) -> dict:
             if len(i.get("turns", [])) > 1
         ]
         cells: Counter = Counter()
-        for p, r in zip(parsed, reasons):
-            cells[(p.get("price_band", "?"), r)] += 1
+        for p, r in zip(parsed, reasons, strict=False):
+            cells[(p.get("price_bucket", "?"), r)] += 1
         enabled = Counter(bool(i.get("enabled")) for i in items)
         report["scenarios"][name] = {
             "count": len(items),
@@ -108,7 +113,9 @@ def audit(corpus: dict) -> dict:
             "turns": dict(Counter(len(i.get("turns", [])) for i in items)),
             "variables": {
                 key: dict(Counter(p.get(key, "未解析") for p in parsed))
-                for key in ("price_band", "brand", "body", "energy", "people")
+                for key in (
+                    "price_band", "price_bucket", "brand", "body", "energy", "people",
+                )
             },
             "reject_reason": dict(Counter(reasons)),
             "strata_price_x_reason": {
@@ -240,7 +247,7 @@ def _prices_by_band(db, bands: dict[str, tuple[float, float]]) -> dict[str, list
     from app.common.models import OfficialPrice, VehicleVariant
 
     out: dict[str, list[float]] = {k: [] for k in bands}
-    for series_id, price in db.execute(
+    for _series_id, price in db.execute(
         select(VehicleVariant.series_id, OfficialPrice.price_cny)
         .join(OfficialPrice, OfficialPrice.variant_id == VehicleVariant.id)
         .where(VehicleVariant.status == "on_sale")
