@@ -367,6 +367,12 @@ async def run_scenario(
     # 什么都没发生——与「全程无推荐」同类，必须标成无效。
     seen_recommended: set[str] = set()
     vacuous: list[str] = []
+    # 按轮的恒真守卫：**带 `not_recommended` 断言的轮次若什么都没推荐**，
+    # 那台车当然不在榜 ⇒ 断言恒真。
+    # 场景级那条（「整场无推荐」）管不到这种情况：第一轮推了车、第三轮推不出来
+    # （候选集被掏空）时，第三轮的断言照样验不到任何东西——
+    # 实测：这类需求下，拒绝功能**整个缺失**的分支仍有 17/50「碰巧通过」。
+    vacuous_empty_turn: list[str] = []
 
     for idx, turn in enumerate(turns, start=1):
         user = turn.get("user") or ""
@@ -396,6 +402,12 @@ async def run_scenario(
                     vacuous.append(
                         f"第 {idx} 轮：被断言的车「{car}」此前**从未被推荐过**——"
                         f"「它不该再被推荐」恒真，断言无效"
+                    )
+                if not recommended:
+                    vacuous_empty_turn.append(
+                        f"第 {idx} 轮：断言 not_recommended({car!r}) —— "
+                        f"但本轮**什么都没推荐**（推荐列表为空），"
+                        f"「它不在榜」是白送的，断言无效"
                     )
             try:
                 check_assertion(out, assertion, db)
@@ -431,6 +443,7 @@ async def run_scenario(
             "（检查：库内该价位/车身/能源档是否真有在售车系）"
         )
     failures.extend(vacuous)
+    failures.extend(vacuous_empty_turn)
 
     return {
         "id": scenario.get("id"),
@@ -441,6 +454,7 @@ async def run_scenario(
         "passed": not failures,
         "no_recommendation": no_recommendation,
         "vacuous_assertion": bool(vacuous),
+        "vacuous_empty_turn": bool(vacuous_empty_turn),
         "failures": failures,
         "elapsed_ms": round((time.perf_counter() - started) * 1000),
         "turn_results": turn_results,
@@ -486,6 +500,8 @@ async def _run_all(
             label = "INVALID(无推荐→断言恒真)"
         elif res.get("vacuous_assertion"):
             label = "INVALID(被断言的车从未被推荐过→断言恒真)"
+        elif res.get("vacuous_empty_turn"):
+            label = "INVALID(该轮无推荐→断言恒真)"
         else:
             label = "PASS" if res["passed"] else "FAIL"
         by_kind[f"{res['scenario']}:{label}"] += 1

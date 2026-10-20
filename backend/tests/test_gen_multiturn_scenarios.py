@@ -30,18 +30,24 @@ from tests.seed import make_brand, make_series, make_source, make_variant, make_
 
 
 def _seed(db_session) -> None:
-    """种一台**符合各档**的车：比亚迪 · 轿车 · 纯电 · 15 万（12-18 万档）。"""
+    """种两台**符合各档**的车：比亚迪 · 轿车 · 纯电 · 15 万（12-18 万档）。
+
+    ⚠️ 必须种**两台**：拒绝场景要求第一轮推得出 **≥2 个车系**——
+    只有一台时，拒绝之后候选集就空了 ⇒ 第三轮「被拒那台不在榜」是白送的
+    （推荐列表空 ⇒ 那台车当然不在）⇒ 场景通过但什么都没验。
+    """
     source = make_source(db_session, name="生成器测试来源")
     brand = make_brand(db_session, name="比亚迪", source=source)
-    series = make_series(
-        db_session, brand, name="测试车系", body_type="sedan",
-        energy_types=("BEV",), source=source,
-    )
-    year = make_year(db_session, series)
-    make_variant(
-        db_session, series, year, config_version="标准版", energy_type="BEV",
-        price_cny="150000", source=source,
-    )
+    for name in ("测试车系", "测试车系二"):
+        series = make_series(
+            db_session, brand, name=name, body_type="sedan",
+            energy_types=("BEV",), source=source,
+        )
+        year = make_year(db_session, series)
+        make_variant(
+            db_session, series, year, config_version="标准版", energy_type="BEV",
+            price_cny="150000", source=source,
+        )
     db_session.commit()
 
 
@@ -56,6 +62,20 @@ def test_sampled_requirement_is_satisfiable(db_session):
         turn = gen._recommend_turn(req)
         out = asyncio.run(engine.handle(db_session, engine._store.create(), turn))
         assert out.recommended_variants, f"这句没出推荐（引擎在反问）：{turn}"
+
+
+def test_sampled_requirement_needs_multiple_candidates(db_session):
+    """抽到的需求必须**第一轮推得出 ≥2 个车系**。
+
+    只有一台车时，拒绝之后候选集就空了 ⇒ 第三轮「被拒那台不在榜」是**白送的**
+    （推荐列表空 ⇒ 那台车当然不在）⇒ 场景通过但什么都没验。
+    实测：单候选需求下，拒绝功能**整个缺失**的分支仍有 17/50「碰巧通过」。
+    """
+    _seed(db_session)
+    requirements = gen.sample_requirements(db_session, random.Random(7), 3)
+    assert requirements, "库里明明有在售车系，却一个都没抽到"
+    for req in requirements:
+        assert len(req.get("first_turn_series") or []) >= 2, req
 
 
 def test_requirement_turn_covers_every_required_dimension(db_session):

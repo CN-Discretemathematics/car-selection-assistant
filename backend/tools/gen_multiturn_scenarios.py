@@ -201,8 +201,19 @@ def sample_requirements(db, rng: random.Random, count: int) -> list[dict]:
             recommended = _recommended_series(db, _recommend_turn(cand))
         except Exception:  # noqa: BLE001 —— 单个候选验不过不该让整批失败
             continue
-        if cand["series_name"] in recommended:
-            kept.append(cand)
+        if cand["series_name"] not in recommended:
+            continue
+        # 只收**第一轮推得出 ≥2 个车系**的需求。
+        #
+        # ⚠️ 为什么（2026-10-21 实测）：第一轮只推得出**一台**车时，
+        # 拒绝之后候选集就空了 ⇒ 第三轮「被拒那台不在榜」是**白送的**
+        # （推荐列表空 ⇒ 那台车当然不在）⇒ 场景通过但什么都没验。
+        # 实测：单候选需求下，拒绝功能**整个缺失**的分支仍有 17/50「碰巧通过」。
+        # 多候选时，拒绝之后**还有别的可推** ⇒ 断言才真的在验「被拒的那台被拿掉了」。
+        if len({n for n in recommended if n}) < 2:
+            continue
+        cand["first_turn_series"] = sorted({n for n in recommended if n})
+        kept.append(cand)
     return kept
 
 

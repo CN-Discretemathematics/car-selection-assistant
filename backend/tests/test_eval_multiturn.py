@@ -457,6 +457,89 @@ def test_split_enabled_separates_disabled_scenarios():
     assert [s["id"] for s in enabled] == ["a", "c"]
     assert [s["id"] for s in disabled] == ["b"]
 
+
+# ── 按轮的恒真守卫：该轮什么都没推荐 ────────────────────────────────────────
+# 场景级那条（「整场无推荐」）管不到这种情况：第一轮推了车、第三轮推不出来
+# （候选集被掏空）时，第三轮的「它不在榜」照样验不到任何东西——
+# 实测：这类需求下，拒绝功能**整个缺失**的分支仍有 17/50「碰巧通过」。
+
+
+class _EmptyAfterFirstEngine(_FakeEngine):
+    """第一轮推一台车，之后每轮都**什么都不推**（候选集被掏空）。"""
+
+    async def handle(self, db, session_id, message, **kwargs):  # noqa: ANN001
+        self.calls.append((session_id, message, kwargs.get("identity")))
+        if len(self.calls) == 1:
+            return AgentMessageOut(
+                session_id=session_id,
+                recommended_variants=[
+                    RecommendedVariant(
+                        variant_id=1, series_id=1, series_name="在场车系",
+                        brand_name="在场品牌", display_name="在场品牌在场车系",
+                        energy_type="BEV", score=1.0,
+                    )
+                ],
+                explanation="第一轮推一台",
+            )
+        return AgentMessageOut(session_id=session_id, explanation="这一轮没推车")
+
+
+class _RecommendingEngine(_FakeEngine):
+    """每轮都推一台**别的**车（推荐列表非空）。"""
+
+    async def handle(self, db, session_id, message, **kwargs):  # noqa: ANN001
+        self.calls.append((session_id, message, kwargs.get("identity")))
+        return AgentMessageOut(
+            session_id=session_id,
+            recommended_variants=[
+                RecommendedVariant(
+                    variant_id=2, series_id=2, series_name="别的车系",
+                    brand_name="别的品牌", display_name="别的品牌别的车系",
+                    energy_type="BEV", score=1.0,
+                )
+            ],
+            explanation="推了别的车",
+        )
+
+
+def test_not_recommended_on_an_empty_turn_is_invalid(monkeypatch, db_session: Session):
+    """带 `not_recommended` 断言的那一轮**什么都没推荐** ⇒ 该轮断言无效。"""
+    engine = _EmptyAfterFirstEngine()
+    store = _FakeStore()
+    _patch_engine(monkeypatch, engine, store)
+
+    scenario = {
+        "id": "x6",
+        "scenario": "reject_then_no_recommend",
+        "turns": [
+            {"user": "预算20万，通勤，两三个人", "assert": []},
+            {"user": "再推荐几款", "assert": [{"type": "not_recommended", "car": "在场车系"}]},
+        ],
+    }
+    res = asyncio.run(mt.run_scenario(db_session, scenario))
+
+    assert res["vacuous_empty_turn"] is True, res
+    assert res["passed"] is False
+    assert any("什么都没推荐" in f for f in res["failures"]), res["failures"]
+
+
+def test_non_empty_turn_with_not_recommended_is_not_flagged(monkeypatch, db_session: Session):
+    """同一场景里，只要那一轮**推了别的车**，断言就不算恒真。"""
+    engine = _RecommendingEngine()
+    store = _FakeStore()
+    _patch_engine(monkeypatch, engine, store)
+
+    scenario = {
+        "id": "x7",
+        "scenario": "reject_then_no_recommend",
+        "turns": [
+            {"user": "预算20万，通勤，两三个人", "assert": []},
+            {"user": "再推荐几款", "assert": [{"type": "not_recommended", "car": "被拒车系"}]},
+        ],
+    }
+    res = asyncio.run(mt.run_scenario(db_session, scenario))
+    assert res["vacuous_empty_turn"] is False, res
+
 # 此前用裸字符串 `mentions '10'` / `not_mentions '12'`：预算值在正文里必然与
 # **车价**混在一起（12-18 万档里有 12.99 万的车），于是两个方向都会误判：
 # 「不提到 12」把正确答案判成失败（假否定），「提到 10」也会因推荐了 8.28 万而失败。
