@@ -366,8 +366,8 @@ C1/C2/H5/H10 已于 2026-10-02 / 2026-10-04 完成；H5 的**回归守卫**于 2
 | `vehicles/router.py:41` 下推 SQL 过滤 | 须保持与 `/home`、详情页一致的口径 |
 | `engine.py` 8 次串行 `set_profile` | ✅ **已部分收敛**（P5.4 / M4）：3 次连续写合并为 1 次无条件写，8 → 6。剩余 6 处职责互不替代，再合并会改变「退路分支也持久化」的语义 |
 | H6 `MOBILE_UA` → 诚实爬虫 UA | ✅ **已修并实测**（2026-10-03，3/3 车系成功）：这是**合规修复**，不是风格调整 |
-| 库层补重试（退避+抖动） | 消除 tools/app 两处重复实现 |
-| H7 compare 请求瀑布 | 合并端点或并行；后端消除重复 `analyze_comparison` |
+| 库层补重试（退避+抖动） | ✅ **已修（2026-10-21）**：重试策略收敛到 `app/sources/autohome_sku.py::fetch_with_retry`（指数退避 + 抖动 + 只重试瞬时错误），tools 层三处固定 3s 循环改为委托，消除两处重复实现 |
+| H7 compare 请求瀑布 | ✅ **已修（2026-10-21）**：前端复核后**并非** 4 请求串行（已是两条并行分支）；真正的问题是后端每次查看把 `analyze_comparison` 完整跑两遍（面板结论 + LLM 点评要同一份）→ 加**短 TTL 缓存**（30s）。⚠️ 不改成「前端把分析传回来」——那份数据要进 LLM 提示词，客户端提供事实 = 允许伪造 |
 | H8/H9 ops/rag 轮询泄漏 + tab 永久加载 | ✅ **已完成**（2026-10-03）：`useAsyncData` + `LoadError` 统一 4 个 tab，H8 的真实竞态按 `mountedRef` 守卫修（审计记的机制不成立，见缺陷台账） |
 | 前端 `next/link` / `compare-changed` 订阅 / 筛选 resync / `localStorage` 保护 / 路由级 `error.tsx` | ✅ **已完成**（2026-10-03，5 笔提交）：分页改 `next/link`（跳页表单保留原生 GET，理由见缺陷表）、对比按钮改为 localStorage 的投影、筛选表单跟随 URL、`writeCompareIds` 补 try/catch 并返回 boolean（此前**只防读不防写**）、新增根级 `web/app/error.tsx`（此前渲染出错会掉进框架通用错误页，站点外壳全丢且无恢复入口）。每项都配了**反向验证过会红**的契约测试 |
 | `Reveal.tsx` 客户端组件下沉 | 约 40 个实例 / 40 个 observer → 单个共享 observer 或 CSS `animation-timeline: view()`。**诚实定位：中等 hydration 收益，不是整页 SSR 救赎** |
@@ -480,7 +480,7 @@ $env:RETRIEVAL_BACKEND='inmemory'
 | 序 | 项 | 收益 | 成本 |
 | --- | --- | --- | --- |
 | P6.1 | `tools/` 8 份 CLI 样板 → 计划新增 `tools/_bootstrap.py` | 重复率 −约 3pt；消除 96 处 `E402` 根因 | 极低 |
-| P6.2 | 「最新销量」口径 3 份收口 | −约 1pt；**防口径漂移** | 低 |
+| P6.2 | 「最新销量」口径 3 份收口 | ✅ **已修（2026-10-21）**：同一件事此前有 **3 份** `max(MonthlySales.month)`（`rag/ingest.py` / `rag/service.py` / `tools/build_retrieval_index.py`），而**口径并不相同**（有的带 sales_type 过滤、有的不带；有的回退、有的不回退）——同一件事三份实现 = 迟早漂。现全部收口到 `app/catalog/services.py`（`latest_sales_month` 用户侧 / `latest_sales_month_strict` 不回退且口径可选），**语义逐条保持不变**；AST 漂移守卫钉住「除 services.py 外不得再自己写这个查询」 | 低（已完成） |
 | P6.3 | `analyze_comparison` 嵌套拆平 | 圈复杂度 148 → ≤ 30 | 中（与 P3.3 同 PR） |
 | P6.4 | `fetcher.py:111`、`importer.py:169` 真长参数列表 | 参数指标 | 低 |
 | P6.5 | 前端页脚/卡片块提取 | −约 2pt | 低 |
