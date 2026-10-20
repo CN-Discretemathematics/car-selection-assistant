@@ -27,10 +27,12 @@ from app.catalog.series_index import (
     display_name,
     rank_headlines,
     head_with_size,
+    resolve_variants,
     series_fact_rows,
     size_line,
     size_lines,
     series_headline,
+    variant_fact_rows,
 )
 from app.common.enums import MISSING_VALUE_LABEL, expand_energy_prefs
 from app.common.models import Brand, SpecFact, VehicleSeries, VehicleVariant
@@ -805,6 +807,19 @@ def _brand_disclosure(
     return f"\n{detail}——它不是一款车。想比哪一款？把车系名给我{hint}，我就能比。"
 
 
+def _variant_label(series: VehicleSeries, brand: Brand | None, variant: VehicleVariant) -> str:
+    """款型在回答里的称呼。
+
+    库里的款型显示名**不含车系名**（「2026款 标准版」），单独出现在回答里用户
+    认不出是哪台车 → 车系名不在显示名里时补上。
+    """
+    name = (variant.display_name or "").strip()
+    series_name = display_name(series, brand)
+    if series_name and series_name not in name:
+        return f"{series_name} {name}".strip()
+    return name
+
+
 def build_series_qa_answer(
     db: Session,
     resolved: list[tuple[VehicleSeries, Brand | None]],
@@ -821,6 +836,19 @@ def build_series_qa_answer(
         "动态驾驶感受、车主口碑与优惠信息不在数据范围内，具体以品牌官网为准。"
     )
 
+    # D1.1 款型名上下文消歧：用户点名了款型（「IONIQ 5 N 2026款 标准版 的轴距」）时，
+    # 参数要答**那个款型**的值，而不是把全系多档值并列给用户（答非所问）。
+    # 消歧不确定时 `variants` 为空 → 退回全系口径（宁可粗一点，不可认错款型）。
+    variants = resolve_variants(db, message, resolved)
+    # 同一车系被点名了**多个款型**时不收窄：那种问法（「A 的 X 款 和 Y 款 差在哪」）
+    # 要看的是款型之间的差异，把参数列收窄到其中一个款型，反而把另一个款型的值藏起来——
+    # 而那几个值**正是差异的来源**（实测：领克08 EM-P 两款型对比，多档值反而消失了）。
+    by_series: dict[int, list[VehicleVariant]] = {}
+    for variant, series in variants:
+        by_series.setdefault(series.id, []).append(variant)
+    variant_by_series = {sid: vs[0] for sid, vs in by_series.items() if len(vs) == 1}
+    variant_facts = variant_fact_rows(db, [v.id for v, _s in variants])
+
     if len(resolved) == 1:
         series, brand = resolved[0]
         # 2026-10-05（N5）：此前是 `关于「X」：` + `_describe()`，而 `_describe()`
@@ -831,9 +859,18 @@ def build_series_qa_answer(
         parts = [_describe(db, series, brand)]
         # 按需参数查找（评审 M-R10）：提问命中的维度从全量 DB 事实直接取值
         facts = series_fact_rows(db, [series.id]).get(series.id, [])
+        qualifier = ""
+        variant = variant_by_series.get(series.id)
+        if variant is not None:
+            rows = variant_facts.get(variant.id) or []
+            # ⚠️ 该款型在库里**一条事实都没有**时不收窄：否则「该款型没收录参数」
+            # 会变成一句「官方资料未披露」——那是**假否定**（同系别的款型明明有）。
+            if rows:
+                facts = rows
+                qualifier = f"（按「{_variant_label(series, brand, variant)}」）"
         probed = probe_facts(facts, message)
         if probed:
-            parts.append("你问到的相关参数：" + "；".join(probed) + "。")
+            parts.append("你问到的相关参数" + qualifier + "：" + "；".join(probed) + "。")
         missing_dims = missing_param_labels(facts, message)
         if missing_dims:
             # 诚实性兜底（评测 v3）：问到的维度 DB 完全没有 → 显式「官方资料未披露」，
@@ -870,9 +907,16 @@ def build_series_qa_answer(
             )
         # 按需参数查找（评审 M-R10）：对比语境下同样回答问到的具体参数
         series_facts = facts_by_series.get(series.id, [])
+        qualifier = ""
+        variant = variant_by_series.get(series.id)
+        if variant is not None:
+            rows = variant_facts.get(variant.id) or []
+            if rows:
+                series_facts = rows
+                qualifier = f"（按「{_variant_label(series, brand, variant)}」）"
         probed = probe_facts(series_facts, message)
         if probed:
-            blocks.append("  你问到的相关参数：" + "；".join(probed))
+            blocks.append("  你问到的相关参数" + qualifier + "：" + "；".join(probed))
         # 诚实性兜底对齐单车系路径（评审 C11）：某车系在问到的维度/按键上无数据时
         # 显式标注，不沉默跳过
         missing_dims = missing_param_labels(series_facts, message)
