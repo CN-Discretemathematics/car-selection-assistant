@@ -105,18 +105,34 @@ ENERGY_WORDS: dict[str, str] = {
 BODY_WORDS: dict[str, str] = {"sedan": "轿车", "suv": "SUV", "mpv": "MPV"}
 
 
-def _band_for(price: float) -> tuple[int, int]:
-    """该价格所在的**窄**预算档（万元）：floor 到 ceil。
+#: 校验「追问后还有新的一批」时用的拒绝理由。
+#:
+#: 为什么固定一个：拒绝理由若夹带会改约束的词（预算/能源/品牌），引擎会顺着改，
+#: 候选池随之变化 ⇒ 校验结果与题库实际用的理由不一致。
+#: 实测（2026-10-21）：8 个理由的「第三轮那台车回来率」**完全一样**（13/20）
+#: ⇒ 理由不是变量，池子大小才是。
+_VERIFY_REJECT_REASON = "空间不够"
 
-    为什么窄：档宽时（如 8-12 万）同价位的兄弟车太多，被抽中的那台可能
-    压根不在 top-5 ⇒「它不该再被推荐」**恒真**（实测：宽档下 43/50 通过、
-    7 条恒真——那 7 条正是「被拒的车是同品牌的兄弟，没进榜」）。
-    窄档把候选压到个位数 ⇒ 被拒的那台确实在榜里，断言才真的在验行为。
+
+def _band_for(price: float) -> tuple[int, int]:
+    """该价格所在的预算档（万元）：floor 到 ceil，两侧各放宽 2 万。
+
+    为什么**窄档会把断言压成恒真**：档宽时（如 8-12 万）同价位的兄弟车太多，
+    被抽中的那台可能压根不在 top-5 ⇒「它不该再被推荐」**恒真**
+    （实测：宽档下 43/50 通过、7 条恒真——那 7 条正是「被拒的车是同品牌的兄弟，没进榜」）。
+
+    为什么**不是 1 万窄档**（2026-10-21 修正）：窄档把候选压到个位数
+    （实测候选池**中位数 3**，44/50 的需求**没有下一批**可推）⇒
+    「再推荐几款」之后候选集已空 ⇒ 拒绝场景的第三轮**推不出任何车**
+    ⇒ 断言无对象可验（被按轮守卫判无效）。
+    ⇒ 两侧各放宽 2 万后候选池**中位数 13**，84% 的需求留得下下一批 ✓。
+    窄到个位数与宽到几十台之间没有别的档：**再窄**验不了「被拒的不再推」，
+    **再宽**验不了「被拒的那台在榜里」，这个宽度是两头都要的平衡点。
     """
     wan = price / 10000
     lo = int(wan)
     hi = lo if abs(wan - lo) < 1e-6 else lo + 1
-    return (lo, hi)
+    return (max(1, lo - 2), hi + 2)
 
 
 def _recommended_series(db, turn: str) -> list[str]:
@@ -213,8 +229,65 @@ def sample_requirements(db, rng: random.Random, count: int) -> list[dict]:
         if len({n for n in recommended if n}) < 2:
             continue
         cand["first_turn_series"] = sorted({n for n in recommended if n})
+        # 再验一次：追问「再推荐几款」之后**必须还有新的一批**（2026-10-21）。
+        #
+        # 引擎现在会把**已经展示过的车系**排掉 ⇒ 候选池不够大时，第三轮**推不出车**，
+        # 第三轮的断言就没有对象可验（实测：池子中位数 3 时拒绝场景 49 → 4）。
+        # ⇒ 只收「追问后还有新的一批」的需求。
+        #
+        # ⚠️ 这条校验**依赖引擎的「排除已展示」能力**：没有该能力时（Phase 1 之前）
+        # 追问会推回同一批，校验会把**所有**候选都判掉 ⇒ 探测能力、缺能力则跳过。
+        if _engine_supports_shown_exclusion() and not _reask_yields_new_cars(
+            db, cand, recommended
+        ):
+            continue
         kept.append(cand)
     return kept
+
+
+def _engine_supports_shown_exclusion() -> bool:
+    """引擎是否支持「排除已展示过的车系」（画像里有 `shown_series_ids`）。"""
+    from app.agent.schemas import UserProfile
+
+    return "shown_series_ids" in UserProfile.model_fields
+
+
+def _reask_yields_new_cars(db, req: dict, first_turn: list[str]) -> bool:
+    """追问「再推荐几款」之后是否**还有新的一批**车可推。
+
+    跑**真实引擎**，且照搬题库的三轮时序：需求 → 拒绝 → 追问。
+    ⚠️ 必须带上「拒绝」那一轮：拒绝轮也会展示一批车，
+    而「已展示过的车系」是**累积**的 ⇒ 两轮累计起来的排除量比一轮大
+    （实测：只按两轮校验时，第三轮仍有 15/50 推不出车）。
+
+    引擎不支持拒绝时（Phase 1 之前）跳过拒绝轮，按两轮校验。
+    """
+    import asyncio
+
+    from app.agent.engine import get_agent_engine
+    from app.agent.session import get_session_store
+
+    engine = get_agent_engine()
+    store = get_session_store()
+    sid = store.create()
+    out1 = asyncio.run(engine.respond(db, sid, _recommend_turn(req)))
+    names1 = {v.series_name for v in out1.recommended_variants or []}
+    if req["series_name"] not in names1:
+        return False
+    if _engine_supports_rejection():
+        asyncio.run(
+            engine.respond(db, sid, f"{req['series_name']}不要，{_VERIFY_REJECT_REASON}")
+        )
+    out_last = asyncio.run(engine.respond(db, sid, "再推荐几款"))
+    names_last = {v.series_name for v in out_last.recommended_variants or []}
+    return bool(names_last) and not (names1 & names_last)
+
+
+def _engine_supports_rejection() -> bool:
+    """引擎是否支持「拒绝后不再推」（画像里有 `rejected_variant_ids`）。"""
+    from app.agent.schemas import UserProfile
+
+    return "rejected_variant_ids" in UserProfile.model_fields
 
 
 def _recommend_turn(req: dict) -> str:
