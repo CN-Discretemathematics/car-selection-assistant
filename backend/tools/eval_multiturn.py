@@ -61,6 +61,8 @@ ASSERT_KINDS = {
     "recommended": "回答应包含该车系",
     "mentions": "回答应提到该关键词",
     "not_mentions": "回答不应提到该关键词",
+    "budget_in": "回答采用的预算口径应是该区间",
+    "budget_not_in": "回答采用的预算口径不应是该区间",
 }
 
 
@@ -146,6 +148,52 @@ def _car_needles(car: str, db: Session | None = None) -> list[str]:
     return [n for n in needles if n]
 
 
+def _budget_range(out: Any) -> tuple[float | None, float | None]:
+    """本轮回答采用的**预算口径**（结构化字段：`AgentMessageOut.filters`）。
+
+    为什么不用正文里的数字：预算值在正文里必然与**车价**混在一起
+    （12-18 万档里有 12.99 万的车，答案里合法地出现「12」），
+    拿裸字符串判「提到/没提到预算」会**双向误判**——
+    「不提到 12」会把正确答案判成失败，「提到 10」也会因为推荐了 8.28 万而判失败。
+    """
+    filters = getattr(out, "filters", None) or {}
+    lo = filters.get("budget_min")
+    hi = filters.get("budget_max")
+    return (
+        float(lo) if lo is not None else None,
+        float(hi) if hi is not None else None,
+    )
+
+
+#: 预算口径的比较容差（元）：回答里的口径来自用户原话（8-12 万 → 80000/120000），
+#: 但引擎可能按「不超过」口径微调（如上界取整到万），留 1000 元的余量。
+_BUDGET_TOLERANCE = 1000.0
+
+
+def _check_budget_assertion(out: Any, assertion: dict, kind: str) -> None:
+    """预算类断言：查**结构化口径**，不查正文（见 `_budget_range` 的理由）。"""
+    lo = assertion.get("min")
+    hi = assertion.get("max")
+    if lo is None or hi is None:
+        raise AssertionFailed(f"{kind} 断言缺 min/max 字段")
+    got_lo, got_hi = _budget_range(out)
+    if got_lo is None or got_hi is None:
+        matched = False
+    else:
+        matched = (
+            abs(float(got_lo) - float(lo)) <= _BUDGET_TOLERANCE
+            and abs(float(got_hi) - float(hi)) <= _BUDGET_TOLERANCE
+        )
+    if kind == "budget_in" and not matched:
+        raise AssertionFailed(
+            f"{kind}：{assertion!r} —— 但本轮预算口径是 {got_lo}~{got_hi}"
+        )
+    if kind == "budget_not_in" and matched:
+        raise AssertionFailed(
+            f"{kind}：{assertion!r} —— 但本轮预算口径仍是 {got_lo}~{got_hi}"
+        )
+
+
 def check_assertion(
     out: Any, assertion: dict, db: Session | None = None
 ) -> None:
@@ -176,6 +224,10 @@ def check_assertion(
             raise AssertionFailed(f"{kind}：{assertion!r} —— 但它不在推荐列表里")
         return
 
+    if kind in ("budget_in", "budget_not_in"):
+        _check_budget_assertion(out, assertion, kind)
+        return
+
     word = assertion.get("word")
     if not word:
         raise AssertionFailed(f"{kind} 断言缺 word 字段")
@@ -184,7 +236,6 @@ def check_assertion(
         raise AssertionFailed(f"{kind}：{assertion!r} —— 但回答里提到了")
     if kind == "mentions" and not hit:
         raise AssertionFailed(f"{kind}：{assertion!r} —— 但回答里没提到")
-
 
 async def run_scenario(
     db: Session, scenario: dict, *, llm_available: bool = True

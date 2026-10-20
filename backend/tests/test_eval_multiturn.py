@@ -221,3 +221,51 @@ def test_scenario_with_recommendation_is_not_flagged(db_session: Session):
     # 关键断言是**字段存在且类型正确**，而不是具体值。
     assert isinstance(res["no_recommendation"], bool)
     assert "no_recommendation" in res
+
+
+# ── 预算类断言（2026-10-21：改查结构化口径）──────────────────────────────
+# 此前用裸字符串 `mentions '10'` / `not_mentions '12'`：预算值在正文里必然与
+# **车价**混在一起（12-18 万档里有 12.99 万的车），于是两个方向都会误判：
+# 「不提到 12」把正确答案判成失败（假否定），「提到 10」也会因推荐了 8.28 万而失败。
+# 分布审计实测：删记忆场景 **50/50 条**断言全中这一枪。
+
+
+def _out_with_budget(min_budget: float | None, max_budget: float | None) -> AgentMessageOut:
+    return AgentMessageOut(
+        session_id="s",
+        explanation="推荐一辆车，官方指导价 12.99 万元。",
+        filters={"budget_min": min_budget, "budget_max": max_budget},
+    )
+
+
+def test_budget_in_passes_when_the_range_matches():
+    out = _out_with_budget(80000.0, 120000.0)
+    mt.check_assertion(out, {"type": "budget_in", "min": 80000, "max": 120000})
+
+
+def test_budget_in_fails_when_the_range_differs():
+    out = _out_with_budget(None, None)
+    with pytest.raises(mt.AssertionFailed):
+        mt.check_assertion(out, {"type": "budget_in", "min": 80000, "max": 120000})
+
+
+def test_budget_not_in_passes_when_the_range_is_gone():
+    """删掉预算后口径应为空 → `budget_not_in` 成立。
+
+    注意正文里写着「12.99 万」——**旧写法会在这里判失败**（假否定）。
+    """
+    out = _out_with_budget(None, None)
+    mt.check_assertion(out, {"type": "budget_not_in", "min": 120000, "max": 180000})
+
+
+def test_budget_not_in_fails_when_the_range_is_still_there():
+    out = _out_with_budget(120000.0, 180000.0)
+    with pytest.raises(mt.AssertionFailed):
+        mt.check_assertion(out, {"type": "budget_not_in", "min": 120000, "max": 180000})
+
+
+def test_budget_assert_ignores_the_free_text():
+    """正文里出现预算数字**不该**影响判定（判据是结构化口径）。"""
+    out = _out_with_budget(None, None)
+    out.explanation = "预算 12 万的汉L，官方指导价 12.99 万元"
+    mt.check_assertion(out, {"type": "budget_not_in", "min": 120000, "max": 180000})

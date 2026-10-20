@@ -153,7 +153,7 @@ def gen_returning_scenarios(rng: random.Random, count: int) -> list[dict]:
         body_cn, _body = rng.choice(BODY_TYPES)
         energy_cn, _e = rng.choice(ENERGY)
         passengers = rng.choice(PASSENGERS)
-        lo_w, hi_w, desc = budget
+        lo, hi, _desc = budget
 
         out.append(
             {
@@ -172,7 +172,11 @@ def gen_returning_scenarios(rng: random.Random, count: int) -> list[dict]:
                         # 新会话：回访用户的画像应被自动带回
                         "user": "按我之前说的条件推荐",
                         "assert": [
-                            {"type": "mentions", "word": desc},
+                            # 查**结构化口径**（response.filters 的预算区间），
+                            # 不查正文裸字符串——正文里的预算必然与车价混在一起
+                            # （12-18 万档有 12.99 万的车），裸字符串会双向误判
+                            # （实测：删记忆场景 50/50 条断言会误伤正确答案）
+                            {"type": "budget_in", "min": lo, "max": hi},
                         ],
                         "session": "second",
                     },
@@ -191,7 +195,7 @@ def gen_memory_deleted_scenarios(rng: random.Random, count: int) -> list[dict]:
         body_cn, _body = rng.choice(BODY_TYPES)
         energy_cn, _e = rng.choice(ENERGY)
         passengers = rng.choice(PASSENGERS)
-        lo_w, hi_w, desc = budget
+        lo, hi, _desc = budget
 
         out.append(
             {
@@ -210,7 +214,11 @@ def gen_memory_deleted_scenarios(rng: random.Random, count: int) -> list[dict]:
                         # 删掉预算后，下一轮不应再按该预算筛
                         "user": "现在推荐一台车",
                         "assert": [
-                            {"type": "not_mentions", "word": desc},
+                            # 查**结构化口径**（response.filters 的预算区间）：
+                            # 裸字符串 `not_mentions '12'` 会被合法车价误伤
+                            # （12-18 万档有 12.99 万的车 ⇒ 答案里的「12」判成失败），
+                            # 实测 50/50 条断言全中这一枪 ⇒ 假否定 ⇒ 低估能力
+                            {"type": "budget_not_in", "min": lo, "max": hi},
                         ],
                         "session": "second",
                     },
