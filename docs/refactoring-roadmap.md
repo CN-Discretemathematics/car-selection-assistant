@@ -284,7 +284,7 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `backend/app/agent/series_qa.py:390-400` | 多车系路径硬编码只处理 2 个车系（解析层最多返回 4 个）—— ✅ **已修**（2026-10-05，PR #70 的 `0ae87be`）：对比行由 `values[0] vs values[1]` 改为对全部车系 `" vs ".join(values)`（现 `series_qa.py:637`），开头与小结的「两款车」改为按 N 选措辞（`_count_phrase`），三车及以上改用 `_summary_for_many` 报整体跨度；`tests/test_multi_series_compare.py` 端到端钉住（台账第三十节 (e)） |
 | `backend/app/agent/session.py`（`_prune`） | ✅ **已修**：`_prune()` 曾是 O(n) 且**每次操作都跑**、活跃 session 无上限。现改为**节流**（30s 窗口）+ **硬上限** `MAX_SESSIONS = 2000`（超限按最久未活跃淘汰，与 TTL 同一把尺子）；`tests/test_session_store_bounds.py` 钉住 |
 | `backend/app/agent/llm_router.py:135` | 模块级 LRU 无 prompt 版本键，prompt 改了旧判定活到重启 —— ✅ **已修**：key 并入 `ROUTER_VERSION`，改提示词时 +1 即自然失效（未加 TTL：容量已有 LRU 淘汰，且路由裁决的时效性问题用版本键解决更直接） |
-| `backend/app/sources/autohome_sku.py:112,123` | 库层零重试；tools 层固定 3s、无退避无抖动 |
+| `backend/app/sources/autohome_sku.py`（`fetch_series_index` / `fetch_sku_config`）+ `backend/tools/fetch_autohome_sku.py` | ✅ **已修（2026-10-21）**：**库层零重试**（一次失败就抛），tools 层三处各写一个循环、**固定 `sleep(3.0)`、无退避无抖动**，且**什么都重试**（404、参数错、解析失败也重试 3 次）；两层还各自重试 → 叠加成 3×3=9 次请求。修法：重试策略**收敛到库层一处**（`fetch_with_retry` + `is_transient_error`）——指数退避 + **抖动**（多进程/多阶段同时重试不会整齐地打在对方同一刻）、**只重试瞬时错误**（超时/5xx/429/响应体截断），确定性错误立刻失败；tools 层三处改为委托。⚠️ 行为变更（知情选择）：确定性错误从「重试 3 次」变成「立刻失败」——抓取链路不丢收敛，失败会记进 checkpoint，下一轮照样重试 |
 | `backend/app/retrieval/zilliz.py:302-305` | 缓存 key 在 embedder 无 `model` 属性时回落为字面量 `"embed"` |
 | `backend/app/vehicles/router.py:41-115` | 全表载入后 Python 过滤分页（无 SQL 下推） |
 | `web/app/components/AddToCompareButton.tsx:10` | ✅ **已修**（2026-10-03）：未订阅 `compare-changed`，自建第二份状态 → **文案说移除、行为是加回**。从对比栏移除后按钮仍显示「已加入对比」，再点走的是「重新加入」分支，用户点几次都删不掉 |

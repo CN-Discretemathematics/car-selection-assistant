@@ -12,12 +12,21 @@ industry_data（公开行业数据）且 verified_status=unverified。
 """
 from __future__ import annotations
 
+import http.client
 import json
+import logging
+import random
 import re
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
+from typing import Any
 
 from app.sources.fetcher import DEFAULT_USER_AGENT
+
+_logger = logging.getLogger("app.sources.autohome_sku")
 
 INDEX_URL_TEMPLATE = "https://www.autohome.com.cn/grade/carhtml/{letter}.html"
 SKU_API = "https://car-web-m.autohome.com.cn/car/param/getParamConf"
@@ -125,13 +134,87 @@ def decode_autohome_html(raw: bytes, content_type: str = "") -> str:
     raise ValueError("页面解码失败（存在替换字符），可能为未知编码")
 
 
+# ── 重试策略（2026-10-21，修 P4 缺陷台账 M 项）────────────────────────────
+#
+# 此前：库层**零重试**（`fetch_series_index` / `fetch_sku_config` 一次失败就抛），
+# tools 层三处各写一个循环，**固定 sleep 3s、无退避、无抖动**，且**什么都重试**
+# （404、参数错、解析失败也重试 3 次）。
+#
+# 现改为**一处**实现：
+# - 库层自己兜住网络抖动（调用方不必各自写循环，也不会出现「库层调 tools 层」的反向依赖）；
+# - 指数退避 + **抖动**：多进程/多阶段同时重试时不会整齐地打在对方同一刻；
+# - **只重试瞬时错误**：确定性错误立刻失败——重试 3 次也是同样结果，
+#   只是把对方的限流阈值撞得更狠（且抓取链路本来就有 checkpoint 收敛循环兜底）。
+#
+# 行为变更（知情选择）：确定性错误从「重试 3 次」变成「立刻失败」。
+# 抓取链路不丢收敛——失败会记进 checkpoint，下一轮照样重试。
+
+#: 重试次数（含首次）。
+RETRY_ATTEMPTS = 3
+#: 退避基数（秒）：第 n 次等待 = base * 2^(n-1)，上限 `RETRY_MAX_DELAY`。
+RETRY_BASE_DELAY = 1.0
+#: 单次等待上限（秒）。
+RETRY_MAX_DELAY = 30.0
+#: 抖动比例：在退避值上叠加 0~30% 的随机。
+RETRY_JITTER = 0.3
+
+
+def is_transient_error(err: BaseException) -> bool:
+    """这个错误值得重试吗？
+
+    只重试**瞬时**错误：超时、连接被重置、5xx、429、响应体被截断。
+    确定性错误（404、参数错、业务返回码非 0）立刻失败。
+    """
+    if isinstance(err, urllib.error.HTTPError):
+        return err.code in (408, 425, 429, 500, 502, 503, 504)
+    if isinstance(err, urllib.error.URLError):
+        reason = getattr(err, "reason", None)
+        return isinstance(reason, (TimeoutError, OSError))
+    if isinstance(err, (TimeoutError, ConnectionError, OSError, http.client.HTTPException)):
+        return True
+    # 响应体被截断——网络症状，不是格式错
+    return isinstance(err, json.JSONDecodeError)
+
+
+def fetch_with_retry(
+    fn: Callable[[], Any],
+    *,
+    attempts: int = RETRY_ATTEMPTS,
+    base_delay: float = RETRY_BASE_DELAY,
+    max_delay: float = RETRY_MAX_DELAY,
+    label: str = "",
+) -> Any:
+    """调用 `fn()`；瞬时失败按**指数退避 + 抖动**重试。
+
+    `fn` 必须是**幂等**的（只发一次请求、不写库）——重试会重复调用它。
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as err:  # noqa: BLE001
+            if attempt >= attempts or not is_transient_error(err):
+                raise
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            delay += random.uniform(0, delay * RETRY_JITTER)
+            _logger.info(
+                "%s 第 %d 次失败（%s: %s），%.1fs 后重试",
+                label or "抓取", attempt, type(err).__name__, err, delay,
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def fetch_series_index(letter: str) -> tuple[str, str]:
     """抓取一个字母的品牌车系索引页 → (html, url)。"""
     url = INDEX_URL_TEMPLATE.format(letter=letter.upper())
-    req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        html = decode_autohome_html(resp.read(), resp.headers.get("Content-Type") or "")
-    return html, url
+
+    def _once() -> tuple[str, str]:
+        req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            html = decode_autohome_html(resp.read(), resp.headers.get("Content-Type") or "")
+        return html, url
+
+    return fetch_with_retry(_once, label=f"车系索引 {letter}")
 
 
 # ── 参数配置接口（SKU） ──────────────────────────────────────────
@@ -139,20 +222,25 @@ def fetch_series_index(letter: str) -> tuple[str, str]:
 def fetch_sku_config(series_id: str) -> dict:
     """抓取一个车系的参数配置（getParamConf）并解析为结构化字典。"""
     params = urllib.parse.urlencode({"site": 1, "seriesid": series_id})
-    req = urllib.request.Request(
-        SKU_API + "?" + params,
-        headers={
-            "User-Agent": _SKU_UA,
-            "Referer": SKU_PAGE_TEMPLATE.format(seriesid=series_id),
-            "Accept": "application/json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        raw = resp.read()
-    data = json.loads(raw)
-    if data.get("returncode") not in (0, "0"):
-        raise ValueError(f"接口返回错误：{data.get('message')}")
-    return parse_sku_config(data.get("result") or {})
+    url = SKU_API + "?" + params
+
+    def _once() -> dict:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": _SKU_UA,
+                "Referer": SKU_PAGE_TEMPLATE.format(seriesid=series_id),
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read()
+        data = json.loads(raw)
+        if data.get("returncode") not in (0, "0"):
+            raise ValueError(f"接口返回错误：{data.get('message')}")
+        return parse_sku_config(data.get("result") or {})
+
+    return fetch_with_retry(_once, label=f"参数配置 {series_id}")
 
 
 def parse_sku_config(result: dict) -> dict:
