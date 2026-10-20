@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.schemas import UserProfile
 from app.agent.series_qa import should_answer
-from app.catalog.brands import brand_entries
+from app.catalog.brands import brand_entries, is_ambiguous_brand
 from app.catalog.series_index import normalize_name
 
 # ── 意图路由正则（自 engine.py 原样迁移，定义不变）──────────────────────────
@@ -204,10 +204,14 @@ _CAR_CONTEXT_RE = re.compile(
 # 泛消费电子/无关品类 denylist：单字「车/配置」会误命中「车厘子」「手机配置」（第三轮审查 L2）
 # 注意：**不要用单字词**（曾写「表」「房」，把「销量表现」误判成非汽车话题；2026-09-15 实测）
 _NON_CAR_RE = re.compile(r"(手机|电脑|相机|耳机|平板|笔记本|车厘子|化妆品|房产|二手房|手表|股票|基金)")
-# 易混短品牌名（既是品牌也是日常词）：见 mentions_known_brand 的说明
-_AMBIGUOUS_BRAND_NAMES = frozenset(
-    {"大众", "现代", "银河", "北京", "长安", "理想", "未来", "启辰", "东风", "红旗", "长城"}
-)
+# 易混短品牌名（既是品牌也是日常词）：见 mentions_known_brand 的说明。
+#
+# 2026-10-20 单一归属：此前本文件持有一份 11 词的本地副本，
+# 而 `catalog/brands.py` 另有一份 6 词的表——**同一个知识切成两半**，
+# 导致硬约束路径与语境路径对同一个词给出不同判定。
+# 现在词表统一由 `app.catalog.brands` 持有（`BRAND_AMBIGUITY`），
+# 本模块只保留**语境用途的规则**（需句中另有汽车信号）。
+# 硬约束用途的规则仍归 `brands.resolve_brand_mentions` 所有。
 
 
 def is_chatty(message: str) -> bool:
@@ -351,16 +355,18 @@ def mentions_known_brand(db: Session, message: str) -> bool:
     **易混短名排除**（第三轮审查 M1）：`大众/现代/银河/北京/长安` 既是品牌也是日常词
     （「大众化」「现代人」「银河系」「北京堵车」），2 字子串匹配必然误命中；这些名字
     只在句中已有其它汽车信号时才算数。
+
+    2026-10-20：易混词表改为**单一归属** `app.catalog.brands.BRAND_AMBIGUITY`，
+    本模块只保留**语境用途**的规则（`rule="context"`）。
     """
     normalized = normalize_name(message)
     if not normalized:
         return False
-    ambiguous = _AMBIGUOUS_BRAND_NAMES
     other_signal = bool(_CAR_CONTEXT_RE.search(message) or has_car_intent(message))
     for name, _bid, _label in brand_entries(db):
         if name not in normalized:
             continue
-        if len(name) <= 2 and name in ambiguous and not other_signal:
+        if len(name) <= 2 and is_ambiguous_brand(name, rule="context") and not other_signal:
             continue
         return True
     return False
