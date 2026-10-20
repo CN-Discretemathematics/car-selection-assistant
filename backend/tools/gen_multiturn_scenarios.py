@@ -243,7 +243,17 @@ def gen_reject_scenarios(rng: random.Random, requirements: list[dict]) -> list[d
 
         turns = [
             {"user": _recommend_turn(req), "assert": []},
-            {"user": f"{car}不要，{reason}", "assert": []},
+            # 拒绝**当轮**就该生效：本题面是**点名式**拒绝（「甲车系不要」），
+            # 排除的是整个车系 ⇒ 它不该再出现在本轮推荐里。
+            #
+            # ⚠️ 这条断言是**严格性**的来源：没有它，拒绝功能整个缺失时
+            # 仍有 23/50「碰巧通过」——那台车只是掉出了榜单，不是被拒了。
+            # 那种通过**验不到任何东西**（实测：分支 7 单独跑 23/50，
+            # 加上这条断言后 0/50）。
+            {
+                "user": f"{car}不要，{reason}",
+                "assert": [{"type": "not_recommended", "car": car}],
+            },
             {
                 "user": reask,
                 "assert": [{"type": "not_recommended", "car": car}],

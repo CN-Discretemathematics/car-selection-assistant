@@ -131,6 +131,23 @@ def test_memory_scenarios_are_disabled_by_default_and_flippable(db_session):
     assert all(s["enabled"] is True for s in on), on
 
 
+def test_reject_scenario_asserts_the_rejection_takes_effect_immediately(db_session):
+    """拒绝**当轮**就要断言「它不在推荐里」。
+
+    否则拒绝功能整个缺失时，那台车只要**碰巧**掉出榜单就算通过
+    （实测：分支 7 单独跑 23/50「碰巧通过」，加上这条断言后 0/50）。
+    """
+    _seed(db_session)
+    requirements = gen.sample_requirements(db_session, random.Random(11), 2)
+    scenarios = gen.gen_reject_scenarios(random.Random(11), requirements)
+    for scenario, req in zip(scenarios, requirements, strict=True):
+        reject_turn = scenario["turns"][1]
+        assert reject_turn["user"].startswith(req["series_name"]), scenario
+        assert reject_turn["assert"] == [
+            {"type": "not_recommended", "car": req["series_name"]}
+        ], scenario
+
+
 def test_generator_emits_three_scenarios_with_the_requested_count(db_session):
     _seed(db_session)
     rng = random.Random(3)
