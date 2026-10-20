@@ -388,15 +388,89 @@ def profile_has_core_constraints(profile: UserProfile) -> bool:
 # ── 路由决策 ────────────────────────────────────────────────────────────────
 # intent 字符串枚举：与 engine 既有分支一一对应，取值固定不收敛进 Enum
 # （金标集/日志/测试都用字面量比对，避免引入新的抽象层）。
-INTENTS = (
-    "comparison",
-    "series_qa",
-    "brand_lineup",
-    "catalog_count",
-    "tool_loop",
-    "chitchat",
-    "general_advice",
-    "recommendation",
+#
+# ⚠️ 2026-10-20：此前这里只有一份 `INTENTS`（8 个），但**意图其实有 9 个**——
+# `decide_route` 还会产出 `sales_ranking`（`routing.py` 的 0.7a2 分支）。
+# 而 `INTENTS` 的**真实用途**是「LLM 输出协议白名单」（`llm_router` 用
+# `intent not in INTENTS` 拒掉非法输出），不是「全部意图」。
+# 两者语义不同，**不是漏列**：`sales_ranking` 由纯确定性规则判定，LLM 路由
+# 不允许产出它。
+#
+# 真正的毛病是**名字骗人 + 完整集合无处可查**：一个叫 `INTENTS` 的常量只管
+# LLM 那一半，而 `RouteDecision` 的 docstring 写着「命中的链路（INTENTS 之一）」
+# ——**那句话是错的**。新读代码的人会以为 `INTENTS` 就是全部意图，
+# 给 `decide_route` 加新意图时也不知道要同步哪几处。
+#
+# 现在用一张表把三件事说清楚，每个 intent 带上它在各路径下的角色：
+@dataclass(frozen=True)
+class IntentSpec:
+    """一个意图在**各条路径**下的角色。
+
+    ## 为什么有两列布尔
+
+    | 列 | 含义 | 谁用 |
+    | --- | --- | --- |
+    | `llm_protocol` | LLM 能否**输出**这个 intent | `llm_router` 的输出校验 + 提示词枚举 |
+    | `llm_fill` | LLM 能否**补位**采用这个 intent | `arbitrate_route` 的第 3 道闸门 |
+
+    两者**不是**同一件事：
+    - `chitchat` / `general_advice` / `recommendation` 是**兜底型**意图——
+      LLM 可以输出它们，但**不许**用它们改写 regex 的具体规则命中
+      （换一个兜底等于没改写）。
+    - `sales_ranking` 是**纯确定性**意图——LLM 连输出都不许。
+
+    ## 守卫规则不在这里
+
+    「某个 intent 在当前上下文下能不能执行」（`llm_intent_executable`）与
+    「能不能输出 / 能不能补位」是**两回事**，前者由各 intent 自己的
+    前置条件决定，**刻意不合并**（见 `llm_intent_executable` 的 docstring：
+    「勿按『逐条一致』回改」）。强行合并会让某个用途迁就另一个。
+    """
+
+    name: str
+    llm_protocol: bool
+    llm_fill: bool
+
+
+#: **全部**意图 —— `decide_route` 能产出的每一个。
+#:
+#: 这是「意图」的权威清单。金标集覆盖度检查、测试断言都应引用它，
+#: 而不是各自维护一份。
+#:
+#: ⚠️ **顺序有意义**：`INTENTS` 的顺序直接决定 LLM 提示词里的枚举顺序
+#: （`llm_router` 用 `"- {name}\n"` 逐行拼），改了会影响 LLM 的输出分布。
+#: 故表的顺序与迁移前 `INTENTS` 的**原始顺序逐位一致**（兜底型在末尾），
+#: `sales_ranking` 追加在最后——它是纯确定性意图，不进 LLM 协议。
+INTENT_SPECS: tuple[IntentSpec, ...] = (
+    # 具体型（LLM 可输出，且可在 regex 兜底时补位）
+    IntentSpec("comparison", llm_protocol=True, llm_fill=True),
+    IntentSpec("series_qa", llm_protocol=True, llm_fill=True),
+    IntentSpec("brand_lineup", llm_protocol=True, llm_fill=True),
+    IntentSpec("catalog_count", llm_protocol=True, llm_fill=True),
+    IntentSpec("tool_loop", llm_protocol=True, llm_fill=True),
+    # 兜底型（LLM 可输出，但不许用它们改写 regex 的具体规则命中）
+    IntentSpec("chitchat", llm_protocol=True, llm_fill=False),
+    IntentSpec("general_advice", llm_protocol=True, llm_fill=False),
+    IntentSpec("recommendation", llm_protocol=True, llm_fill=False),
+    # 纯确定性（LLM 连输出都不许——它由 `asks_sales_ranking` 等规则判定）
+    IntentSpec("sales_ranking", llm_protocol=False, llm_fill=False),
+)
+
+#: 全部意图名。
+ALL_INTENTS: tuple[str, ...] = tuple(spec.name for spec in INTENT_SPECS)
+
+#: LLM 输出**协议白名单**（进提示词枚举 + 输出校验）。
+#:
+#: ⚠️ 名字保留 `INTENTS` 是为了不动 `llm_router` 与金标测试的既有导入面；
+#: 它的语义是「LLM 能说这些词」，**不是**「全部意图」——全部意图见
+#: `ALL_INTENTS`。2026-10-20 之前这两个语义被混为一谈。
+INTENTS: tuple[str, ...] = tuple(
+    spec.name for spec in INTENT_SPECS if spec.llm_protocol
+)
+
+#: LLM 允许**补位**的具体意图（`arbitrate_route` 第 3 道闸门）。
+LLM_FILL_INTENTS: frozenset[str] = frozenset(
+    spec.name for spec in INTENT_SPECS if spec.llm_fill
 )
 
 
@@ -404,7 +478,8 @@ INTENTS = (
 class RouteDecision:
     """一次意图路由的结果。
 
-    intent        命中的链路（INTENTS 之一）；
+    intent        命中的链路（**`ALL_INTENTS` 之一**——共 9 个，含 `sales_ranking`；
+                  `INTENTS` 只有 8 个，那是「LLM 能输出的协议白名单」，不是全部意图）；
     matched_rule  命中的分支名与关键正则名（可观测/评测用）；
     slots         分发执行所需的载荷（如 comparison 的款型 ID 列表）；
     signals       判定过程中的关键布尔/计数值（排障用，不参与分发）。
