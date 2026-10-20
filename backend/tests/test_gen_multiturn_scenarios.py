@@ -30,17 +30,22 @@ from tests.seed import make_brand, make_series, make_source, make_variant, make_
 
 
 def _seed(db_session) -> None:
-    """种两台**符合各档**的车：比亚迪 · 轿车 · 纯电 · 15 万（12-18 万档）。
+    """种八个**符合各档**的车系：比亚迪 · 轿车 · 纯电 · 15 万。
 
-    ⚠️ 必须种**两台**：拒绝场景要求第一轮推得出 **≥2 个车系**——
-    只有一台时，拒绝之后候选集就空了 ⇒ 第三轮「被拒那台不在榜」是白送的
-    （推荐列表空 ⇒ 那台车当然不在）⇒ 场景通过但什么都没验。
+    ⚠️ 为什么是**八个**：拒绝场景要三轮都能验到东西——
+    ① 第一轮推得出 ≥2 个车系（否则拒绝之后候选集空了 ⇒ 第三轮「被拒那台不在榜」是白送的）；
+    ② 追问「再推荐几款」之后**还有新的一批**（生成器会照搬三轮校验这一条）——
+    一轮展示 5 台 + 拒绝轮再展示 4 台 ⇒ 已展示的车系约 5 个 ⇒ 池子至少要 6 个车系。
+
+    ⚠️ 这条校验**依赖引擎能力**：引擎没有「排除已展示过的车系」时会被跳过
+    （见 `gen_multiturn_scenarios._engine_supports_shown_exclusion`），
+    那时种两个车系就够——但多种几个对两种情形都安全 ✓。
     """
     source = make_source(db_session, name="生成器测试来源")
     brand = make_brand(db_session, name="比亚迪", source=source)
-    for name in ("测试车系", "测试车系二"):
+    for i in range(8):
         series = make_series(
-            db_session, brand, name=name, body_type="sedan",
+            db_session, brand, name=f"测试车系{i}", body_type="sedan",
             energy_types=("BEV",), source=source,
         )
         year = make_year(db_session, series)
