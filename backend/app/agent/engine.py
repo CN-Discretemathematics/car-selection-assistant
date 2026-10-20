@@ -39,6 +39,7 @@ from app.agent.llm_router import (
     log_shadow_record,
     route_with_llm,
 )
+from app.agent.rejection_shadow import brand_exclusion_delta
 from app.agent.routing import (
     asks_brand_count,
     asks_brand_lineup,
@@ -90,6 +91,8 @@ from app.agent.tools import (
 from app.catalog import services as catalog
 from app.catalog.brands import brand_series_overview, resolve_brand_mentions
 from app.catalog.series_index import display_name, resolve_series
+from app.common.config import get_settings
+from app.common.database import get_session_factory
 from app.common.enums import NEW_ENERGY_TYPES, expand_avoid, expand_energy_prefs
 from app.common.llm import LLMClient, LLMError, get_llm_client
 from app.common.models import Brand, OfficialPrice, Source, VehicleSeries, VehicleVariant
@@ -700,6 +703,101 @@ def _passenger_options(profile: UserProfile) -> list[str]:
     return ["1~2人", "3~5人", "5人以上"]
 
 
+#: 「拒绝推荐」的表述（2026-10-21）。
+#:
+#: 只认**带指示词**的否定：「不喜欢这台」「不要这辆」「别推它」。
+#: 裸的「不要」（如「不要 SUV」「不要电车」）是**硬约束**，走 `avoid` /
+#: 品牌排除那条路——两者混在一起会把一整类车误伤成一款车。
+_REJECT_RE = re.compile(r"(不喜欢|不要|别推|不想要|看腻)[^，。！？\n]{0,4}(这台|这辆|它|这个)")
+
+#: 拒绝的**动词**本身。后接「这台/这辆/它/这个」是指代式；后接**车系名**是点名式
+#: （「海豚不要」）——两种都算拒绝，但排除的对象不同。
+_REJECT_VERB_RE = re.compile(r"(不喜欢|不要|别推|不想要|看腻)")
+
+
+def _named_reject_series(
+    message: str, resolved: list | None
+) -> VehicleSeries | None:
+    """消息里被点名、且**解析成真实车系**的那个车系（点名式拒绝）。
+
+    ⚠️ 必须以「**解析出车系**」为准，不能只看名字出现在句子里：
+    「不要 SUV」里的 SUV 是**车身类型**（那是硬约束，走 avoid 路径 ✗），
+    不是车系名——把它当拒绝会同时丢掉硬约束与拒绝两件事。
+    """
+    if not resolved or not _REJECT_VERB_RE.search(message or ""):
+        return None
+    for series, _brand in resolved:
+        name = (series.name or "").strip()
+        if name and name in message:
+            return series
+    return None
+
+
+def _series_variant_ids(db: Session, series_id: int) -> list[int]:
+    """该车系**在售**款型的 id（点名式拒绝要排除整个车系，不只是其中一款）。"""
+    return [
+        int(vid)
+        for vid in db.scalars(
+            select(VehicleVariant.id).where(
+                VehicleVariant.series_id == series_id,
+                VehicleVariant.status == "on_sale",
+            )
+        ).all()
+    ]
+
+
+def _apply_rejection(
+    profile: UserProfile,
+    message: str,
+    *,
+    db: Session | None = None,
+    resolved: list | None = None,
+) -> str:
+    """处理两种拒绝：**指代**（「不喜欢这台」）与**点名**（「海豚不要」）。
+
+    - **指代式** → 排除**最近推荐的最后一款**：用户看的是卡片，说「这台」
+      指的就是他刚看到的那张；若本轮给了多张确有歧义，所以回执里说清是
+      「刚推荐的那款」——用户说车名可以再纠正（诚实性：不假装确定）。
+    - **点名式** → 排除**那个车系的全部在售款型**：用户点名的是车系，
+      「这台不要」若只排掉其中一款，同系其它款照样推上来（等于没拒绝）。
+
+    返回给用户看的回执（空串 = 这句话不是拒绝）。
+
+    只在**会话内**生效：跨会话要靠反馈表 + 影子调参（Phase 2 的另一半）。
+    """
+    named = _named_reject_series(message, resolved)
+    if named is not None:
+        excluded = _series_variant_ids(db, named.id) if db is not None else []
+        if not excluded:
+            return ""
+        kept = [vid for vid in profile.rejected_variant_ids if vid not in excluded]
+        profile.rejected_variant_ids = [*kept, *excluded]
+        return f"已排除你点名的「{named.name}」，换一批给你看。"
+    if not _REJECT_RE.search(message):
+        return ""
+    last = list(profile.last_recommended_variant_ids or [])
+    if not last:
+        return "我还没推荐过车呢——你说个车名或需求，我来挑。"
+    vid = last[-1]
+    if vid not in profile.rejected_variant_ids:
+        profile.rejected_variant_ids = [*profile.rejected_variant_ids, vid]
+    return "已排除刚推荐的那款，换一批给你看。"
+
+
+def _variant_brand(db: Session, variant_id: int) -> tuple[int | None, str | None]:
+    """款型 → (brand_id, brand_name)。查不到就返回 (None, None)。
+
+    影子评估要用它算「被拒车属于哪个品牌」——品牌级排除的误伤面就来自同品牌的其它车。
+    """
+    row = db.execute(
+        select(Brand.id, Brand.name)
+        .join(VehicleSeries, VehicleSeries.brand_id == Brand.id)
+        .join(VehicleVariant, VehicleVariant.series_id == VehicleSeries.id)
+        .where(VehicleVariant.id == variant_id)
+    ).first()
+    return (int(row[0]), str(row[1])) if row else (None, None)
+
+
 def _profile_summary(profile: UserProfile) -> str:
     """已收集画像的一句话复述（用于「已记住：…」引导）。"""
     parts: list[str] = []
@@ -1033,6 +1131,21 @@ class AgentEngine:
 
     # ── 路由模式（W0 Phase 2）────────────────────────────────────────────────
     # regex（默认）不进这里：respond() 里 router_mode 为 regex 时不做任何新动作。
+    def _spawn_shadow(self, coro_factory, *, logger_name: str) -> None:
+        """派发一个**旁路**任务：不 await、异常全兜底、in-flight 有上限。
+
+        路由对拍与拒绝影子评估共用这一条——**上限、回收、异常归属三处必须一致**，
+        各写一遍必然漂移（旁路出错的痕迹会散到不同日志流里，事后查不到）。
+        """
+        if len(self._pending_shadow_tasks) >= _SHADOW_MAX_PENDING:
+            logging.getLogger(logger_name).info(
+                json.dumps({"shadow_skipped": True, "reason": "pending_full"}, ensure_ascii=False)
+            )
+            return
+        task = asyncio.create_task(coro_factory())
+        self._pending_shadow_tasks.add(task)
+        task.add_done_callback(lambda t: self._on_shadow_done(t, logger_name=logger_name))
+
     def _spawn_shadow_route(self, message: str, profile: UserProfile, regex_decision) -> None:
         """shadow 模式：LLM 路由放 create_task 旁路，**绝不在响应路径 await**。
 
@@ -1046,16 +1159,14 @@ class AgentEngine:
         """
         if not getattr(self._llm, "available", False):
             return
-        if len(self._pending_shadow_tasks) >= _SHADOW_MAX_PENDING:
-            logging.getLogger("app.agent.router.shadow").info(
-                json.dumps({"shadow_skipped": True, "reason": "pending_full"}, ensure_ascii=False)
-            )
-            return
-        task = asyncio.create_task(self._shadow_route(message, profile, regex_decision))
-        self._pending_shadow_tasks.add(task)
-        task.add_done_callback(self._on_shadow_done)
+        self._spawn_shadow(
+            lambda: self._shadow_route(message, profile, regex_decision),
+            logger_name="app.agent.router.shadow",
+        )
 
-    def _on_shadow_done(self, task: asyncio.Task) -> None:
+    def _on_shadow_done(
+        self, task: asyncio.Task, *, logger_name: str = "app.agent.router.shadow"
+    ) -> None:
         """回收旁路任务：既从 in-flight 集合摘除，也**取回异常**。
 
         2026-10-02：原实现只 `discard`，从不调 `task.exception()`。`_shadow_route`
@@ -1071,9 +1182,63 @@ class AgentEngine:
             return
         exc = task.exception()
         if exc is not None:
-            logging.getLogger("app.agent.router.shadow").warning(
+            logging.getLogger(logger_name).warning(
                 "shadow 旁路任务异常（不影响响应路径）: %s: %s",
                 type(exc).__name__, str(exc)[:200], exc_info=True,
+            )
+
+    async def _shadow_rejection(
+        self, profile: UserProfile, result: dict, rejected_variant_id: int
+    ) -> None:
+        """拒绝反馈的影子评估：**只算不改**（计划 Phase 3「反馈驱动偏好调整」）。
+
+        算一次「若把这次拒绝上升为**品牌级排除项**（Phase 2b 反馈表的候选口径），
+        推荐会怎么变、**会误伤几台**」，结果写结构化日志
+        （logger "app.agent.rejection.shadow"）。
+
+        为什么值得算：用户拒绝的往往只是那一台的某个配置，不一定是整个品牌。
+        品牌级排除「一票否决」同品牌其它车——**误伤面**有多大，是这条产品决策
+        该不该做、该做到什么粒度的证据。没有这个数就只能拍脑袋。
+
+        绝不把异常抛给响应路径：旁路采样可容忍丢失。
+        """
+        try:
+            before = list(result.get("variants") or [])
+            with get_session_factory()() as db:
+                brand_id, brand_name = await run_in_threadpool(
+                    _variant_brand, db, rejected_variant_id
+                )
+                if brand_id is None:
+                    return
+                counterfactual = profile.model_copy(deep=True)
+                counterfactual.brand_exclude_ids = [
+                    *counterfactual.brand_exclude_ids,
+                    brand_id,
+                ]
+                after_result = await run_in_threadpool(
+                    recommendation_tool, db, counterfactual
+                )
+            delta = brand_exclusion_delta(
+                before,
+                list(after_result.get("variants") or []),
+                brand_name=brand_name,
+                rejected_variant_id=rejected_variant_id,
+            )
+            logging.getLogger("app.agent.rejection.shadow").info(
+                json.dumps(
+                    {
+                        "shadow": "rejection_brand_exclusion",
+                        "rejected_variant_id": rejected_variant_id,
+                        "brand_id": brand_id,
+                        "brand_name": brand_name,
+                        **delta,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        except Exception:  # noqa: BLE001 —— 旁路失败绝不影响响应路径
+            logging.getLogger("app.agent.rejection.shadow").warning(
+                "拒绝影子评估失败（不影响响应路径）", exc_info=True
             )
 
     async def _shadow_route(self, message: str, profile: UserProfile, regex_decision) -> None:
@@ -1232,7 +1397,6 @@ class AgentEngine:
         soft_probe.apply_probe_answer(profile, message)
         await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         structured = bool(hints)
-
         # 0) 闲聊/能力咨询 → 自然回复（大模型 + 检索佐证）
         if is_chatty(message):
             if decision_sink is not None:
@@ -1245,6 +1409,23 @@ class AgentEngine:
         #       「星愿和零跑A10选哪个」不含购车关键词，但提到具体车系，必须走确定性链路）
         wants_unlock = bool(_UNLOCK_RE.search(message))
         resolved = await run_in_threadpool(resolve_series, db, message)
+
+        # 「不喜欢这台」/「甲车系不要」→ 把那一款（那个车系）加入排除集（计划「拒绝后不再推」）。
+        #
+        # ⚠️ 四处讲究：
+        # 1) 必须在本轮推荐**之前**落地，否则这一轮还会把它推出来；
+        # 2) **不额外加一次落盘**——画像下方那次「吸收变更」的无条件写会把它一起
+        #    持久化（`tests/test_profile_persistence.py` 钉死了无条件落盘恰好两处，
+        #    中间插一次写会破坏那个结构契约）。
+        # 3) 要 `structured = True`：这句话本身不含任何硬约束，但它是**明确的信号**，
+        #    不置位就会被当成闲聊 → 掉进 LLM 对话分支 → 用户看到的是一句无关的回话，
+        #    推荐根本没重出。
+        # 4) 必须在**车系解析之后**：点名式拒绝（「甲车系不要」）要靠解析结果判断
+        #    「这个名字是不是真车系」——「不要 SUV」里的 SUV 是车身类型（硬约束 ✗）。
+        reject_note = _apply_rejection(profile, message, db=db, resolved=resolved)
+        if reject_note:
+            structured = True
+
         # 品牌硬约束（「只要奔驰」）：需查库把品牌名解析成 brand_id；且必须结合车系解析结果
         # 消歧——「银河星愿怎么样」里的「银河」属于车系名，不是品牌约束（2026-09 回归）。
         brand_hints = await run_in_threadpool(
@@ -1542,6 +1723,9 @@ class AgentEngine:
         result = {**result, "variants": top}
 
         reasons = self._build_reasons(profile, result)
+        if reject_note:
+            # 用户刚拒绝的那一款已排除——口径变化必须对用户可见（与解锁说明同一原则）
+            reasons.insert(0, reject_note)
         if unlock_note:
             # 口径变化必须对用户可见：先说明「已不再限定在某车系」，再给推荐理由
             reasons.insert(0, unlock_note)
@@ -1607,6 +1791,23 @@ class AgentEngine:
         if followup is not None or ids_changed:
             await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
         await self._emit(session_id, explanation or "", out)
+        # 拒绝反馈的影子评估（计划 Phase 3）：**派发即走，不等它**。
+        # 只算不改：算「若把这次拒绝上升为品牌级排除项，推荐会怎么变、误伤几台」，
+        # 结论进结构化日志，供 Phase 2b（反馈表）拍板粒度用。
+        # 默认关（每次要多跑一遍推荐查询）——见 config.agent_rejection_shadow_enabled。
+        if (
+            reject_note
+            and profile.rejected_variant_ids
+            and get_settings().agent_rejection_shadow_enabled
+        ):
+            snapshot = profile.model_copy(deep=True)
+            before = {**result, "variants": list(result.get("variants") or [])}
+            self._spawn_shadow(
+                lambda: self._shadow_rejection(
+                    snapshot, before, profile.rejected_variant_ids[-1]
+                ),
+                logger_name="app.agent.rejection.shadow",
+            )
         return out
 
     async def _comparison_analysis_reply(
