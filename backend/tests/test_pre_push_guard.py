@@ -74,8 +74,10 @@ def build() -> tuple[tempfile.TemporaryDirectory, Path, dict[str, str]]:
     git("commit", "-q", "-m", "chore(init): base", cwd=root)
     base = git("rev-parse", "HEAD", cwd=root)
 
-    def commit(name: str, subject: str, trailer: str = "") -> str:
-        (root / "docs" / f"{name}.md").write_text(f"{name}\n", encoding="utf-8")
+    def commit(name: str, subject: str, trailer: str = "", rel: str | None = None) -> str:
+        path = root / (rel or f"docs/{name}.md")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{name}\n", encoding="utf-8")
         git("add", "-A", cwd=root)
         body = subject + ("\n\n" + trailer if trailer else "") + "\n"
         # 信息文件必须写在**仓库外**——写在仓库里会被 `git add -A` 扫进提交，
@@ -90,7 +92,12 @@ def build() -> tuple[tempfile.TemporaryDirectory, Path, dict[str, str]]:
     a2 = commit("a2", "fix(agent): 同样越界但带豁免",
                 "# gate-allow: 测试用：这一笔确实是跨切面")
     a3 = commit("a3", "docs(sync): 干净提交")                        # 不越界
-    return td, root, {"base": base, "a1": a1, "a2": a2, "a3": a3}
+    # 迁移目录（2026-10-21 登记 scope `migrations` 的回归）
+    a4 = commit("m1", "feat(migrations): 只动迁移文件",
+                rel="backend/alembic/versions/m1_add_x.py")            # 正确 scope
+    a5 = commit("m2", "feat(docs): 动迁移文件却声明 docs scope",
+                rel="backend/alembic/versions/m2_add_y.py")            # 越界
+    return td, root, {"base": base, "a1": a1, "a2": a2, "a3": a3, "a4": a4, "a5": a5}
 
 
 @pytest.fixture()
@@ -129,3 +136,22 @@ def test_clean_commit_passes(repo):
     root, s = repo
     code, out = run_guard(root, f"{s['a2']}..{s['a3']}")
     assert code == 0, f"干净提交应通过，实际 {code}：{out[-300:]}"
+
+
+def test_migration_file_is_covered_by_migrations_scope(repo):
+    """`backend/alembic/` 已登记 scope `migrations`——迁移是常规动作，不该靠豁免。
+
+    此前每次新增迁移都要挂 `# gate-allow:`（实测 4 次），等于门禁在这一类改动上
+    形同不存在——而迁移写错（down_revision 接错、出现第二个 head）正是只在生产
+    暴露的那类缺陷。
+    """
+    root, s = repo
+    code, out = run_guard(root, f"{s['a3']}..{s['a4']}")
+    assert code == 0, f"迁移文件应被 scope `migrations` 覆盖，实际 {code}：{out[-300:]}"
+
+
+def test_migration_file_with_wrong_scope_is_blocked(repo):
+    """登记了 `migrations` 不等于放行一切——声明错 scope 仍要拦。"""
+    root, s = repo
+    code, out = run_guard(root, f"{s['a4']}..{s['a5']}")
+    assert code == 1, f"迁移文件声明 docs scope 应被拦，实际 {code}：{out[-300:]}"

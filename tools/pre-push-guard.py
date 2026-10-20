@@ -123,6 +123,18 @@ SCOPE_PATHS: dict[str, list[str]] = {
         "backend/tests/test_admin",
         "reviewer/",
     ],
+    # 2026-10-21：`backend/alembic/` **此前未登记在任何 scope**——
+    # 每笔新增迁移的提交都只能挂 `# gate-allow:` trailer 放行（实测 4 次：
+    # PR #70 的 0439822 / 171b116 / 200c8a5，加本轮 feat/durable-preference-memory
+    # 的 60f5e50）。迁移是**每个功能分支都要动的常规动作**，让它们常年靠豁免，
+    # 等于门禁在这一类改动上等于不存在——而迁移写错（down_revision 接错、
+    # 出现第二个 head）正是只在生产暴露的那类缺陷。
+    #
+    # ⚠️ 前缀**不含门禁自身**（tools/ 与 .githooks/）：否则谁都能改门禁来放行自己
+    # （AGENTS.md 规则 6，见 R10.2）。
+    "migrations": [
+        "backend/alembic/",
+    ],
     "ops": ["web/app/ops/", "deploy/", ".github/", "backend/tests/test_ops"],
     "deploy": ["deploy/", ".github/", "docs/"],
     "reviewer": ["reviewer/", "backend/tests/test_reviewer", "skills/"],
