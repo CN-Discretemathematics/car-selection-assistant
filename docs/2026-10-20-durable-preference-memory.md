@@ -108,6 +108,21 @@ persist_hints(记忆)             ← 把「记忆 + 本轮」的有效值写回
 > 此前这条规则在调用点上有**两遍**（一遍按「本轮的排除」过滤、一遍按「最终排除集」
 > 过滤），两遍规则不同、互相掩盖——变异测试因此漏掉了两处。规则散落 = 规则漂移。
 
+## 正确性判据：往返无损
+
+《2026-10-20 架构收敛与产品方向清单》第四步给 Phase 1 定下的判据是
+**「hints → 记忆 → hints 逐值相等」**——回填器的职责只是「把记忆翻译成 hints，
+再喂给 `merge_profile`」，所以翻译必须**无损**：丢一个字段，就等于该约束
+在跨会话后**静默失效**（用户不会知道自己说过的话被丢了）。
+
+三条用例钉住它：
+
+| 用例 | 钉住什么 |
+|---|---|
+| `test_hints_round_trip_is_lossless` | 6 个键逐值往返相等 |
+| `test_round_trip_normalizes_the_open_budget_side` | 只说上限的预算回填出 `min=None`——**归一化**不是丢值 |
+| `test_round_trip_survives_the_profile_merger` | 往返之后还要能真的并进画像（翻译无损 ≠ 合并无损） |
+
 ## 覆盖语义：一个键只留一行
 
 同一 `(identity, category, key)` 写新值即覆盖旧值，**行 id 稳定**
@@ -142,7 +157,7 @@ persist_hints(记忆)             ← 把「记忆 + 本轮」的有效值写回
 
 ## A/B 实测证据
 
-### 变异测试：15 个变异点，15 个全被抓住
+### 变异测试：16 个变异点，16 个全被抓住
 
 「测试全绿」不等于「测试有效」。逐个把实现改坏，确认对应用例会变红
 （脚本：`.tools/mutate_prefs.py`，本地专属、不入库）：
@@ -164,6 +179,7 @@ persist_hints(记忆)             ← 把「记忆 + 本轮」的有效值写回
 | 有效值消失时不删旧记忆 | `test_negative_turn_clears_the_older_requirement` |
 | 回填不填空缺 | `test_restore_does_not_override_the_session_body_type` |
 | off 模式仍然查身份 | `test_gate_off_does_not_even_resolve_the_identity` |
+| 往返丢预算下限 | `test_hints_round_trip_is_lossless` |
 
 > **变异脚本自己也会空转**：`-k` 选择串写错（用例改名了）时，pytest 退出码是
 > 5（没收集到任何用例）而不是 1——脚本若只看「非零即算抓住」，就会把

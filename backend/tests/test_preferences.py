@@ -432,6 +432,75 @@ def test_forget_removes_the_key(db_session: Session, durable_on):
     assert "usage" not in memories_to_hints(db_session, identity)
 
 
+# ── 往返判据（方案第四步定下的正确性判据）────────────────────────────────────
+
+
+def test_hints_round_trip_is_lossless(db_session: Session, durable_on):
+    """hints → 记忆 → hints **逐值相等**。
+
+    这是《2026-10-20 架构收敛与产品方向清单》第四步给 Phase 1 定下的正确性判据：
+    回填器的职责是「把记忆翻译成 hints，再喂给 merge_profile」，
+    所以翻译必须**无损**——丢一个字段就等于该约束在跨会话后静默失效。
+    """
+    identity, _ = _identity(db_session)
+    hints = {
+        "usage": ["通勤"],
+        "body_type": ["suv"],
+        "energy_preference": ["BEV"],
+        "budget": {"min": 100000.0, "max": 200000.0},
+        "passengers": 5,
+        "avoid": ["mpv"],
+    }
+    persist_hints(db_session, identity, hints)
+    back = memories_to_hints(db_session, identity)
+    assert back["usage"] == ["通勤"]
+    assert back["body_type"] == ["suv"]
+    assert back["energy_preference"] == ["BEV"]
+    assert back["budget"]["min"] == 100000.0
+    assert back["budget"]["max"] == 200000.0
+    assert back["passengers"] == 5
+    assert back["avoid"] == ["mpv"]
+
+
+def test_round_trip_normalizes_the_open_budget_side(db_session: Session, durable_on):
+    """只说了上限的预算，回填后补出 `min=None`——**归一化**不是丢值。
+
+    `merge_profile` 用 `Budget(**hints["budget"])` 建模，缺的一侧自然是 None；
+    若把它当成「丢值」，就会把「只说了上限」误判成「上下限都变了」。
+    """
+    identity, _ = _identity(db_session)
+    persist_hints(db_session, identity, {"budget": {"max": 200000.0}})
+    back = memories_to_hints(db_session, identity)
+    assert back["budget"]["max"] == 200000.0
+    assert back["budget"]["min"] is None
+
+
+def test_round_trip_survives_the_profile_merger(db_session: Session, durable_on):
+    """往返之后还要能**真的并进画像**——翻译无损 ≠ 合并无损。
+
+    判据：把记忆并进一个空画像，得到的字段值与原 hints 一致。
+    """
+    identity, _ = _identity(db_session)
+    hints = {
+        "usage": ["长途"],
+        "body_type": ["mpv"],
+        "energy_preference": ["PHEV"],
+        "budget": {"min": 150000.0, "max": 250000.0},
+        "passengers": 7,
+        "avoid": ["ICE"],
+    }
+    persist_hints(db_session, identity, hints)
+    profile = UserProfile()
+    restore_into_profile(db_session, identity, profile)
+    assert profile.usage == ["长途"]
+    assert profile.body_type == ["mpv"]
+    assert profile.energy_preference == ["PHEV"]
+    assert profile.budget.min == 150000.0
+    assert profile.budget.max == 250000.0
+    assert profile.passengers == 7
+    assert profile.avoid == ["ICE"]
+
+
 # ── 接口 ────────────────────────────────────────────────────────────────────
 
 
