@@ -243,6 +243,65 @@ jobs:
       - run: pnpm test
       - run: pnpm run build
 
+  # 真 PostgreSQL 上的迁移 + 端到端功能校验（2026-10-21 事故后加）
+  #
+  # 为什么必须有这个 job：
+  #   - 仓库的测试库一直是 **SQLite**，CI 里**没有** PostgreSQL 服务；
+  #   - 迁移链里有 `ALTER COLUMN`（`7e9dda19f6df`）⇒ **在 SQLite 上根本跑不了**
+  #     ⇒「迁移路径」此前**从未**被任何自动化跑过；
+  #   - 迁移 `d3e8f1a4b7c2` 的 `confirmed BOOLEAN DEFAULT 0` 在 SQLite 上合法、
+  #     在 PostgreSQL 上直接报错 ⇒ **1584 个用例全绿**却把生产部署挡了 13 天。
+  #
+  # 所以这里做三件事：迁移 up（建表）→ down（回退到 base）→ 再 up（重建），
+  # 再跑一次跨会话记忆的端到端功能校验（真实 HTTP 接口 + 真实数据库）。
+  migrations:
+    name: migrations + 功能校验（postgres）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: carapp
+          POSTGRES_PASSWORD: carapp
+          POSTGRES_DB: carapp
+          # 用 trust 认证 ⇒ 连接串**不带口令**。
+          # ⚠️ `reviewer/scan_secrets.py` 会把「带用户名:口令的数据库 URL」判成
+          # 高危密钥（CI 里的假口令也是凭据字面量）⇒ 这里从根上去掉口令。
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U carapp"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://carapp@127.0.0.1:5432/carapp
+      RETRIEVAL_BACKEND: inmemory
+      DURABLE_PREFS_MODE: "on"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: 安装依赖
+        run: python -m pip install -r backend/requirements.txt
+      - name: 迁移在真 PostgreSQL 上跑一遍（up）
+        working-directory: backend
+        run: python -m alembic upgrade head
+      - name: 迁移能回退（down）
+        working-directory: backend
+        run: python -m alembic downgrade base
+      - name: 迁移能重建（再 up）
+        working-directory: backend
+        run: python -m alembic upgrade head
+      - name: 跨会话记忆的端到端功能校验（真 PostgreSQL）
+        working-directory: backend
+        # 记忆写入 / 跨会话回填 / 拒绝写反馈 / 合并 / 旧 token 失效 / 导出 / 删除。
+        # 空库里没有可推荐的车 ⇒ 拒绝链路会**跳过**（不当作失败）：
+        # 那条链路由 pytest（SQLite）与生产实测覆盖。
+        run: python tools/smoke_durable_memory.py --seed-car
+
   # 自动修复（2026-09-16 接入；2026-10-02 改为**只评论不推分支**）：
   # gates 失败且是**同仓库 PR** 时，用 `--fix` 算出「确定性计数」的自愈补丁，
   # 以 **PR 评论**形式贴出补丁内容，由人核对后手动采纳。
