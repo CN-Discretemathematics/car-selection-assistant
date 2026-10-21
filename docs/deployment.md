@@ -331,6 +331,17 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
 「先观察一两天再切 on」那道**观察期是假的**。修复见 PR #84；
 ⇒ **观察期必须在该修复部署上线之后才开始攒**，否则攒的是空气。
 
+⚠️ **2026-10-22 观察缺口**：`shadow` 档的影子日志此前**结构性地没有**
+`brand_exclude`（7 个被跟踪键里少 1 个）⇒ 攒够样本也不等于看全了。
+修复见 [影子档看不见品牌排除项](2026-10-22-shadow-brand-exclude-observation.md)；
+⇒ **观察期要在该修复部署上线之后重新攒**，上一轮的样本是残的。
+
+📌 **怎么算「攒够」**：影子日志里应覆盖**全部 7 个被跟踪键**
+（`usage` / `body_type` / `energy_preference` / `budget` / `passengers` /
+`avoid` / `brand_exclude`）。注意：多数首轮会走「最小化追问」分支，
+只给信息不给人数/预算时不会进推荐链——这不影响**记忆**的观察，
+但会让影子日志看起来「更空」。
+
 三档的能力表（谁该按哪个能力判断）见
 [三档能力表](2026-10-21-mode-capabilities.md)；闸门语义只在
 `backend/app/agent/preferences.py::ModeCapabilities` 一处定义。
