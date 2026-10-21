@@ -55,6 +55,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.agent import soft_prefs, soft_probe
+from app.agent.feedback import load_rejected_variant_ids
 from app.agent.preferences import (
     effective_brand_exclusions,
     persist_hints,
@@ -427,6 +428,17 @@ async def advance_profile(
             turn_hints=hints,
             brand_exclusions=brand_exclusions,
         )
+        # 拒绝**跨会话**记住（计划 Phase 2b「反馈表」）：这个身份曾经拒绝过的款型
+        # 并进 `profile.rejected_variant_ids` ⇒ 推荐链**复用会话内拒绝那套排除逻辑**
+        # （工具层零改动 ✓ ⇒ 两种排除的行为必然一致 ✓）。
+        if identity is not None:
+            remembered = await run_in_threadpool(
+                load_rejected_variant_ids, db, identity
+            )
+            if remembered:
+                profile.rejected_variant_ids = list(
+                    dict.fromkeys([*profile.rejected_variant_ids, *remembered])
+                )
 
     profile = merge_profile(profile, hints)
 

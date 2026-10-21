@@ -439,6 +439,56 @@ class PreferenceMemory(Base):
     )
 
 
+class VariantFeedback(Base):
+    """用户**明确拒绝过**的款型（跨会话记住）。
+
+    2026-10-21 新增（计划 Phase 2b「反馈表：拒绝跨会话记住」）。
+
+    ## 与偏好记忆的分工
+
+    - `preference_memories`：**偏好**（预算/用途/排除项…）——封闭词表、键值形态；
+    - 本表：**事件**（用户拒绝过哪一款、为什么）——每行一次拒绝，可带原因。
+
+    ## 为什么「被拒」必须跨会话
+
+    拒绝是**最强的负反馈**：用户说「这台不要」就是不要。忘了它 ⇒ 下次又推同一台
+    ⇒ 用户会觉得「它没听我说话」。
+
+    ## 粒度：按**款型**记
+
+    车系级拒绝（「甲车系不要」）在写入时展开成该车系**全部在售款型**的行 ⇒
+    读回时直接并进 `profile.rejected_variant_ids` ⇒ 排除逻辑与「会话内拒绝」
+    **完全同一套**（工具层零改动 ✓）。
+
+    ## 与「推过了」的区别
+
+    `profile.shown_series_ids` = 推过了（这轮不想重复）；
+    本表 = 用户明确说不要（永远不想再来）⇒ 两者不能混。
+    """
+
+    __tablename__ = "variant_feedbacks"
+    __table_args__ = (
+        UniqueConstraint("identity_id", "variant_id", name="uq_variant_feedback_identity_variant"),
+        Index("ix_variant_feedback_identity_id", "identity_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 归属的匿名身份（跨会话的载体）
+    identity_id: Mapped[int] = mapped_column(
+        ForeignKey("anonymous_identities.id"), index=True
+    )
+    #: 被拒绝的款型
+    variant_id: Mapped[int] = mapped_column(ForeignKey("vehicle_variants.id"))
+    #: 该款型所属车系（冗余，但便于按车系聚合与审计）
+    series_id: Mapped[int] = mapped_column(ForeignKey("vehicle_series.id"))
+    #: 用户给的理由（原话，可空）
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class ExternalSeriesRef(Base):
     """外部数据源的车系标识映射（如汽车之家 seriesid → 本站 series_id）。
 
