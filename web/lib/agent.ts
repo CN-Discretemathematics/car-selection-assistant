@@ -1,4 +1,4 @@
-import type { AgentMessageOut } from "@/lib/api";
+import type { AgentMessageOut, PreferenceMemory } from "@/lib/api";
 
 /**
  * 匿名身份 token 的本地存储键（**跨会话记忆的载体**）。
@@ -73,8 +73,7 @@ export async function sendAgentMessage(
   sessionId: string,
   message: string,
   identityToken?: string | null,
-): Promise<AgentMessageOut> {
-  const res = await fetch(`/api/v1/agent/sessions/${sessionId}/messages`, {
+): Promise<AgentMessageOut> {  const res = await fetch(`/api/v1/agent/sessions/${sessionId}/messages`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -129,4 +128,39 @@ export async function subscribeAgentStream(
       }
     }
   }
+}
+
+/**
+ * 列出这个浏览器**已经记住**的偏好（用户自查用）。
+ *
+ * 后端接口：`GET /api/v1/agent/preferences`——未带身份或身份无效时返回**空列表**
+ * （不报错），所以不带 token 也可以调用。
+ *
+ * ⚠️ 失败**抛错**而不是返回空列表：空列表会被 UI 读成「你什么也没被记住」，
+ * 而那是个**谎**（读不到 ≠ 没有）。由调用方区分这两种情况。
+ */
+export async function listPreferences(identityToken?: string | null): Promise<PreferenceMemory[]> {
+  const res = await fetch("/api/v1/agent/preferences", {
+    headers: identityToken ? { Authorization: `Bearer ${identityToken}` } : {},
+  });
+  if (!res.ok) throw new Error(`读取已记住的偏好失败（${res.status}）`);
+  const body = await res.json();
+  return Array.isArray(body) ? (body as PreferenceMemory[]) : [];
+}
+
+/**
+ * 撤回一条记忆（用户「我不想让你记这个」）。
+ *
+ * 后端接口：`DELETE /api/v1/agent/preferences/{memory_id}`（204）。
+ * 撤回后**下一次**会话起不再生效（当前会话里已经说过的话不受影响）。
+ */
+export async function deletePreference(
+  memoryId: number,
+  identityToken?: string | null,
+): Promise<void> {
+  const res = await fetch(`/api/v1/agent/preferences/${memoryId}`, {
+    method: "DELETE",
+    headers: identityToken ? { Authorization: `Bearer ${identityToken}` } : {},
+  });
+  if (!res.ok) throw new Error(`撤回失败（${res.status}）`);
 }

@@ -206,6 +206,23 @@ export interface AgentMessageOut {
   explanation: string | null;
 }
 
+/** 一条「记住的偏好」（用户自查 / 撤回用）。
+ *
+ *  `value` 是**后端存库的字符串**：列表是 JSON 数组、人数是十进制、预算是
+ *  `{"min":…, "max":…}`（单位：元）⇒ 说人话的映射在 `lib/preferences.ts`。
+ */
+export interface PreferenceMemory {
+  id: number;
+  category: string;
+  key: string;
+  value: string;
+  source_type: string;
+  confidence: number;
+  confirmed: boolean;
+  created_at: string;
+  expires_at: string | null;
+}
+
 // ── 账户与收藏───────────────────────────────────────
 export interface UserOut {
   id: number;

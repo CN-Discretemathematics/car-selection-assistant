@@ -16,6 +16,8 @@ import assert from "node:assert/strict";
 import {
   ensureIdentityToken,
   readIdentityToken,
+  deletePreference,
+  listPreferences,
   sendAgentMessage,
   writeIdentityToken,
 } from "./agent.ts";
@@ -138,4 +140,48 @@ test("writeIdentityToken(null)：清掉本地身份（登出/清数据后不该�
   writeIdentityToken(null);
   assert.equal(map.has(IDENTITY_KEY), false);
   assert.equal(readIdentityToken(), null);
+});
+
+// ── 「我记住的偏好」的列表与撤回（2026-10-21）───────────────────────────────
+
+test("listPreferences：带 token 时带 Authorization 头", async () => {
+  const calls = stubFetch(() => ({ ok: true, status: 200, body: [{ id: 1, key: "budget" }] }));
+  const items = await listPreferences("tok-abc");
+  const headers = (calls[0].init?.headers ?? {}) as Record<string, string>;
+  assert.equal(headers.Authorization, "Bearer tok-abc");
+  assert.equal(calls[0].url, "/api/v1/agent/preferences");
+  assert.equal(items.length, 1);
+});
+
+test("listPreferences：没有 token 时不带 Authorization 头（缺身份也要能读）", async () => {
+  const calls = stubFetch(() => ({ ok: true, status: 200, body: [] }));
+  const items = await listPreferences(null);
+  const headers = (calls[0].init?.headers ?? {}) as Record<string, string>;
+  assert.equal(headers.Authorization, undefined);
+  assert.deepEqual(items, []);
+});
+
+test("listPreferences：读失败**抛错**而不是返回空列表", async () => {
+  // 空列表会被 UI 读成「你什么也没被记住」——那是谎。读不到必须与「没有」区分开。
+  stubFetch(() => ({ ok: false, status: 500, body: { detail: "boom" } }));
+  await assert.rejects(() => listPreferences("tok-abc"), /失败/);
+});
+
+test("listPreferences：响应不是数组时返回空数组（不把异常形状当列表用）", async () => {
+  stubFetch(() => ({ ok: true, status: 200, body: { detail: "unexpected" } }));
+  assert.deepEqual(await listPreferences("tok-abc"), []);
+});
+
+test("deletePreference：发 DELETE 到那条记忆，且带 token", async () => {
+  const calls = stubFetch(() => ({ ok: true, status: 204, body: null }));
+  await deletePreference(42, "tok-abc");
+  const headers = (calls[0].init?.headers ?? {}) as Record<string, string>;
+  assert.equal(calls[0].init?.method, "DELETE");
+  assert.equal(calls[0].url, "/api/v1/agent/preferences/42");
+  assert.equal(headers.Authorization, "Bearer tok-abc");
+});
+
+test("deletePreference：撤回失败要抛错（不能静默当作撤回成功）", async () => {
+  stubFetch(() => ({ ok: false, status: 404, body: { detail: "not found" } }));
+  await assert.rejects(() => deletePreference(42, "tok-abc"), /失败/);
 });
