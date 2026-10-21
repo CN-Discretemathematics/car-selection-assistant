@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 from sqlalchemy import String, case, func, literal, or_, select
@@ -57,6 +58,8 @@ class SeriesRow:
     sale_type: str | None = None
     sale_source_name: str | None = None
     source_name: str | None = None
+    #: 销量记录**自己**的核验日（卡片「更新」口径用它，见 `app/common/freshness.py`）
+    sale_verified_at: datetime | None = None
     #: 过滤后的总行数（窗口函数一次算完）
     total: int = 0
 
@@ -114,6 +117,9 @@ def _latest_sales_cte(month: str | None):
             MonthlySales.sales_count.label("sales_count"),
             MonthlySales.sales_type.label("sales_type"),
             MonthlySales.source_id.label("source_id"),
+            # 销量记录**自己**的核验日——卡片「更新」口径要用它
+            # （否则列表页显示的是车系的核验日，会早于它显示的销量月份 ⇒ 自相矛盾）。
+            MonthlySales.last_verified_at.label("last_verified_at"),
             func.row_number()
             .over(
                 partition_by=MonthlySales.series_id,
@@ -137,6 +143,7 @@ def _latest_sales_cte(month: str | None):
             ranked.c.sales_count.label("sales_count"),
             ranked.c.sales_type.label("sales_type"),
             ranked.c.source_id.label("source_id"),
+            ranked.c.last_verified_at.label("last_verified_at"),
         )
         .where(ranked.c.rn == 1)
         .cte("latest_sales")
@@ -210,6 +217,9 @@ def list_series(
         sales.c.source_id.label("sale_source_id")
         if sales is not None
         else literal(None).label("sale_source_id"),
+        sales.c.last_verified_at.label("sale_verified_at")
+        if sales is not None
+        else literal(None).label("sale_verified_at"),
         # 总数用窗口函数一次算完——另跑一条 COUNT 会把整条聚合（价格区间 +
         # 销量窗口）**再算一遍**，默认路径实测直接翻倍。
         func.count().over().label("total"),
@@ -315,7 +325,7 @@ def _fetch(db, stmt, price, sales, sort, limit: int | None, offset: int | None):
             for s in db.scalars(select(Source).where(Source.id.in_(source_ids))).all()
         }
     rows: list[SeriesRow] = []
-    for series, brand, pmin, pmax, month, count, stype, sale_source_id, total in raw:
+    for series, brand, pmin, pmax, month, count, stype, sale_source_id, sale_verified, total in raw:
         rows.append(
             SeriesRow(
                 series=series,
@@ -329,6 +339,7 @@ def _fetch(db, stmt, price, sales, sort, limit: int | None, offset: int | None):
                     source_names.get(sale_source_id) if sale_source_id else None
                 ),
                 source_name=source_names.get(series.source_id) if series.source_id else None,
+                sale_verified_at=sale_verified,
                 total=int(total or 0),
             )
         )

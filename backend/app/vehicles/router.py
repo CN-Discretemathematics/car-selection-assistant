@@ -16,6 +16,7 @@ from app.catalog.series_index import _brand_leads_series, keyword_needle, keywor
 from app.common.database import get_session
 from app.common.enums import MISSING_VALUE_LABEL
 from app.common.errors import not_found
+from app.common.freshness import data_freshness
 from app.common.images import proxy_image_url
 from app.common.models import VehicleVariant
 from app.vehicles import listing
@@ -116,7 +117,10 @@ def vehicle_list(
                     source_name=row.sale_source_name,
                 ),
                 source_name=row.source_name,
-                data_updated_at=series.last_verified_at,
+                data_updated_at=data_freshness(
+                    series_verified_at=series.last_verified_at,
+                    sales_verified_at=row.sale_verified_at,
+                ),
             )
         )
     return VehicleListOut(total=total, page=page, page_size=page_size, items=out_items)
@@ -180,7 +184,10 @@ def vehicle_detail(series_id: int, db: Session = Depends(get_session)) -> Vehicl
             source_name=sales.source.name if sales and sales.source else None,
         ),
         model_years=[ModelYearOut(id=y.id, year_name=y.year_name, launch_status=y.launch_status) for y in years],
-        data_updated_at=series.last_verified_at,
+        data_updated_at=data_freshness(
+            series_verified_at=series.last_verified_at,
+            sales_verified_at=sales.last_verified_at if sales else None,
+        ),
         price_range_note=series.price_range_note,
         external_link=external_link,
     )

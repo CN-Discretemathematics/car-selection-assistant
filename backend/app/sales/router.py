@@ -17,6 +17,7 @@ from app.catalog import services as catalog
 from app.catalog.series_index import _brand_leads_series, keyword_needle, keyword_score
 from app.common.database import get_session
 from app.common.enums import NEW_ENERGY_TYPES
+from app.common.freshness import data_freshness
 from app.common.images import proxy_image_url
 from app.common.models import Brand, MonthlySales, OfficialPrice, VehicleSeries, VehicleVariant
 from app.sales.schemas import HomeCardOut, PriceRangeOut, SalesSourceOut
@@ -149,7 +150,10 @@ def home(
                     max=price_max_val,
                 ),
                 source=SalesSourceOut(id=sales.source_id, name=sales.source.name if sales.source else None),
-                data_updated_at=sales.last_verified_at or series.last_verified_at,
+                data_updated_at=data_freshness(
+                    series_verified_at=series.last_verified_at,
+                    sales_verified_at=sales.last_verified_at,
+                ),
                 price_range_note=series.price_range_note,
             )
         )
