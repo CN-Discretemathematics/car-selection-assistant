@@ -436,10 +436,25 @@ def resolve_brand_mentions(
             continue  # 已被更长的品牌名占住（`_load_entries` 已按长度降序）
         if any(name in series_norm for series_norm in series_norms):
             continue  # 品牌名属于被点名的车系名（「银河星愿」）→ 是对车系的指代
-        if is_ambiguous_brand(name, rule="constraint") and not (has_intent and has_strong_intent):
-            continue  # 「理想的预算 20 万」不当作品牌「理想」；「我想买理想」才算
+        # ⚠️ 2026-10-21：**否定语境必须在歧义守卫之前判定**。
+        #
+        # 歧义守卫（理想/长安/大众/未来/启辰/东风）本来是防
+        # 「理想的预算 20 万」把日常词「理想」当成品牌——可它**一并挡掉了否定语境**：
+        # 「不要大众」在句子里**没有第二种解释**（用户明说不要某品牌），
+        # 却被当日常词丢掉 ⇒ 品牌排除项**根本没进画像**，
+        # 而跨会话记忆要记的恰恰就是它（计划 §1.2：硬约束排除项错了直接毁掉答案）。
+        #
+        # 实测：本地快照库 92 个品牌里「大众」在否定语境下解析失败
+        # （`resolve_brand_names(['大众'])` → `([], [])`，而「丰田」「比亚迪」正常），
+        # 「排除项跨会话」评测里 3/23 条因此红。
         prefix = normalized[max(0, start - 4): start]
         negated = any(neg in prefix for neg in NEGATION_PREFIXES)
+        if (
+            is_ambiguous_brand(name, rule="constraint")
+            and not negated
+            and not (has_intent and has_strong_intent)
+        ):
+            continue  # 「理想的预算 20 万」不当作品牌「理想」；「我想买理想」才算
         if not negated and not (explicit or _is_bare_brand(normalized, name)):
             continue  # 只是提及，不构成硬约束
         # ⚠️ 2026-10-21：**否定词本身就是约束**，不需要再要一个意图词。

@@ -86,6 +86,7 @@ DEFAULT_SCENARIOS = "eval/multiturn.json"
 ASSERT_KINDS = {
     "not_recommended": "回答不应包含该车系",
     "recommended": "回答应包含该车系",
+    "brand_not_recommended": "回答不应包含该**品牌**的任何车系",
     "mentions": "回答应提到该关键词",
     "not_mentions": "回答不应提到该关键词",
     "budget_in": "回答采用的预算口径应是该区间",
@@ -260,6 +261,28 @@ def check_assertion(
             raise AssertionFailed(f"{kind}：{assertion!r} —— 但它进了推荐列表")
         if kind == "recommended" and not hit:
             raise AssertionFailed(f"{kind}：{assertion!r} —— 但它不在推荐列表里")
+        return
+
+    if kind == "brand_not_recommended":
+        # 品牌级排除：查**结构化**推荐结果里的 `brand_name`。
+        #
+        # 为什么不用车系名去查：排除项是**品牌级**的（用户说「不要丰田」⇒ 该品牌全部车系出局），
+        # 而库里一个品牌往往有多个车系 ⇒ 逐个车系名去比对会漏。
+        # 也不用正文裸字符串：解释里可能提到「也可以看看 XX」而它**没被推荐**。
+        brand = assertion.get("brand")
+        if not brand:
+            raise AssertionFailed(f"{kind} 断言缺 brand 字段")
+        target = _norm(brand)
+        hit = False
+        for v in getattr(out, "recommended_variants", None) or []:
+            bname = _norm(getattr(v, "brand_name", None) or "")
+            if bname and (bname == target or target in bname or bname in target):
+                hit = True
+                break
+        if hit:
+            raise AssertionFailed(
+                f"{kind}：{assertion!r} —— 但该品牌的车进了推荐列表"
+            )
         return
 
     if kind in ("budget_in", "budget_not_in"):
