@@ -20,7 +20,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.auth.schemas import AuthOut, FavoriteOut, RegisterIn, UserOut, VerifyIn
+from app.auth.schemas import (
+    AuthOut,
+    FavoriteOut,
+    MergeIdentityIn,
+    MergeIdentityOut,
+    RegisterIn,
+    UserOut,
+    VerifyIn,
+)
 from app.auth.security import get_code_store, get_rate_limiter, get_token_store
 from app.catalog import services as catalog
 from app.common.config import get_settings
@@ -176,6 +184,71 @@ def delete_me(
     if authorization and authorization.startswith("Bearer "):
         get_token_store().revoke(authorization[len("Bearer "):].strip())
     return {"status": "deleted"}
+
+
+@router.post("/auth/merge-identity", response_model=MergeIdentityOut)
+def merge_identity(
+    payload: MergeIdentityIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> MergeIdentityOut:
+    """把**匿名身份**的个性化数据（偏好记忆 + 拒绝反馈）并进当前账户。
+
+    登录前的匿名浏览也积累了记忆；不合并的话，登录后那些记忆**留在匿名身份上**
+    ⇒ 换设备 / 清 cookie 就失忆。
+
+    合并后**匿名 token 失效**（迁移的 docstring 已定这个语义 ✓）：
+    匿名身份标记为 `merged`，数据搬进**账户的身份** ✓。
+    账户身份新建时把它的 token 返回一次（明文只给这一次 ✓）。
+    """
+    from app.agent.identity_merge import merge_anonymous_into_user
+    from app.agent.preferences import get_identity_by_token
+
+    anonymous = get_identity_by_token(db, payload.anonymous_token)
+    if anonymous is None:
+        raise not_found("匿名身份不存在、已失效或已合并过。")
+    outcome = merge_anonymous_into_user(db, anonymous, user)
+    return MergeIdentityOut(
+        identity_id=outcome.identity.id,
+        token=outcome.token,
+        memories_moved=outcome.memories_moved,
+        feedbacks_moved=outcome.feedbacks_moved,
+    )
+
+
+@router.get("/me/data")
+def export_my_data(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """导出我被记住的东西（偏好记忆 + 拒绝反馈）✓。
+
+    「记忆」是黑箱的话，「个性化」就谈不上可信 ✓ —— 用户有权看自己被记住了什么 ✓。
+    """
+    from app.agent.identity_merge import account_identity, export_identity_data
+
+    identity = account_identity(db, user)
+    if identity is None:
+        return {"identity_id": None, "memories": [], "variant_feedbacks": []}
+    return export_identity_data(db, identity)
+
+
+@router.delete("/me/data")
+def delete_my_data(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict[str, int]:
+    """删掉我被记住的东西（撤回权 ✓）。
+
+    删的是**个性化数据**（记忆 + 拒绝反馈）；账号与收藏不受影响 ✓
+    （注销账号是另一条语义：`DELETE /auth/me` 保留收藏 ✓）。
+    """
+    from app.agent.identity_merge import account_identity, delete_identity_data
+
+    identity = account_identity(db, user)
+    if identity is None:
+        return {"memories_deleted": 0, "feedbacks_deleted": 0}
+    return delete_identity_data(db, identity)
 
 
 @router.get("/me/favorites", response_model=list[FavoriteOut])

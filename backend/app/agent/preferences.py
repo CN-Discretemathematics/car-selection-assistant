@@ -116,11 +116,20 @@ def get_or_create_identity(
 
 
 def get_identity_by_token(db: Session, token: str) -> AnonymousIdentity | None:
-    """按 token 找身份；找不到返回 None。"""
+    """按 token 找身份；找不到或**已失效**返回 None。
+
+    ⚠️ 只认 `status="active"` 的身份（2026-10-21）：身份被并入账户后标记为
+    `merged` ⇒ 它的 token **必须失效**（迁移的 docstring 已定这个语义：
+    「匿名身份登录后要失效（合并进账户）而不是继续有效」）⇒
+    否则合并后那个匿名 token 还能继续读写记忆 ⇒ 数据会**分叉**到两个身份上。
+    """
     if not token:
         return None
     return db.scalar(
-        select(AnonymousIdentity).where(AnonymousIdentity.token_hash == hash_token(token))
+        select(AnonymousIdentity).where(
+            AnonymousIdentity.token_hash == hash_token(token),
+            AnonymousIdentity.status == "active",
+        )
     )
 
 
