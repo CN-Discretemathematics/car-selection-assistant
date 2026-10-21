@@ -9,7 +9,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.common.config import get_settings
@@ -24,6 +25,61 @@ def normalize_database_url(url: str) -> str:
     if url.startswith("postgresql://"):
         return "postgresql+psycopg://" + url[len("postgresql://"):]
     return url
+
+
+def describe_database_url(url: str | None) -> str:
+    """连接串的**脱敏描述**：只说「哪个库的哪台机」，**绝不含用户名与口令**。
+
+    ## 为什么需要（2026-10-21 代码审查 Blocker）
+
+    `backend/tools/smoke_durable_memory.py` 曾把 `DATABASE_URL` **原样打印**。
+    生产连接串带「用户名:口令@主机」前缀 ⇒ **口令明文进 CI 日志 / 终端历史 / 录屏**
+    ——reviewer §1 红线第 7 条（日志里回显密钥明文）。而那个工具的用法注释就写着
+    「真 PostgreSQL（CI / 生产同构）」⇒ 它正是会被拿去连生产的那一个。
+
+    这不是假想：`docs/2026-10-21-production-incident-review.md` 里已经记着
+    「生产库口令进了会话输出，建议轮换」——**同一个坑已经踩过一次**。
+
+    ⇒ 这里给出**唯一**的打印口径：调用方把连接串交给本函数，只输出主机与库名。
+    **用户名也不输出**——它不是机密，但没有展示价值，而最小暴露面永远是对的。
+
+    ## 口径示例
+
+    输入（生产连接串，带「用户名:口令@」前缀）
+        → 输出：`postgresql+psycopg://<主机>:5432/<库名>（口令已隐藏）`
+
+    输入（本地 SQLite 路径）
+        → 输出：`sqlite:///./dev.db`
+
+    ## 解析不了就**什么都不显示**
+
+    解析失败时回显原文＝把口令又漏一次 ⇒ 宁可显示「无法解析」也不回显。
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return "<未设，走默认>"
+    try:
+        parsed = make_url(raw)
+        drv = parsed.drivername
+        # ⚠️ 用 `get_backend_name()` 而不是 `parsed.dialect`——后者在 SQLAlchemy 的
+        # `URL` 上**不存在**（实测：AttributeError）。这里曾因此把所有输入都吞成
+        # 「无法解析」⇒ 窄的 except 才是对的：**解析类错误**降级，**代码错误**炸出来。
+        if parsed.get_backend_name() == "sqlite":
+            # sqlite 没有主机与用户：路径就在 database 里（`sqlite://` ⇒ 内存库）。
+            # ⚠️ 用三个斜杠：SQLAlchemy 自己渲染 `sqlite:///./dev.db` 也是这个形状
+            # （少一个斜杠就成了「相对路径」，读的人会误以为是别的引擎的相对路径）。
+            return f"{drv}:///{parsed.database}" if parsed.database else f"{drv}://"
+        host = parsed.host or "<无主机>"
+        # ⚠️ `URL.port` 在端口不是整数时**抛 ValueError**（不是返回 None）
+        port = f":{parsed.port}" if parsed.port else ""
+        database = parsed.database or "<无库名>"
+        # 「有没有口令」本身是有用信息（说明这条连接串带凭据），但**只说有、不说是什么**
+        hidden = "（口令已隐藏）" if parsed.password else ""
+    except (ArgumentError, ValueError) as err:
+        # 解析不了 ⇒ **什么都不显示**（回显原文＝把口令又漏一次）。
+        # 只捕获解析类错误：其余异常（代码写错）必须炸出来，不能被降级掩盖。
+        return f"<无法解析的连接串（已隐藏）：{type(err).__name__}>"
+    return f"{drv}://{host}{port}/{database}{hidden}"
 
 
 _engine: Engine | None = None
