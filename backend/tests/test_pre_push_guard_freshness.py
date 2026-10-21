@@ -160,8 +160,22 @@ def test_known_scope_tokens_still_resolve():
     """回归：新增两个 key 之后，原有 scope 一个都不能少。"""
     for token in ("web", "ui", "compare", "facts", "vehicles", "agent", "rag",
                   "data", "security", "ops", "reviewer", "skills", "docs",
-                  "lint", "hygiene", "chore", "test", "tools", "common"):
+                  "lint", "hygiene", "chore", "test", "tools", "common",
+                  "envtemplate"):
         assert token in guard.SCOPE_PATHS, f"{token} scope 丢失"
+
+
+def test_envtemplate_scope_is_narrow():
+    """配置模板 scope 必须**窄**——只覆盖那一个模板文件。
+
+    理由与 `docs` scope 同源：scope 一旦宽了（比如顺手带上 `tools/`），
+    scope↔路径的对应关系就没了意义，标签也就形同虚设。
+    """
+    envt = guard.SCOPE_PATHS["envtemplate"]
+    assert "backend/.env.example" in envt, envt
+    for p in envt:
+        assert p != "backend/", f"envtemplate 不得覆盖整个 backend/：{envt}"
+        assert not p.startswith("tools/"), f"envtemplate 不得覆盖门禁自身：{envt}"
 
 
 if __name__ == "__main__":

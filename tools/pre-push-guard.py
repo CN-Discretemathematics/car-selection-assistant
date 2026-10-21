@@ -139,6 +139,14 @@ SCOPE_PATHS: dict[str, list[str]] = {
     "deploy": ["deploy/", ".github/", "docs/"],
     "reviewer": ["reviewer/", "backend/tests/test_reviewer", "skills/"],
     "skills": ["skills/"],
+    # 2026-10-21：配置**模板**文件此前未被任何 scope 覆盖 ⇒ 每加一个配置开关
+    # （比如把生产闸门 `DURABLE_PREFS_MODE` 写进 `.env.example`）就只能靠
+    # `# gate-allow` 豁免放行 ⇒ 豁免机制被当常态用（正是本仓最不想要的形态）。
+    #
+    # 单独成**窄** scope：只覆盖这一个模板文件，不顺带授权 tools/ 与 .githooks/
+    # （= 门禁自身）——理由同上面 `docs` 那条：scope 一旦宽了，scope↔路径的
+    # 对应关系就没了意义。
+    "envtemplate": ["backend/.env.example"],
     "sync": ["docs/", "skills/", "README", "RAG.md"],
     # 2026-10-02：docs 不再有权改门禁自身。tools/ 与 .githooks/ 移出，
     # skills/ 也一并移出——skills/doc_sync_check.py 同样是门禁。
