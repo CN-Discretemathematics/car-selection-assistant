@@ -190,7 +190,7 @@ pytest（新增用例）· alembic **单头** · `pnpm --dir web exec tsc --noEm
 | 事实 | 位置 |
 | --- | --- |
 | 每轮对话留档（用户输入、回复、路由决策、解析出的车系、画像快照） | `backend/app/common/models.py:525` `AgentTurnLog` |
-| 写入前做 PII 掩码；取回需管理员 token；保留期默认 **30 天**（`AGENT_CONVERSATION_LOG_RETENTION_DAYS`） | `backend/app/common/config.py:43` |
+| 写入前做 PII 掩码；取回需**管理员级凭据**（与 `/admin` 同一套）；保留期默认 **30 天**（`AGENT_CONVERSATION_LOG_RETENTION_DAYS`） | `backend/app/common/config.py:43` |
 | 清理入口 | `backend/app/agent/conversation_log.py:155` `purge_expired` |
 
 ### 数据来源（拍板）
