@@ -827,8 +827,32 @@ def effective_brand_exclusions(
     直接毁掉答案）。
 
     这正是三层消解规则在品牌维度上的落法：**本轮 > 本会话 > 记忆**。
+
+    ## 闸门是 `observe` 不是 `refill`（2026-10-22 生产实测修）
+
+    本函数做的是「**算出**生效的排除项」，它有两个消费者：
+
+    - `persist_hints` —— 写库（`on`）或**落观察日志**（`shadow`）；
+    - `restore_into_profile` —— 回填进画像（会改变推荐结果）。
+
+    此前整个函数被 `refill` 门短路（`refill` = 回填进画像，`shadow` 档为假）
+    ⇒ `shadow` 档（`observe=True` / `refill=False`）**永远返回 {}**
+    ⇒ ① 影子日志里**结构性地没有 `brand_exclude`**——
+    `persist_hints` 里那段专门为它写的 `effective["brand_exclude"] = labels`
+    在 `shadow` 下是**死代码**；② 观察期看不见 7 个被跟踪键里的 1 个，
+    「观察够了就切 `on`」这道判据本身是**残的**。
+
+    实测（2026-10-22 生产 13 条探针）：3 条品牌排除探针
+    （「不考虑比亚迪」「不要特斯拉」「别要大众，也别要长安」）
+    的影子日志**全部没有** `brand_exclude`——而同期 `budget`/`body_type`/
+    `usage`/`passengers`/`avoid`/`energy_preference` 六键都正常出现。
+
+    「算出排除项」≠「回填进画像」：**算出来给日志看，不需要回填**。
+    回填那道门仍在 `restore_into_profile` 自己身上（`refill`）
+    ⇒ 本函数改用 `observe` 后，**shadow 的推荐结果逐位不变**
+    （画像不会被回填），只是影子日志多出 `brand_exclude` 这一个键。
     """
-    if identity is None or not mode_capabilities().refill:
+    if identity is None or not mode_capabilities().observe:
         return {}
     turn = turn_brand_hints or {}
     names = list(_memory_value(db, identity, "brand_exclude"))
