@@ -1,4 +1,4 @@
-"""生成多轮场景题库（首批 150 题 = 3 场景 × 50）。
+"""生成多轮场景题库（首批 150 题 = 3 场景 × 50；第二批 +1 场景 × 50）。
 
 ## 为什么用生成器而不是手写 JSON
 
@@ -9,7 +9,7 @@
 这与单轮题库的生成器（`tools/gen_eval_questions.py`）是同一套思路：
 分层抽样 + 固定种子（可复现）+ 分布记录。
 
-## 三类场景
+## 四类场景
 
 1. `reject_then_no_recommend`（50）—— 拒过的那台，下一轮还推不推？
    **同会话**，当前系统可测。
@@ -17,11 +17,13 @@
    **跨会话**，依赖 Phase 1 的持久化身份与偏好记忆 → 默认标 `enabled: false`。
 3. `memory_deleted`（50）—— 删掉的记忆是否真的不生效？
    **跨会话**，同上。
+4. `rejection_remembered_across_sessions`（50）—— 拒绝**跨会话**还记得吗？
+   **跨会话**，依赖 Phase 2b 的反馈表（拒绝写库 + 新会话读回）→ 默认 `enabled: false`。
 
 ## 跨会话场景默认关，用开关打开
 
-两个记忆场景要跑，前提是**跨会话**真的跨了：Phase 1 已合入（引擎 `handle`
-支持 `identity`）且 `DURABLE_PREFS_MODE=on`（`off`/`shadow` 模式**不回填**记忆，
+跨会话场景要跑，前提是**跨会话**真的跨了：引擎 `handle` 支持 `identity` ✓
+且 `DURABLE_PREFS_MODE=on`（`off`/`shadow` 模式**不回填**记忆、**不读写**反馈，
 断言必然红）。所以默认 `enabled: false`，用 `--enable-memory-scenarios` 打开。
 
 评测框架默认**只跑 enabled 的场景**（未启用的单独报数、不计入分母）——
@@ -533,6 +535,60 @@ def gen_memory_deleted_scenarios(
     return out
 
 
+def gen_rejection_remembered_scenarios(
+    rng: random.Random, requirements: list[dict], *, enabled: bool = False
+) -> list[dict]:
+    """场景 4：拒绝**跨会话**记住（Phase 2b「反馈表」的验收题）。
+
+    会话 1 说「甲车系不要」⇒ **新会话**（同一身份）再问同一需求 ⇒ 那台车**不再出现**。
+
+    ## 为什么要有这一类
+
+    会话内拒绝（`rejected_variant_ids`）本来就生效 ⇒ 场景 1 已经验过 ✓。
+    真正的新东西是**跨会话**：「拒绝」被写进反馈表、下次会话读回 ⇒
+    少这一类题，Phase 2b 就只有单测、没有**评测级**的验收 ✓。
+
+    ## 它测到的链路
+
+    身份 → 拒绝写反馈表 → **新会话**读回 → 并进 `rejected_variant_ids`
+    ⇒ 推荐链排除它 ⇒ 断言「它不再出现」✓（三段缺一段这题就红 ✓）。
+
+    ⚠️ 需要 `DURABLE_PREFS_MODE=on`：`off` 模式不写也不读反馈 ⇒ 断言必然红 ✓
+    （这正是**反证**的形状 ✓）。
+    """
+    out = []
+    for i, req in enumerate(requirements):
+        reason = rng.choice(REJECT_PHRASES)
+        car = req["series_name"]
+        out.append(
+            {
+                "id": f"mt_remembered_{i + 1:04d}",
+                "scenario": "rejection_remembered_across_sessions",
+                "enabled": enabled,
+                "reason_disabled": "依赖 Phase 2b：拒绝反馈跨会话记住（反馈表 + 身份）",
+                "turns": [
+                    {
+                        "user": _recommend_turn(req),
+                        "assert": [],
+                        "session": "first",
+                    },
+                    {
+                        "user": f"{car}不要，{reason}",
+                        "assert": [],
+                        "session": "first",
+                    },
+                    {
+                        # **新会话**（同一身份）：那台车不该再回来
+                        "user": _recommend_turn(req),
+                        "assert": [{"type": "not_recommended", "car": car}],
+                        "session": "second",
+                    },
+                ],
+            }
+        )
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="生成多轮场景题库")
     parser.add_argument("--out", default="eval/multiturn.json", help="输出路径")
@@ -542,9 +598,9 @@ def main(argv: list[str] | None = None) -> int:
         "--enable-memory-scenarios",
         action="store_true",
         help=(
-            "启用两个跨会话记忆场景（默认关）。需要：Phase 1 已合入"
-            "（引擎 handle 支持 identity）+ DURABLE_PREFS_MODE=on"
-            "（off/shadow 模式不回填记忆，断言必然红）"
+            "启用三个**跨会话**场景（回访记忆 / 删记忆 / 拒绝跨会话记住；默认关）。需要："
+            "引擎 handle 支持 identity + DURABLE_PREFS_MODE=on"
+            "（off/shadow 模式不回填记忆、不读写反馈，断言必然红）"
         ),
     )
     args = parser.parse_args(argv)
@@ -563,6 +619,9 @@ def main(argv: list[str] | None = None) -> int:
             rng, requirements, enabled=args.enable_memory_scenarios
         )
         + gen_memory_deleted_scenarios(
+            rng, requirements, enabled=args.enable_memory_scenarios
+        )
+        + gen_rejection_remembered_scenarios(
             rng, requirements, enabled=args.enable_memory_scenarios
         )
     )
