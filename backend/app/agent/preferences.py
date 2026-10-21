@@ -749,8 +749,16 @@ def resolve_brand_names(db: Session, names: list[str]) -> tuple[list[int], list[
     ⇒ 实测 `resolve_brand_names(['大众'])` 返回 `([], [])`
     ⇒ **跨会话回填时，品牌排除项静默失效**（没有任何报错）。
 
-    ⇒ 这里统一用「不要 {name}」去解析：走的是**否定语境**那条路，
-    歧义守卫对否定语境不适用（见 `catalog/brands.py::resolve_brand_mentions`）。
+    ⇒ 这里用**显式参数**声明语境：`resolve_brand_mentions(db, name, exclude_context=True)`
+    ——歧义守卫对排除语境不适用（见 `catalog/brands.py::resolve_brand_mentions`）。
+
+    ## 为什么不再拼「不要 X」（2026-10-21 结构修复）
+
+    此前这里拼 `f"不要{clean}"` 再调解析器 ⇒ 语境只存在于**否定前缀词表**与
+    **前 4 字窗口**两个隐式约定里。那套约定一旦被改（换词表、改窗口），
+    这条路径会**静默失效**：无报错、无日志，只是「排除项又不见了」。
+
+    ⇒ 现在语境是**参数**，不是字符串暗号：词表怎么改都不影响这条路径。
     """
     from app.catalog.brands import resolve_brand_mentions
 
@@ -760,7 +768,7 @@ def resolve_brand_names(db: Session, names: list[str]) -> tuple[list[int], list[
         clean = str(name or "").strip()
         if not clean:
             continue
-        hints = resolve_brand_mentions(db, f"不要{clean}")
+        hints = resolve_brand_mentions(db, clean, exclude_context=True)
         for bid, label in zip(
             hints.get("brand_exclude_ids") or [],
             hints.get("brand_exclude_labels") or [],
