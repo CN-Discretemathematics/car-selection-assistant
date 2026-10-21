@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -31,8 +32,102 @@ INTENT_WORDS = (
 # 强意图词（用于消解「理想/长安/大众」这类日常词歧义）：
 # 只认明确的购车动作，不含「预算/要/看/车」等过宽的词，否则「理想的预算 20 万」会误判成品牌「理想」
 STRONG_INTENT_WORDS = ("品牌", "买", "购", "选车", "只要", "必须", "就要", "想要", "考虑", "关注", "看看")
-# 易与日常词混淆的品牌名（归一化后）：仅在同句出现购买意图词时才作约束
+#: 易与日常词混淆的品牌名（归一化后）。
+#:
+#: ## 2026-10-20 单一归属
+#:
+#: 此前**有两份不一致的表**：
+#:   - 本文件 `AMBIGUOUS_BRANDS` = {理想, 长安, 大众, 未来, 启辰, 东风}（6 个）
+#:   - `agent/routing.py` 的 `_AMBIGUOUS_BRAND_NAMES` = 上者 + {现代, 银河, 北京, 红旗, 长城}（11 个）
+#:
+#: 同一个知识切成两半，后果是**硬约束路径与语境路径对同一个词给出不同判定**
+#: ——「北京」既是品牌也是日常词（「北京堵车」），却不在本表里。
+#:
+#: 现在表是**一份**（本处），但**规则仍分三套**——因为三处用途不同，
+#: 判定条件本就不同（详见 `BrandAmbiguity`）。
+#:
+#: ⚠️ **本表暂取 `brands.py` 原有 6 个，未与 routing 的 11 个取并集。**
+#: 取并集会让 现代/银河/北京/红旗/长城 在**硬约束路径**上从「不特殊对待」
+#: 变成「必须带强意图词」——那是**行为变更**，且本地 dev.db 只有 2 个品牌、
+#: 测不出来（这 5 个词在测试夹具里从未作为品牌出现）。
+#: 故列为**待生产验证的独立决策**，不混进本次收拢。
 AMBIGUOUS_BRANDS = {"理想", "长安", "大众", "未来", "启辰", "东风"}
+
+#: 2026-10-20 从 `agent/routing.py` 的 `_AMBIGUOUS_BRAND_NAMES` 并入。
+#: 这组词**只在「汽车语境」用途上**受保护（需句中另有汽车信号），
+#: 硬约束用途上不特殊对待——**原样保留 routing 的既有行为**。
+#: 差异说明见 `BRAND_AMBIGUITY` 的注释。
+CONTEXT_ONLY_AMBIGUOUS_BRANDS = {"现代", "银河", "北京", "红旗", "长城"}
+
+
+@dataclass(frozen=True)
+class BrandAmbiguity:
+    """一个品牌名有多「日常词」，以及各处该怎么判它。
+
+    ## 为什么规则分三套
+
+    「大众」既是品牌也是日常词，但它在三处语境下的判定条件**本就不同**：
+
+    | 用途 | 规则 | 出处 |
+    | --- | --- | --- |
+    | **简称登记** | 不登记「大众汽车」→「大众」这种简称 | `_load_entries` |
+    | **硬约束** | 需**强意图词**（「我想买大众」算，「大众化」不算） | `resolve_brand_mentions` |
+    | **汽车语境** | 需句中**另有汽车信号** | `agent/routing.py::mentions_known_brand` |
+
+    强行把三套规则并成一套，会让某个用途迁就另一个用途——那是错的。
+    **表是一份，规则各自保留。**
+    """
+
+    #: 这些名字**不登记简称**：「小米汽车」→「小米」这种简称对日常词品牌会误命中
+    NO_STEM: bool = True
+    #: 这些名字要构成**硬约束**必须带强意图词
+    NEEDS_STRONG_INTENT: bool = True
+    #: 这些名字要算**汽车语境**必须句中另有汽车信号
+    NEEDS_OTHER_CAR_SIGNAL: bool = True
+
+
+#: 每个易混品牌的歧义程度。
+#:
+#: ⚠️ **两组的差异是刻意的，不是遗漏**：
+#:
+#: | 组 | 成员 | 在「硬约束」用途上 | 在「汽车语境」用途上 |
+#: | --- | --- | --- | --- |
+#: | `AMBIGUOUS_BRANDS` | 理想/长安/大众/未来/启辰/东风 | 需强意图词 | 需另有汽车信号 |
+#: | `CONTEXT_ONLY_AMBIGUOUS_BRANDS` | 现代/银河/北京/红旗/长城 | **不特殊对待** | 需另有汽车信号 |
+#:
+#: 第二组是 2026-10-20 从 `agent/routing.py` 的本地副本并进来的。
+#: 它们此前**只**在语境路径上受保护，硬约束路径上不受——
+#: 即「北京现代ix35」在语境判定里被当日常词挡掉，在硬约束判定里却不被挡。
+#: 这个不一致是**既成行为**，本笔**原样保留**：把它们也加进硬约束保护
+#: 会改变「只要北京现代」这类消息的解析结果，是**行为变更**，
+#: 需生产库验证（本地 dev.db 只有 2 个品牌，测不出来）。
+#:
+#: 将来若要统一两组的硬约束行为，改这一处即可——**不必再改三处**。
+BRAND_AMBIGUITY: dict[str, BrandAmbiguity] = {
+    **{name: BrandAmbiguity() for name in AMBIGUOUS_BRANDS},
+    **{
+        name: BrandAmbiguity(NEEDS_STRONG_INTENT=False)
+        for name in CONTEXT_ONLY_AMBIGUOUS_BRANDS
+    },
+}
+
+
+def is_ambiguous_brand(name: str, *, rule: str) -> bool:
+    """品牌名 `name` 在指定用途下是否属于「日常词歧义」。
+
+    `rule` 取值：`"stem"`（简称登记）/ `"constraint"`（硬约束）/ `"context"`（汽车语境）。
+    未知规则抛 ValueError——**拼错规则名要立刻炸，不能静默按默认走**。
+    """
+    flags = BRAND_AMBIGUITY.get(name)
+    if flags is None:
+        return False
+    if rule == "stem":
+        return flags.NO_STEM
+    if rule == "constraint":
+        return flags.NEEDS_STRONG_INTENT
+    if rule == "context":
+        return flags.NEEDS_OTHER_CAR_SIGNAL
+    raise ValueError(f"未知的歧义判定用途: {rule!r}")
 
 
 def _strip_generic_suffix(brand_name: str) -> str:
@@ -82,7 +177,7 @@ def _load_entries(db: Session) -> tuple[tuple[str, int, str], ...]:
             stem
             and stem != normalize_name(name or "")
             and stem not in exact
-            and stem not in AMBIGUOUS_BRANDS
+            and not is_ambiguous_brand(stem, rule="stem")
         ):
             entries.append((stem, brand_id, name))
     entries.sort(key=lambda item: -len(item[0]))
@@ -198,10 +293,26 @@ def brand_candidates_in_message(db: Session, message: str) -> set[str]:
 
     ## 三步，缺一不可
 
-    1. **遮蔽品牌词**（见函数体）。不遮蔽的话切段字符会劈进品牌词：
+    1. **按比较连接词切段**（全半角逗号也算）。切段字符会劈进品牌词：
        「比亚迪」含「比」，「比亚迪和汉哪个好」被切成 `['比','亚迪','汉']`。
-    2. 按比较连接词切段（全半角逗号也算）。
-    3. 剥掉每段末尾的问句尾巴，要求品牌词与整段**完全相等**。
+    2. 剥掉每段末尾的问句尾巴与开头的提问前缀。
+    3. 要求品牌词与剥完的**整段完全相等**。
+
+    ### 关于「遮蔽」——2026-10-20 更正
+
+    本函数早前的 docstring 写「1. **遮蔽品牌词**（见函数体）」，并说遮蔽是
+    「三步，缺一不可」的第一步。**函数体里从来就没有遮蔽**——它直接切段，
+    然后靠第 3 步的「整段相等」**隐式**挡住了被劈开的碎片：
+
+        「比亚迪和汉哪个好」→ 切出 ['比', '亚迪', '汉'] → 三段都不等于「比亚迪」→ 不报
+
+    也就是说「遮蔽」这个概念一直是由「整段相等」承担的，**不是独立的一步**。
+    文档与实现漂移了很久，下一个读到这里的人会以为函数体里有遮蔽代码，
+    找不到就以为代码被改坏了。**此处按实现更正文档，不改行为。**
+
+    另有一处**真正的区间遮蔽**在别处：`agent/series_qa.py` 的
+    `_series_name_spans` + `_brand_appears_outside`——那是给「品牌词是否落在
+    已解析车系名区间之外」用的，与本函数无关。
 
     ## 为什么不是「重建用户写了什么再建区间」
 
@@ -325,13 +436,18 @@ def resolve_brand_mentions(
             continue  # 已被更长的品牌名占住（`_load_entries` 已按长度降序）
         if any(name in series_norm for series_norm in series_norms):
             continue  # 品牌名属于被点名的车系名（「银河星愿」）→ 是对车系的指代
-        if name in AMBIGUOUS_BRANDS and not (has_intent and has_strong_intent):
+        if is_ambiguous_brand(name, rule="constraint") and not (has_intent and has_strong_intent):
             continue  # 「理想的预算 20 万」不当作品牌「理想」；「我想买理想」才算
-        if not (explicit or _is_bare_brand(normalized, name)):
-            continue  # 只是提及，不构成硬约束
-        claimed.append((start, end))
         prefix = normalized[max(0, start - 4): start]
-        if any(neg in prefix for neg in NEGATION_PREFIXES):
+        negated = any(neg in prefix for neg in NEGATION_PREFIXES)
+        if not negated and not (explicit or _is_bare_brand(normalized, name)):
+            continue  # 只是提及，不构成硬约束
+        # ⚠️ 2026-10-21：**否定词本身就是约束**，不需要再要一个意图词。
+        # 此前否定判定排在「提及即忽略」之后，于是「预算20万，通勤，不要比亚迪」
+        # 里的「不要比亚迪」被当普通提及丢掉——用户明说的排除项**根本没进画像**，
+        # 而跨会话记忆要记的恰恰就是它（计划 §1.2：硬约束排除项错了直接毁掉答案）。
+        claimed.append((start, end))
+        if negated:
             exclude[brand_id] = label
         else:
             include[brand_id] = label
@@ -345,6 +461,11 @@ def resolve_brand_mentions(
         result["brand_labels"] = [include[i] for i in sorted(include)]
     if exclude:
         result["brand_exclude_ids"] = sorted(exclude)
+        # ⚠️ 2026-10-21：排除项**也要带名字**。此前只给 ids，
+        # `merge_profile` 只能把 id 当字符串写进 `brand_exclude_labels`——
+        # 追问回执于是显示「不要12」而不是「不要比亚迪」（用户看到的是一串数字）。
+        # 跨会话记忆要记的也正是**名字**（id 会随库重导入重排）。
+        result["brand_exclude_labels"] = [exclude[i] for i in sorted(exclude)]
     return result
 
 

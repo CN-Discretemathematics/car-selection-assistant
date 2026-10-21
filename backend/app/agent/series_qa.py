@@ -27,12 +27,14 @@ from app.catalog.series_index import (
     display_name,
     rank_headlines,
     head_with_size,
+    resolve_variants,
     series_fact_rows,
     size_line,
     size_lines,
     series_headline,
+    variant_fact_rows,
 )
-from app.common.enums import MISSING_VALUE_LABEL
+from app.common.enums import MISSING_VALUE_LABEL, expand_energy_prefs
 from app.common.models import Brand, SpecFact, VehicleSeries, VehicleVariant
 from app.variants.normalization import display_fact_value, fact_display_label, fact_identity
 
@@ -805,6 +807,19 @@ def _brand_disclosure(
     return f"\n{detail}——它不是一款车。想比哪一款？把车系名给我{hint}，我就能比。"
 
 
+def _variant_label(series: VehicleSeries, brand: Brand | None, variant: VehicleVariant) -> str:
+    """款型在回答里的称呼。
+
+    库里的款型显示名**不含车系名**（「2026款 标准版」），单独出现在回答里用户
+    认不出是哪台车 → 车系名不在显示名里时补上。
+    """
+    name = (variant.display_name or "").strip()
+    series_name = display_name(series, brand)
+    if series_name and series_name not in name:
+        return f"{series_name} {name}".strip()
+    return name
+
+
 def build_series_qa_answer(
     db: Session,
     resolved: list[tuple[VehicleSeries, Brand | None]],
@@ -821,6 +836,19 @@ def build_series_qa_answer(
         "动态驾驶感受、车主口碑与优惠信息不在数据范围内，具体以品牌官网为准。"
     )
 
+    # D1.1 款型名上下文消歧：用户点名了款型（「IONIQ 5 N 2026款 标准版 的轴距」）时，
+    # 参数要答**那个款型**的值，而不是把全系多档值并列给用户（答非所问）。
+    # 消歧不确定时 `variants` 为空 → 退回全系口径（宁可粗一点，不可认错款型）。
+    variants = resolve_variants(db, message, resolved)
+    # 同一车系被点名了**多个款型**时不收窄：那种问法（「A 的 X 款 和 Y 款 差在哪」）
+    # 要看的是款型之间的差异，把参数列收窄到其中一个款型，反而把另一个款型的值藏起来——
+    # 而那几个值**正是差异的来源**（实测：领克08 EM-P 两款型对比，多档值反而消失了）。
+    by_series: dict[int, list[VehicleVariant]] = {}
+    for variant, series in variants:
+        by_series.setdefault(series.id, []).append(variant)
+    variant_by_series = {sid: vs[0] for sid, vs in by_series.items() if len(vs) == 1}
+    variant_facts = variant_fact_rows(db, [v.id for v, _s in variants])
+
     if len(resolved) == 1:
         series, brand = resolved[0]
         # 2026-10-05（N5）：此前是 `关于「X」：` + `_describe()`，而 `_describe()`
@@ -831,9 +859,18 @@ def build_series_qa_answer(
         parts = [_describe(db, series, brand)]
         # 按需参数查找（评审 M-R10）：提问命中的维度从全量 DB 事实直接取值
         facts = series_fact_rows(db, [series.id]).get(series.id, [])
+        qualifier = ""
+        variant = variant_by_series.get(series.id)
+        if variant is not None:
+            rows = variant_facts.get(variant.id) or []
+            # ⚠️ 该款型在库里**一条事实都没有**时不收窄：否则「该款型没收录参数」
+            # 会变成一句「官方资料未披露」——那是**假否定**（同系别的款型明明有）。
+            if rows:
+                facts = rows
+                qualifier = f"（按「{_variant_label(series, brand, variant)}」）"
         probed = probe_facts(facts, message)
         if probed:
-            parts.append("你问到的相关参数：" + "；".join(probed) + "。")
+            parts.append("你问到的相关参数" + qualifier + "：" + "；".join(probed) + "。")
         missing_dims = missing_param_labels(facts, message)
         if missing_dims:
             # 诚实性兜底（评测 v3）：问到的维度 DB 完全没有 → 显式「官方资料未披露」，
@@ -870,9 +907,16 @@ def build_series_qa_answer(
             )
         # 按需参数查找（评审 M-R10）：对比语境下同样回答问到的具体参数
         series_facts = facts_by_series.get(series.id, [])
+        qualifier = ""
+        variant = variant_by_series.get(series.id)
+        if variant is not None:
+            rows = variant_facts.get(variant.id) or []
+            if rows:
+                series_facts = rows
+                qualifier = f"（按「{_variant_label(series, brand, variant)}」）"
         probed = probe_facts(series_facts, message)
         if probed:
-            blocks.append("  你问到的相关参数：" + "；".join(probed))
+            blocks.append("  你问到的相关参数" + qualifier + "：" + "；".join(probed))
         # 诚实性兜底对齐单车系路径（评审 C11）：某车系在问到的维度/按键上无数据时
         # 显式标注，不沉默跳过
         missing_dims = missing_param_labels(series_facts, message)
@@ -1047,19 +1091,41 @@ _SPEC_CATEGORY = "参数信息"
 
 
 def build_variant_diff_answer(
-    db: Session, series: VehicleSeries, brand: Brand | None, message: str = ""
+    db: Session,
+    series: VehicleSeries,
+    brand: Brand | None,
+    message: str = "",
+    *,
+    energy_preference: list[str] | None = None,
 ) -> tuple[str, list[dict]]:
     """同一车系内「版本差异」确定性回答。
 
     返回 (文本, 版本行)。版本行供前端渲染候选卡片与「加入对比」动作。
     事实全部来自在售 SKU 的 SpecFact / OfficialPrice；无数据时如实说明（不提供外部跳转，
     官方车型页链接已于 2026-09-16 删除，见 docs/deployment.md §8）。
+
+    ## 能源口径（2026-10-21）
+
+    「享界S9 的**纯电版**有哪些款型」——此前这里**无视**能源限定，
+    把整个车系（在售 + 增程 + 插混）都列了出来 ⇒ 用户问纯电版、答案里混着增程版
+    （单轮题库 q0024 / q0070 / q0078 实测三题都栽在这里 ⇒ 硬约束违规）。
+
+    ⇒ `energy_preference`（来自画像，**唯一来源**是 `extract_hints`）给出时，
+    只列该能源的款型；一款都没有就**如实说没有**（不是把别的能源端上来）。
     """
     name = display_name(series, brand)
     rows: list[tuple[VehicleVariant, float | None]] = []
     # 2026-10-02（P5.2 / H4）：价格批量取。此前逐款型 SELECT，一个 8 款型的车系
     # 就是 8 次往返；口径与 variant_current_price 完全一致。
     on_sale = catalog.series_variants(db, series.id, on_sale_only=True)
+    on_sale_total = len(on_sale)
+    # 能源限定（2026-10-21）：只列用户问的那一种能源。
+    # ⚠️ **能源未标注的款型保留**——缺数据 ≠ 不满足（本仓原则）。
+    allowed_energy = expand_energy_prefs(list(energy_preference or []))
+    if allowed_energy:
+        on_sale = [
+            v for v in on_sale if not v.energy_type or v.energy_type in allowed_energy
+        ]
     prices = catalog.variants_current_prices(db, [v.id for v in on_sale])
     for variant in on_sale:
         price = prices.get(variant.id)
@@ -1068,6 +1134,20 @@ def build_variant_diff_answer(
 
     archived = False  # 无在售款型时降级展示库内归档款型（标注停售）
     if not rows:
+        # 能源限定下**一款都不匹配**（2026-10-21）：在售款型有，但都不是用户问的那种能源
+        # （例：「问界M7 的纯电版」——库里在售的是增程版）。
+        # ⇒ 如实说「没有这种版本」，**不把别的能源端上来**（那是答非所问）。
+        if allowed_energy and on_sale_total > 0:
+            label = "、".join(
+                _ENERGY_LABEL.get(e, e) for e in allowed_energy
+            )
+            text = (
+                f"【{name}】在售 {on_sale_total} 个款型里**没有{label}版**。"
+                "现有在售款型的能源类型与你要的不一致；"
+                "如果想看其他能源的车型，可以直接告诉我。\n"
+                + "以上口径：只陈列数据库既有事实，绝不编造。"
+            )
+            return text, []
         # 2026-09 部署实测：部分车系（护卫舰07/宝骏云朵/凯美瑞旧代次等 31 个）款型
         # 全为停售——数据本身完整，直接展示并标注停售，比「未收录」死胡同更有用
         all_variants = catalog.series_variants(db, series.id, on_sale_only=False)

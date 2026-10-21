@@ -44,6 +44,30 @@ def latest_sales_month(db: Session) -> str:
     return max_month or latest_full_month()
 
 
+def latest_sales_month_strict(
+    db: Session, *, sales_types: tuple[str, ...] | None = ("retail", "portal")
+) -> str | None:
+    """最近一个有销量数据的月份——**不回退**，且口径可选。
+
+    与 `latest_sales_month` 的差别只有两点，两点都**必须**不一样：
+
+    1. **不回退**最近完整自然月。抓取侧要的是「真有数据的那个月」；
+       回退出来的月份会让它去抓一个库里根本没有的月（白跑一轮）。
+    2. `sales_types` 可选：`None` = **任意口径**（含 wholesale / insurance）。
+       水位对比（集合是不是落后于库内销量）要的是「库里最新有没有新销量」，
+       不该只看用户看得到的那两种。
+
+    2026-10-21（P6.2）：此前这三处口径各写一份 `max(MonthlySales.month)`，
+    口径已经漂了（有的带 sales_type 过滤、有的不带；有的回退、有的不回退）——
+    同一件事三份实现 = 迟早漂。收口到本文件，**语义逐条保持不变**。
+    """
+    stmt = select(func.max(MonthlySales.month))
+    if sales_types is not None:
+        stmt = stmt.where(MonthlySales.sales_type.in_(sales_types))
+    latest = db.scalar(stmt)
+    return str(latest) if latest is not None else None
+
+
 def get_series(db: Session, series_id: int) -> VehicleSeries | None:
     return db.get(VehicleSeries, series_id)
 

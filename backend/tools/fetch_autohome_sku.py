@@ -36,6 +36,7 @@ from app.sources.autohome_sku import (
     decode_autohome_html,
     fetch_series_index,
     fetch_sku_config,
+    fetch_with_retry,
     parse_series_index,
 )
 from app.sources.fetcher import DEFAULT_USER_AGENT
@@ -48,7 +49,8 @@ DETAIL_PATH = os.path.join(SNAPSHOT_DIR, "autohome-series-detail-all.json")
 CHECKPOINT_PATH = os.path.join(SNAPSHOT_DIR, "autohome-sku-checkpoint.json")
 
 SLEEP_SECONDS = 1.2  # 礼貌限频（≥1s/请求）
-MAX_RETRIES = 3
+# 2026-10-21：重试次数不再在本层定义——重试策略已收敛到
+# `app/sources/autohome_sku.RETRY_ATTEMPTS`（指数退避 + 抖动 + 只重试瞬时错误）。
 # 汽车之家来源名（external_series_refs 的唯一键是 (source_id, external_id)，不同来源的
 # external_id 可能重号，故按来源限定，避免将来接入第二个来源时抓到别的车系）
 AUTOHOME_SOURCE_NAME = "汽车之家"
@@ -328,15 +330,13 @@ def stage_index(_args) -> int:
     blocks: list[dict] = []
     for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
         html, url = None, None
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                html, url = fetch_series_index(letter)
-                break
-            except Exception as err:  # noqa: BLE001
-                if attempt == MAX_RETRIES:
-                    print(f"{letter} 失败：{type(err).__name__}: {err}", file=sys.stderr)
-                    return 1
-                time.sleep(3.0)
+        # 重试由**库层** `fetch_series_index` 负责（指数退避 + 抖动 + 只重试瞬时错误）——
+        # tools 层不再自带固定 3s 的循环（2026-10-21：重试策略收敛到一处）。
+        try:
+            html, url = fetch_series_index(letter)
+        except Exception as err:  # noqa: BLE001
+            print(f"{letter} 失败：{type(err).__name__}: {err}", file=sys.stderr)
+            return 1
         parsed = parse_series_index(html)
         blocks.extend(parsed["brands"])
         print(f"{letter}: {len(parsed['brands'])} 个品牌块 ({url})")
@@ -433,21 +433,18 @@ def stage_series(args) -> int:
 
 
 def _fetch_series_page_with_retry(sid: str) -> dict:
+    """抓车系详情页。**重试策略用库层那一份**（退避 + 抖动 + 只重试瞬时错误）。"""
     import urllib.request
 
     url = f"https://www.autohome.com.cn/{sid}/"
-    last_err: Exception | None = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                html = decode_autohome_html(resp.read(), resp.headers.get("Content-Type") or "")
-            return parse_series_page(html, sid)
-        except Exception as err:  # noqa: BLE001
-            last_err = err
-            if attempt < MAX_RETRIES:
-                time.sleep(3.0)
-    raise last_err  # type: ignore[misc]
+
+    def _once() -> dict:
+        req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            html = decode_autohome_html(resp.read(), resp.headers.get("Content-Type") or "")
+        return parse_series_page(html, sid)
+
+    return fetch_with_retry(_once, label=f"车系页 {sid}")
 
 
 def _price_note_from_row(row: dict) -> str | None:
@@ -564,15 +561,9 @@ def _detail_energy_types(detail: dict) -> list[str]:
 
 
 def _fetch_sku_with_retry(sid: str) -> dict:
-    last_err: Exception | None = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            return fetch_sku_config(sid)
-        except Exception as err:  # noqa: BLE001
-            last_err = err
-            if attempt < MAX_RETRIES:
-                time.sleep(3.0)
-    raise last_err  # type: ignore[misc]
+    """SKU 抓取。**重试在库层**（`fetch_sku_config` 自带退避 + 抖动），
+    tools 层不再套一层——两层各重试 3 次就是 9 次请求，纯属加倍打扰对方。"""
+    return fetch_sku_config(sid)
 
 
 def _save_raw_sku(sid: str, payload: dict) -> None:

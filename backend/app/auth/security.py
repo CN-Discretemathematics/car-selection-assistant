@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 
 from app.common.config import get_settings
+from app.common.redis_client import StoreSelector
 
 
 @dataclass
@@ -96,48 +97,45 @@ class RateLimiter:
         return True
 
 
-_code_store: CodeStore | None = None
-_token_store: TokenStore | None = None
-_rate_limiter: RateLimiter | None = None
+_code_store_selector = StoreSelector(
+    redis_factory=lambda client: RedisCodeStore(
+        client, ttl_seconds=get_settings().auth_code_ttl_seconds
+    ),
+    local_factory=lambda: CodeStore(ttl_seconds=get_settings().auth_code_ttl_seconds),
+    name="登录验证码",
+)
+_token_store_selector = StoreSelector(
+    redis_factory=lambda client: RedisTokenStore(
+        client, ttl_seconds=get_settings().auth_token_ttl_seconds
+    ),
+    local_factory=lambda: TokenStore(ttl_seconds=get_settings().auth_token_ttl_seconds),
+    name="登录令牌",
+)
+_rate_limiter_selector = StoreSelector(
+    redis_factory=lambda client: RedisRateLimiter(client),
+    local_factory=RateLimiter,
+    name="限流器",
+)
 
 
 def get_code_store() -> CodeStore:
-    global _code_store
-    if _code_store is None:
-        from app.common.redis_client import get_redis
+    """验证码存储（生产 Redis；不可用时回退进程内，**并定期重试**）。
 
-        redis_client = get_redis()
-        if redis_client is not None:
-            _code_store = RedisCodeStore(redis_client, ttl_seconds=get_settings().auth_code_ttl_seconds)
-        else:
-            _code_store = CodeStore(ttl_seconds=get_settings().auth_code_ttl_seconds)
-    return _code_store
+    2026-10-21（H1）：原先只探一次 Redis，首次不可达就永久缓存进程内实现——
+    多 worker 下验证码只在签发它的那个 worker 里，用户在另一个 worker 上
+    提交必然「验证码无效」，且 Redis 恢复后不自愈。
+    """
+    return _code_store_selector.get()
 
 
 def get_token_store() -> TokenStore:
-    global _token_store
-    if _token_store is None:
-        from app.common.redis_client import get_redis
-
-        redis_client = get_redis()
-        if redis_client is not None:
-            _token_store = RedisTokenStore(redis_client, ttl_seconds=get_settings().auth_token_ttl_seconds)
-        else:
-            _token_store = TokenStore(ttl_seconds=get_settings().auth_token_ttl_seconds)
-    return _token_store
+    """登录令牌存储（同上：Redis 优先，回退进程内并定期重试）。"""
+    return _token_store_selector.get()
 
 
 def get_rate_limiter() -> RateLimiter:
-    global _rate_limiter
-    if _rate_limiter is None:
-        from app.common.redis_client import get_redis
-
-        redis_client = get_redis()
-        if redis_client is not None:
-            _rate_limiter = RedisRateLimiter(redis_client)
-        else:
-            _rate_limiter = RateLimiter()
-    return _rate_limiter
+    """限流器（同上）。回退进程内时各 worker 各算各的——这是降级模式的已知代价。"""
+    return _rate_limiter_selector.get()
 
 
 class RedisCodeStore:

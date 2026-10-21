@@ -103,6 +103,14 @@ export interface RagStatus {
   };
   runs_logged: number;
   db_counts?: Record<string, number>;
+  /** 车系款型覆盖率。真缺口与「全部停售」分开——后者是上游标记的真实状态，不是回补目标。 */
+  coverage?: {
+    series_active: number;
+    series_with_variants: number;
+    series_on_sale: number;
+    gap_no_variants: number;
+    gap_only_off_sale: number;
+  };
 }
 
 export interface TryQueryOut {

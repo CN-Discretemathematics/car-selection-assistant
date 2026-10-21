@@ -1,6 +1,8 @@
 """Agent API Schema。"""
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -12,7 +14,20 @@ class Budget(BaseModel):
 
 
 class UserProfile(BaseModel):
-    """结构化用户画像（13.1）。事实只来自用户对话，不落账户存储。"""
+    """结构化用户画像（13.1）。
+
+    事实只来自用户对话。
+
+    2026-10-20：原 docstring 写「不落账户存储」——那是**刻意的产品决定**，
+    已由 [ADR-0001](../../docs/adr/0001-profile-persisted-across-sessions.md) 推翻：
+    跨会话记忆要求把**用户明说过的**偏好持久化。
+    推翻后的口径：
+    - **画像的来源**仍然只有用户对话与数据库——模型推断不直接进画像；
+    - **跨会话**通过 `preference_memories` 持久化，**只存封闭词表内的、
+      用户明说或确认过的**条目（见 `app/agent/preferences.py`）；
+    - 推断类记忆**不得**涉及 `body_type` / `energy_preference` / `budget`
+      （猜错会静默砍掉整个候选集）。
+    """
 
     budget: Budget = Field(default_factory=Budget)
     region: str | None = None
@@ -34,6 +49,13 @@ class UserProfile(BaseModel):
     nice_to_have: list[str] = Field(default_factory=list)
     avoid: list[str] = Field(default_factory=list)
     weights: dict[str, float] = Field(default_factory=dict)
+    # 首要维度（2026-10-21，计划 §1.2）：用户**明确抬高**的那个维度
+    # （「我最看重动力」→ power）。只用于**文案组织**——先讲用户最在意的维度，
+    # 再讲代价；**不动打分与排序**（排序仍由 8 维软评分决定）。
+    #
+    # ⚠️ 不是「默认权重最高的维度」：默认里 budget 最高（0.30），那是评分口径，
+    # 不是用户的偏好。判据是**这一轮被抬高**的那些维度。
+    top_dim: str | None = None
     # L4 软缺口追问：已经问过用户「更看重哪一点」的维度键（space/energy/power…）。
     # 非空即**别再问**——真人销售不会把同一个问题问两遍。
     # 存的是**维度键**而不是文案：文案会改，键不会。
@@ -42,6 +64,15 @@ class UserProfile(BaseModel):
     # 用户已点名的车系（会话记忆）：开始就确定车型时，推荐只关注这些车系，
     # 直到用户明确表示「看看其他车」才解锁（评审：指定车型优先）
     locked_series_ids: list[int] = Field(default_factory=list)
+    # 用户**明确拒绝过**的款型（会话内，2026-10-21）。
+    #
+    # 为什么单独一个字段而不是塞进 `avoid`：`avoid` 是**车型/能源维度**的排除
+    # （「不要 SUV」「不要电车」），而这里是**具体某一款**被否掉（「不喜欢这台」）。
+    # 两者粒度不同：前者影响一整类车，后者只影响这一款。
+    #
+    # 语义（计划「拒绝后不再推」场景）：用户拒绝过的款型，后续推荐**不再出现**。
+    # 只在**会话内**生效（跨会话需要反馈表 + 影子调参，那是 Phase 2 的另一半）。
+    rejected_variant_ids: list[int] = Field(default_factory=list)
     # 上一轮**本系统自己推荐过**的款型 id（2026-10-05）。
     #
     # 为什么必须记：用户看到卡片后追问「动力」，此时他**从未点名任何车系**，
@@ -51,6 +82,53 @@ class UserProfile(BaseModel):
     # 这是诚实性原则的**反向失效**：没查到 ≠ 没有，「说未披露」必须建立在查过的
     # 基础上。记下款型 id，下一轮就能把它们的库内事实直接摆到模型面前。
     last_recommended_variant_ids: list[int] = Field(default_factory=list)
+    # 本会话**已经展示过的车系** id（2026-10-21，累积）。
+    #
+    # 为什么要有它：用户说「再推荐几款」时，引擎原先推回**逐位相同**的那一批——
+    # 引擎是确定性的，同一画像必然同一批（实测：宽需求下候选池 3162 台，
+    # 第二轮仍是同一批 5 台）。用户要「更多」，就得把**已经给过的车**排除掉。
+    #
+    # 为什么按**车系**而不是按款型：用户心里的「另一台车」是**另一个车系**
+    # （「比亚迪汉」vs「特斯拉Model Y」），不是同款车的另一个配置。
+    # 实测：宽需求下第一轮推的 5 张卡其实是**同一车系的 5 个款型**
+    # ⇒ 按款型排除的话，第二轮仍是同一个车系（只换了配置），用户要的还是「没见过的车」。
+    # 而「这车还有别的配置吗」是**另一种问法**（整句不匹配追问句式）⇒ 不受影响。
+    #
+    # 与 `rejected_variant_ids` 的区别（**两者不能混**）：
+    # - `rejected_variant_ids` = 用户**明确拒绝**的款型 → **永远**不该回来（会话内一直排除）；
+    # - `shown_series_ids` = 只是**推过了** → 只在**追问轮**排除
+    #   （用户重新问需求时，应当回到原来那一批）。
+    # 混在一起会让「被拒」的影子评估（误伤面）把「推过了」当成「被拒」来算。
+    shown_series_ids: list[int] = Field(default_factory=list)
+
+
+#: 画像里**只对内部有意义**的字段：值是内部主键（车系 id / 款型 id / 品牌 id）。
+#:
+#: 它们**不能进模型的上下文**——用户看不懂，而模型会把它们原样写进用户可见文案。
+#: 实测（2026-10-21，可追问率那笔的附带发现）：用户锁定某车系而候选为空时，
+#: 模型在回答里写了「并锁定了**车系 ID 905**」——既泄漏内部 id，
+#: 又是一个用户根本问不出处的数字（画像里确实有，但它是主键，不是事实）。
+#:
+#: 可读的同义字段（`brand_labels` / `brand_exclude_labels`）**保留** ✓——
+#: 解释模块需要知道「用户要什么品牌」，那说的是名字而不是主键。
+_INTERNAL_ID_FIELDS: tuple[str, ...] = (
+    "locked_series_ids",
+    "last_recommended_variant_ids",
+    "rejected_variant_ids",
+    "brand_ids",
+    "brand_exclude_ids",
+)
+
+
+def llm_profile_view(profile: UserProfile) -> dict:
+    """给**模型**看的画像视图：去掉内部 id 字段，其余原样。
+
+    只用于 LLM 上下文（解释模块）；落盘、内部计算、接口返回仍用完整画像 ✓。
+    """
+    data = profile.model_dump()
+    for field in _INTERNAL_ID_FIELDS:
+        data.pop(field, None)
+    return data
 
 
 class SessionOut(BaseModel):
@@ -111,3 +189,35 @@ class AgentMessageOut(BaseModel):
     # 设了就不渲染推荐卡片（AgentChat.tsx:430）。软偏好缺失时阻塞推荐属于拖沓，
     # 真人销售是「先给你看车，再问一句你更看重什么」。
     followup: Clarification | None = None
+
+
+# ── 匿名身份与跨会话偏好记忆 ────────────────────────────────────────────────
+
+
+class IdentityOut(BaseModel):
+    """领取匿名身份的结果。
+
+    `token` 是**明文凭据**，客户端要自己保存并随
+    `Authorization: Bearer <token>` 带上。**只在新建时给一次**——
+    之后库里只有哈希，无法再取回（这是刻意的：明文可重置，泄漏的哈希不可反推）。
+    """
+
+    identity_id: int
+    token: str
+    #: True = 这是新建的身份（token 有效）；False = 已存在的身份（token 为空）
+    created: bool
+
+
+class PreferenceMemoryOut(BaseModel):
+    """一条已记住的偏好（供用户自查 / 纠正）。"""
+
+    id: int
+    category: str
+    key: str
+    value: str
+    #: explicit | inferred | behavioral
+    source_type: str
+    confidence: float
+    confirmed: bool
+    created_at: datetime
+    expires_at: datetime | None = None

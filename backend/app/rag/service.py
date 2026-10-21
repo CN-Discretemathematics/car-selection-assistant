@@ -20,10 +20,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
-from app.common.models import MonthlySales, SourceDocument, SpecFact, VehicleSeries, VehicleVariant
+from app.catalog import services as catalog
+from app.common.models import (
+    Brand,
+    MonthlySales,
+    SourceDocument,
+    SpecFact,
+    VehicleSeries,
+    VehicleVariant,
+)
 from app.rag.ingest import get_ingest_graph, run_ingest
 from app.rag.pipeline import build_query_graph
 from app.rag.rerank import get_reranker
@@ -97,6 +105,65 @@ def db_counts(db: Session) -> dict[str, int]:
     """库内规模快照（供水位标记与 /admin/rag/status 共用，键名保持一致）。"""
     docs, facts, series, variants = _counts(db)
     return {"documents": docs, "facts": facts, "series": series, "variants": variants}
+
+
+# ── 车系款型覆盖率 ──────────────────────────────────────────────────────────
+#
+# 为什么单独一个函数、而不是塞进 `_counts`：
+# `_counts` 是**索引重建的触发条件**（`auto and _indexed_counts != counts`）。
+# 覆盖率是会**随回补单调下降**的指标，若并入 `_counts`，回补一批款型就会
+# 触发一次全量索引重建——为了一个给人看的数字付出重建代价，不值。
+#
+# 口径（与 `tools/export_series_gaps.py` 一致，避免两处数字打架）：
+#   series_active          在售车系（车系与品牌都 active）
+#   series_with_variants   有**至少一个款型**（不论是否在售）的车系
+#   series_on_sale         有**在售款型**的车系
+#   gap_no_variants        **真缺口**：完全没有款型 → 回补目标
+#   gap_only_off_sale      有款型但**全部停售** → 数据完整，**不是缺口**
+#
+# 最后一条是 2026-10-20 复核 D1.2 时纠正的旧口径误判：方案原文把
+# 「31 个全部款型停售的车系」列为待回补对象，而 `export_series_gaps.py`
+# 的 docstring 早就写明那是**上游标记的真实状态**，详情页显示
+# 「暂无在售款型数据」本就正确。把它当缺口会让回补指标永不收敛。
+def series_coverage(db: Session) -> dict[str, int]:
+    """车系款型覆盖率（**真缺口**与**全部停售**分开计）。
+
+    「全部停售」是上游标记的真实状态——详情页显示「暂无在售款型数据」本就正确，
+    **不是回补目标**。混在一起会让缺口指标永不收敛（2026-10-20 复核纠正）。
+    """
+    def _count(cond=None) -> int:
+        stmt = select(func.count()).select_from(VehicleSeries).join(
+            Brand, Brand.id == VehicleSeries.brand_id
+        )
+        stmt = stmt.where(
+            VehicleSeries.active_status == "active",
+            Brand.active_status == "active",
+        )
+        if cond is not None:
+            stmt = stmt.where(cond)
+        return db.scalar(stmt) or 0
+
+    has_any_variant = exists(
+        select(VehicleVariant.id).where(VehicleVariant.series_id == VehicleSeries.id)
+    )
+    has_on_sale = exists(
+        select(VehicleVariant.id).where(
+            VehicleVariant.series_id == VehicleSeries.id,
+            VehicleVariant.status == "on_sale",
+        )
+    )
+
+    series_active = _count()
+    no_variants = _count(~has_any_variant)
+    on_sale = _count(has_on_sale)
+    with_variants = series_active - no_variants
+    return {
+        "series_active": series_active,
+        "series_with_variants": with_variants,
+        "series_on_sale": on_sale,
+        "gap_no_variants": no_variants,
+        "gap_only_off_sale": with_variants - on_sale,
+    }
 
 
 def ensure_sparse_index(db: Session, reindex: bool = False) -> None:
@@ -294,9 +361,16 @@ def get_status(db: Session | None = None) -> dict:
     }
     if db is not None:
         status["db_counts"] = dict(zip(("documents", "facts", "series", "variants"), _counts(db)))
-        latest = db.scalar(select(func.max(MonthlySales.month)))
+        # 口径收口到 catalog.services（2026-10-21，P6.2）：水位对比要的是
+        # 「库里最新有没有新销量」→ **任意口径**（含 wholesale / insurance），
+        # 与用户看得到的零售/门户口径刻意不同。
+        latest = catalog.latest_sales_month_strict(db, sales_types=None)
         # 销量月份转 YYYYMM 整数（2026-08 → 202608），与 RagStatusOut.db_counts 的 int 字段一致
         status["db_counts"]["latest_sales_month"] = _as_yyyymm(latest)
+        # 车系款型覆盖率：**独立字段**，不并进 db_counts——
+        # db_counts 是索引重建的触发条件，而覆盖率会随回补单调下降，
+        # 并进去会让「回补一批款型」触发一次全量索引重建。
+        status["coverage"] = series_coverage(db)
     # 无 db 时也补齐字段（db_sales_month=None）：消费者按「字段恒在」判断，避免缺字段被当成新鲜
     annotate_dense_watermark(status)
     return status

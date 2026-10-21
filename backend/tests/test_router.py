@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -351,6 +352,87 @@ def test_shadow_route_retry_exhausted_still_records(monkeypatch, caplog):
     ]
     assert records and records[-1]["llm_intent"] is None, "重试耗尽 → 无裁决记录"
     assert records[-1]["arbitrated_intent"] == "catalog_count", "无裁决时仲裁维持 regex"
+
+
+# ── H5：旁路任务的异常必须被取回（此前已修，但**无守卫**）────────────────────
+
+
+def test_shadow_task_exception_is_retrieved_and_logged(monkeypatch, caplog):
+    """H5：旁路任务里**未被内部兜底捕获**的异常，必须被取回并落 warning 日志。
+
+    `_shadow_route` 只在 `route_with_llm` 一段有 try/except；其后的
+    `arbitrate_route` / `log_shadow_record` 抛异常 → 任务**静默死亡**，
+    唯一痕迹是 asyncio 在 GC 时打的 "Task exception was never retrieved"——
+    那行**不在** "app.agent.router.shadow" 日志流里，shadow_report 解析不到。
+    与「旁路出错，零痕迹」是同一失败族。
+
+    判据取**日志**：不取回异常就不会有这条 warning，
+    于是把 `_on_shadow_done` 里的 `task.exception()` 删掉 → 本用例变红 ✓。
+    """
+    from app.agent import engine as engine_mod
+
+    def _boom(*args, **kwargs):
+        raise ValueError("影子仲裁炸了")
+
+    monkeypatch.setattr(engine_mod, "arbitrate_route", _boom)
+    monkeypatch.setattr("app.agent.engine._SHADOW_RETRY_DELAYS", (0, 0))
+    engine = get_agent_engine()
+    # 旁路派发的前提是 LLM 可用（`_spawn_shadow_route` 第一行就判 available）
+    fake = _RouterFakeLLM(_verdict("catalog_count", 0.9))
+    original = engine._llm
+    engine._llm = fake
+    regex_decision = _rd("chitchat", "1:not(has_car_intent or structured)")
+
+    async def scenario():
+        engine._spawn_shadow_route("一共有几款", UserProfile(), regex_decision)
+        pending = list(engine._pending_shadow_tasks)
+        assert pending, "前提：shadow 旁路确实派发了任务"
+        await asyncio.gather(*pending, return_exceptions=True)
+        # done_callback 是 call_soon 排队的，让它跑一拍
+        await asyncio.sleep(0.01)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="app.agent.router.shadow"):
+            asyncio.run(scenario())
+    finally:
+        engine._llm = original
+
+    warns = [
+        rec for rec in caplog.records
+        if rec.name == "app.agent.router.shadow" and rec.levelno >= logging.WARNING
+    ]
+    assert warns, (
+        "旁路任务异常必须落 warning 日志——不落就等于静默死亡"
+        "（原实现只 discard 不取异常，asyncio 那行不在本日志流里）"
+    )
+    assert "ValueError" in warns[-1].getMessage()
+    assert not engine._pending_shadow_tasks, "异常任务必须从 in-flight 集合摘除"
+
+
+def test_cancelled_shadow_task_is_not_reported_as_an_error(caplog):
+    """被取消的旁路任务**不是异常**——不该报 warning。
+
+    `task.exception()` 在已取消的任务上会抛 CancelledError，
+    于是回调里那一行必须先判 `cancelled()`；否则真异常会被取消噪音淹没，
+    而取消噪音本身还会变成一条 asyncio 的 "Exception in callback"。
+    """
+    engine = get_agent_engine()
+
+    async def scenario():
+        task = asyncio.create_task(asyncio.sleep(10))
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        engine._on_shadow_done(task)
+
+    with caplog.at_level(logging.WARNING, logger="app.agent.router.shadow"):
+        asyncio.run(scenario())
+
+    warns = [
+        rec for rec in caplog.records
+        if rec.name == "app.agent.router.shadow" and rec.levelno >= logging.WARNING
+    ]
+    assert not warns, f"取消的旁路任务不该报 warning，实际 {len(warns)} 条"
 
 
 def test_router_client_uses_model_env(monkeypatch):

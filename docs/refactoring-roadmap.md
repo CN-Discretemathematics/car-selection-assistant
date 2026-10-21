@@ -120,7 +120,7 @@ P0 基线 ──▶ P1 治理 ──▶ P3 拆分 ──▶ P4 修复 ──▶ 
 | P1.5 | `PUSH_GUARD_ALLOW` 环境变量 → commit body 内联 `# gate-allow: <理由>` trailer | 环境变量不留痕；CI 中 `--no-verify` 应直接失败 |
 | P1.6 | `autofix` job 改「只发 PR 评论，不推分支」 | 门禁改写自己的输入，`--fix` 的正则回归可静默洗白 PR |
 | P1.7 | 收窄 `doc_sync_check.py` 的 `ALLOW_WORDS` | 含「计划/待建/规划/历史/旧/曾」的行**同时豁免**悬空引用与过期模式两类检查——很宽的静默逃生口 |
-| P1.8 | 迁移数规则当前空转 | 实际 10 个迁移，全仓无文档声明迁移数，规则报告绿但没守任何东西 |
+| P1.8 | 迁移数规则当前空转 | 实际 11 个迁移，全仓无文档声明迁移数，规则报告绿但没守任何东西 |
 | P1.9 | 强化 `.env.example` 占位符识别 | 目前只靠主机名里的 `xxx+` 侥幸通过；`你的密码` 是中文，不匹配任何模式——距失败只差一次主机名改动 |
 
 **门禁的结构性盲区（诚实记录，不要指望它们）**：
@@ -233,7 +233,9 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 
 **P3 的真实收益是可测性而非行为**：拆完后 `_score_variant` 可对手工构造的 `CandidateBundle` 做纯单测——
 而 `brand_series_count` 语义错误与 `tradeoffs` 死代码正是当时**无法被单测捕获**的缺陷类型。
-（`tradeoffs` 已于 2026-10-02 修活并补上单测；`brand_series_count` 仍待产品定口径。）
+（`tradeoffs` 已于 2026-10-02 修活并补上单测；`brand_series_count` 亦已于 2026-10-03
+改为全库口径，`tests/test_brand_scale_full_catalog.py` 钉住——本条曾长期挂着「待产品定口径」，
+实际早已修完：**台账不标「已修」= 下一个人重做一遍**。）
 
 **P3.3 `analysis.py::analyze_comparison`（295 行）** — 按维度处理类型拆为：冲突键收集 / flag 维度 / numeric 维度（含单位换算与不可换算分支）/ 缺口与 leader 计算。
 **必须不变**：各 `note` 文本串、比较口径、单位换算后「原值 ≈ 规范值」的展示格式。
@@ -258,13 +260,13 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 
 | # | 位置 | 问题 |
 | --- | --- | --- |
-| H1 | `backend/app/agent/session.py:107` 等四个 getter | Redis 首次不可达即**永久锁存**进程内实现，多 worker 脑裂 |
+| H1 | `backend/app/agent/session.py` 的 `get_session_store` + `backend/app/auth/security.py` 的 `get_code_store` / `get_token_store` / `get_rate_limiter` | ✅ **已修（2026-10-21）**：4 处各自「探一次 Redis → 永久缓存」，**Redis 首次不可达就把实现锁死在进程内**——多 worker 脑裂（会话在 worker A、令牌在 worker B → 用户被随机踢下线、验证码在别的 worker 上验不过 → 登录不了、限流各算各的），且 `get_redis()` 自带的 60s 重试被这一层的一次性缓存**彻底废掉**（实测：Redis 恢复后仍返回同一个进程内实例）。修法：新增 `common.redis_client.StoreSelector`（选择 + 定期重试 + **切换时落 warning**），4 处调用点共用一处实现；回退态同一 worker 内仍是同一实例（否则会话立刻丢） |
 | H2 | `backend/app/agent/tools.py` 硬约束 stmt | 无 SQL LIMIT，全量物化；销量子查询无月份谓词 —— ⚠️ **已加可观测化未改行为**：见 P5.1 节。LIMIT 会静默改变推荐结果，需先跑检索评测对齐基线 |
-| H3 | `backend/app/agent/engine.py` 14 处 | `async def` 内裸调同步 `Session`，阻塞事件循环 |
+| H3 | `backend/app/agent/engine.py` 14 处 | ✅ **已修（2026-10-21）**：`async def` 内**裸调同步 `Session`**（实测真实阻塞点 9 处：推荐 / 版本差异 / 车系问答三条回答链各查一次 `Source`、5 处 `_source_citations`、1 处 `_unlock_note`）——真 I/O 发生在**结果被消费**那一刻（`.all()`），不是 `db.scalars()` 本身，所以只包住调用不包住消费等于没修。修法：新增唯一实现 `_source_names`（此前「查 Source」4 处各写一遍）+ 9 处统一 `await run_in_threadpool(...)`。**结果逐字不变**（全量用例守住）+ 变异测试 5/5 + AST 契约守卫（async 函数里不得直接碰同步 DB，helper 集合算**传递闭包**——抽出一个 helper 就让守卫失明，变异测试实测踩到） |
 | H4 | `backend/app/agent/series_qa.py` | 两条最热问答路径的 N+1 —— ✅ **已修**（P5.2）→ `catalog.services.variants_current_prices` / `variants_facts`，5 例逐条等价性回归（性能优化的前提是结果逐字相同） |
-| H5 | `backend/app/agent/engine.py:677-679` | shadow 任务异常从未取回，静默死亡 |
+| H5 | `backend/app/agent/engine.py` 的 `_on_shadow_done` | ✅ **已修（2026-10-02），2026-10-21 补守卫**：原实现只 `discard` 从不调 `task.exception()`，而 `_shadow_route` 内部只兜底了 `route_with_llm` 一段——其后的 `arbitrate_route` / `log_shadow_record` 一旦抛异常，任务**静默死亡**，唯一痕迹是 asyncio 在 GC 时打的 "Task exception was never retrieved"，那行**不在** `app.agent.router.shadow` 日志流里，`shadow_report.py` 解析不到。修法即取回异常并落 warning。⚠️ 该修复此前**无任何测试钉住**（删掉 `task.exception()` 全量测试依然全绿），2026-10-21 补两条守卫（异常必落 warning 日志 / 取消的任务不算异常）+ 3 个变异点全部被抓住 |
 | H6 | `backend/app/sources/autohome_sku.py:25-28` | `MOBILE_UA` 伪装 iPhone，与 README 合规声明矛盾 —— ✅ **已修并实测**（2026-10-03）：改用 `fetcher.DEFAULT_USER_AGENT`，直调 `fetch_sku_config` 抓 3 个车系（8433/8529/8171）款型 4/8/9 条、配置组 21/22/23 组，无 403 无空数据 → 对方不拦非浏览器 UA，改动零代价 |
-| H7 | `web/app/compare/page.tsx:49,63,126,160` | 4 请求串行瀑布；后端每次查看执行**两次** `analyze_comparison` |
+| H7 | `web/app/compare/page.tsx` + `backend/app/comparison/analysis.py` | ✅ **已修（2026-10-21）**：审计原记「4 请求串行瀑布」——复核后**前端其实已是两条并行分支**（`POST /comparisons` → `GET /comparisons/{id}` 与 `POST /comparisons/analysis` → `POST /comparisons/analysis/ai-comment` 并行），瀑布那一半不成立。真正的问题是**后端每次查看把 `analyze_comparison` 完整跑了两遍**（面板的确定性结论与 LLM 一句话点评要的是同一份分析，每遍对每个款型做十几次库查询）。修法：给 `analyze_comparison` 加**短 TTL 缓存**（30s，键为排序后的款型 id 集合）。⚠️ 不改成「前端把分析结果传回来」——那份数据要进 LLM 提示词，**由客户端提供事实 = 允许伪造事实**；事实必须服务端算。缓存过期必然重算，不会长期陈旧 |
 | H8 | `web/app/ops/rag/page.tsx:296-311` | ⚠️ **已修，但审计描述的机制是错的**（2026-10-03）：unmount 清理函数**本来就在**，「重复点击留孤儿 interval」也**不可达**（按钮在 `busy` 期间 disabled）。真实泄漏是**竞态**——点 dense 重建后立刻离开页面，清理跑完时 interval 还没被创建（它要等 `runReindex` 的网络往返 resolve），续段随后照样 setInterval，再无人清理，每 2.5s 打一次后端。已加 `mountedRef` 守卫三处（await 之后 / 轮询回调首行 / 创建前清旧） |
 | H9 | `web/app/ops/rag/page.tsx:245,617` | ✅ **已修**（2026-10-03，与审计一致）：3/4 个 tab 失败后永久「加载中…」、无重试入口。已抽 `useAsyncData` + `LoadError`（含重试按钮）统一 4 个 tab；5 例源码级契约测试钉住，并**反向验证过会红** |
 | H10 | `backend/app/rag/pipeline.py` 的 `_hyde_text` | ✅ **已修**（2026-10-04）：「50 字内、只要参数键值、不要解释不要列表」的**窄任务**没关思考链，而端点默认 `enabled + effort=high`；且用 `asyncio.run` **同步阻塞**在检索流水线里。真机对拍延迟中位 5308ms → 798ms |
@@ -275,14 +277,14 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | --- | --- |
 | `backend/app/agent/engine.py`（`_shadow_route`） | `llm_elapsed_ms` 只计最后一次重试，**低估**重试样本开销 —— ✅ **已修**：改为总墙钟，并新增 `llm_last_attempt_ms`。⚠️ 切流判据 4 用的是**回答级**耗时日志，不受此字段影响；只影响 shadow 诊断的 p50/p95 |
 | `backend/app/agent/engine.py` | 单轮 8 次串行 `set_profile` Redis 往返（审计原记「4 次」，实测为 8）—— ✅ **2026-10-03 部分收敛**（P5.4 / M4）：品牌合并/解锁/重锁三处的 3 次**连续**写合并为 1 次无条件写，8 → 6。剩余 6 处各有不可替代职责（早退前 1、退路分支 3、解锁后 1、脏画像自愈 1），不再合并 |
-| `backend/app/agent/engine.py:1786-1788` | 全量 history 无 token 预算注入 prompt |
+| `backend/app/agent/engine.py`（`_chat_reply` 的历史注入） | ✅ **已修（2026-10-21）**：全量 history 注入 prompt，**无预算**——会话存储最多 50 条 × 2000 字 = 100K 字，中文 1 字 ≈ 1 token，64K 上下文的模型会**直接拒收**（用户看到降级回答而不是他的问题），且这份历史**每轮重发**、成本与延迟随轮数线性涨。修法：新增叶子 module `app/agent/history_budget.py`（纯计算、不碰 db，符合 2026-10-20 的收拢方向）——按**字符**预算（token 的保守代理）保留**最近**的对话、修掉「assistant 开口」的半轮、截断时在 system 提示里**明说**省略了多少条（静默截断会让模型以为看到了全部对话）。常见场景（50 条 × 30 字 ≈ 1500 字）**行为逐位不变**；变异测试 5/5 |
 | `backend/app/agent/tools.py` `tradeoffs` | **整条链曾是死代码**——`recommendation_tool` 从不 append，消费链恒空 —— ✅ **2026-10-02 已修活**（纯计算版取舍叙事，见 `docs/sales-agent-proposal.md` L3）。同时修 `engine.py` `break` 只跳出内层的上限失效 bug |
-| `backend/app/agent/tools.py:397-399` | `brand_series_count` 统计**过滤后候选集**而非品牌规模，跨查询不可比 |
+| `backend/app/agent/tools.py` `brand_series_count` | ✅ **已修（2026-10-03）**：原先在**过滤后的候选集**上累加，于是「品牌规模」这个**品牌的固有属性**随用户筛选条件变化（筛得越窄规模越小 → `maintenance` 维的「维修网络」代理跟着抖）。现已改为**全库口径**，与筛选无关；`tests/test_brand_scale_full_catalog.py` 钉住（A 的兄弟一被挡，A 的品牌规模不该变小） |
 | `backend/app/agent/engine.py:354` | ⚠️ **本条为审计误判，已更正**：`"MPV"` 键**不是死条目**。偏好路径用小写化的 `msg_low` 匹配（`"mpv" in msg_low`），而「不要…」的 avoid 路径用的是**原始 message**、大小写敏感（`"MPV" in message`）——两个键各覆盖一种输入，删掉大写键会让「不要MPV」漏掉排除项。真正的问题是**两条路径大小写处理不一致**（一个 lower 一个原样），统一它属行为变更，需产品拍板 |
 | `backend/app/agent/series_qa.py:390-400` | 多车系路径硬编码只处理 2 个车系（解析层最多返回 4 个）—— ✅ **已修**（2026-10-05，PR #70 的 `0ae87be`）：对比行由 `values[0] vs values[1]` 改为对全部车系 `" vs ".join(values)`（现 `series_qa.py:637`），开头与小结的「两款车」改为按 N 选措辞（`_count_phrase`），三车及以上改用 `_summary_for_many` 报整体跨度；`tests/test_multi_series_compare.py` 端到端钉住（台账第三十节 (e)） |
-| `backend/app/agent/session.py:35-39` | `_prune()` O(n) 且每次操作都跑，活跃 session 无上限 |
+| `backend/app/agent/session.py`（`_prune`） | ✅ **已修**：`_prune()` 曾是 O(n) 且**每次操作都跑**、活跃 session 无上限。现改为**节流**（30s 窗口）+ **硬上限** `MAX_SESSIONS = 2000`（超限按最久未活跃淘汰，与 TTL 同一把尺子）；`tests/test_session_store_bounds.py` 钉住 |
 | `backend/app/agent/llm_router.py:135` | 模块级 LRU 无 prompt 版本键，prompt 改了旧判定活到重启 —— ✅ **已修**：key 并入 `ROUTER_VERSION`，改提示词时 +1 即自然失效（未加 TTL：容量已有 LRU 淘汰，且路由裁决的时效性问题用版本键解决更直接） |
-| `backend/app/sources/autohome_sku.py:112,123` | 库层零重试；tools 层固定 3s、无退避无抖动 |
+| `backend/app/sources/autohome_sku.py`（`fetch_series_index` / `fetch_sku_config`）+ `backend/tools/fetch_autohome_sku.py` | ✅ **已修（2026-10-21）**：**库层零重试**（一次失败就抛），tools 层三处各写一个循环、**固定 `sleep(3.0)`、无退避无抖动**，且**什么都重试**（404、参数错、解析失败也重试 3 次）；两层还各自重试 → 叠加成 3×3=9 次请求。修法：重试策略**收敛到库层一处**（`fetch_with_retry` + `is_transient_error`）——指数退避 + **抖动**（多进程/多阶段同时重试不会整齐地打在对方同一刻）、**只重试瞬时错误**（超时/5xx/429/响应体截断），确定性错误立刻失败；tools 层三处改为委托。⚠️ 行为变更（知情选择）：确定性错误从「重试 3 次」变成「立刻失败」——抓取链路不丢收敛，失败会记进 checkpoint，下一轮照样重试 |
 | `backend/app/retrieval/zilliz.py:302-305` | 缓存 key 在 embedder 无 `model` 属性时回落为字面量 `"embed"` |
 | `backend/app/vehicles/router.py:41-115` | 全表载入后 Python 过滤分页（无 SQL 下推） |
 | `web/app/components/AddToCompareButton.tsx:10` | ✅ **已修**（2026-10-03）：未订阅 `compare-changed`，自建第二份状态 → **文案说移除、行为是加回**。从对比栏移除后按钮仍显示「已加入对比」，再点走的是「重新加入」分支，用户点几次都删不掉 |
@@ -291,7 +293,12 @@ compare 页当前不可达（客户端已把 id 过滤为正整数），但 `rag
 | `web/app/components/Pagination.tsx:65,79,90,99` | ✅ **已修一半（2026-10-03）**：3 处裸 `<a href>` 已换 `next/link`（翻页不再整页重载），禁用态改 `<span>`（`Link` 的 `href` 必填，且无 href 的 `<a>` 观感上仍像可点）。⚠️ `<form method="get">` **刻意保留**：原生 GET 不依赖 JS 即可工作（渐进增强），隐藏域已把筛选参数带过去；改成 `router.push` 需加客户端边界并手工重建 query 串，那才是会真丢筛选的地方。理由写在源码里并由测试守住 |
 
 **修复顺序**（先易后难、先安全后性能）：C1 → C2 → H5 → H3 → H1 → H6 → H10 → M 项 → H2/H4（性能，需评测兜底）。
-C1/C2/H10 已于 2026-10-02 / 2026-10-04 完成。
+C1/C2/H5/H10 已于 2026-10-02 / 2026-10-04 完成；H5 的**回归守卫**于 2026-10-21 补齐
+（修复在、守卫不在，等于修好了也会被改回去——台账不标「已修」同理会让下一个人重做一遍）。
+**H1 已于 2026-10-21 修完**（4 处调用点共用 `common.redis_client.StoreSelector`：Redis 不可用时回退进程内，
+但**定期重试**，恢复后自愈并落 warning）。
+**H3 已于 2026-10-21 修完**（9 处裸调同步 DB 统一进线程池，「查 Source」收敛为唯一实现 `_source_names`）。
+下一项是 H6。
 
 **H10 的两条诚实声明（2026-10-04 实测，务必别当成「性能优化已上线」）**：
 
@@ -359,8 +366,8 @@ C1/C2/H10 已于 2026-10-02 / 2026-10-04 完成。
 | `vehicles/router.py:41` 下推 SQL 过滤 | 须保持与 `/home`、详情页一致的口径 |
 | `engine.py` 8 次串行 `set_profile` | ✅ **已部分收敛**（P5.4 / M4）：3 次连续写合并为 1 次无条件写，8 → 6。剩余 6 处职责互不替代，再合并会改变「退路分支也持久化」的语义 |
 | H6 `MOBILE_UA` → 诚实爬虫 UA | ✅ **已修并实测**（2026-10-03，3/3 车系成功）：这是**合规修复**，不是风格调整 |
-| 库层补重试（退避+抖动） | 消除 tools/app 两处重复实现 |
-| H7 compare 请求瀑布 | 合并端点或并行；后端消除重复 `analyze_comparison` |
+| 库层补重试（退避+抖动） | ✅ **已修（2026-10-21）**：重试策略收敛到 `app/sources/autohome_sku.py::fetch_with_retry`（指数退避 + 抖动 + 只重试瞬时错误），tools 层三处固定 3s 循环改为委托，消除两处重复实现 |
+| H7 compare 请求瀑布 | ✅ **已修（2026-10-21）**：前端复核后**并非** 4 请求串行（已是两条并行分支）；真正的问题是后端每次查看把 `analyze_comparison` 完整跑两遍（面板结论 + LLM 点评要同一份）→ 加**短 TTL 缓存**（30s）。⚠️ 不改成「前端把分析传回来」——那份数据要进 LLM 提示词，客户端提供事实 = 允许伪造 |
 | H8/H9 ops/rag 轮询泄漏 + tab 永久加载 | ✅ **已完成**（2026-10-03）：`useAsyncData` + `LoadError` 统一 4 个 tab，H8 的真实竞态按 `mountedRef` 守卫修（审计记的机制不成立，见缺陷台账） |
 | 前端 `next/link` / `compare-changed` 订阅 / 筛选 resync / `localStorage` 保护 / 路由级 `error.tsx` | ✅ **已完成**（2026-10-03，5 笔提交）：分页改 `next/link`（跳页表单保留原生 GET，理由见缺陷表）、对比按钮改为 localStorage 的投影、筛选表单跟随 URL、`writeCompareIds` 补 try/catch 并返回 boolean（此前**只防读不防写**）、新增根级 `web/app/error.tsx`（此前渲染出错会掉进框架通用错误页，站点外壳全丢且无恢复入口）。每项都配了**反向验证过会红**的契约测试 |
 | `Reveal.tsx` 客户端组件下沉 | 约 40 个实例 / 40 个 observer → 单个共享 observer 或 CSS `animation-timeline: view()`。**诚实定位：中等 hydration 收益，不是整页 SSR 救赎** |
@@ -473,7 +480,7 @@ $env:RETRIEVAL_BACKEND='inmemory'
 | 序 | 项 | 收益 | 成本 |
 | --- | --- | --- | --- |
 | P6.1 | `tools/` 8 份 CLI 样板 → 计划新增 `tools/_bootstrap.py` | 重复率 −约 3pt；消除 96 处 `E402` 根因 | 极低 |
-| P6.2 | 「最新销量」口径 3 份收口 | −约 1pt；**防口径漂移** | 低 |
+| P6.2 | 「最新销量」口径 3 份收口 | ✅ **已修（2026-10-21）**：同一件事此前有 **3 份** `max(MonthlySales.month)`（`rag/ingest.py` / `rag/service.py` / `tools/build_retrieval_index.py`），而**口径并不相同**（有的带 sales_type 过滤、有的不带；有的回退、有的不回退）——同一件事三份实现 = 迟早漂。现全部收口到 `app/catalog/services.py`（`latest_sales_month` 用户侧 / `latest_sales_month_strict` 不回退且口径可选），**语义逐条保持不变**；AST 漂移守卫钉住「除 services.py 外不得再自己写这个查询」 | 低（已完成） |
 | P6.3 | `analyze_comparison` 嵌套拆平 | 圈复杂度 148 → ≤ 30 | 中（与 P3.3 同 PR） |
 | P6.4 | `fetcher.py:111`、`importer.py:169` 真长参数列表 | 参数指标 | 低 |
 | P6.5 | 前端页脚/卡片块提取 | −约 2pt | 低 |

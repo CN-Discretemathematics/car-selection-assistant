@@ -26,8 +26,10 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from app.agent.profile import merge_profile
 from app.agent.schemas import Clarification
-from app.agent.tools import _DIM_LABELS, DEFAULT_WEIGHTS
+from app.agent.weights import DEFAULT_WEIGHTS, WEIGHT_RAISE
+from app.agent.weights import DIM_LABELS as _DIM_LABELS
 
 # 追问顺序：按画像挑出**最可能有决定性**的维度。
 # 判定谓词只读已有画像字段，不新增信息源。
@@ -85,8 +87,12 @@ def apply_probe_answer(profile: Any, message: str) -> bool:
     """把用户对软缺口追问的回答落成权重。返回是否命中。
 
     只认**被问过的那两个维度**——用户随口提的其它词仍由 `extract_hints` 的强调词
-    路径处理，这里不越权。权重值用 `engine._WEIGHT_RAISE`（同一条生产路径算出来的
+    路径处理，这里不越权。权重值用 `weights.WEIGHT_RAISE`（同一条生产路径算出来的
     那个数），本地**不留第二份常量**，免得改一处漂一处。
+
+    2026-10-20：原先这里**函数内延迟 import** `engine._WEIGHT_RAISE` 与
+    `engine.merge_profile`——那是 `engine ↔ soft_prefs/soft_probe` 循环依赖的
+    疤痕。权重与画像合并收拢到独立 module 后，改为顶层 import，环消失。
     """
     probed = list(getattr(profile, "probed_dims", None) or [])
     if not probed:
@@ -96,10 +102,8 @@ def apply_probe_answer(profile: Any, message: str) -> bool:
         label = _DIM_LABELS.get(dim, "")
         if not label or label not in low:
             continue
-        from app.agent.engine import _WEIGHT_RAISE, merge_profile
-
         merge_profile(profile, {
-            "weights": {dim: round(float(DEFAULT_WEIGHTS.get(dim, 0.0)) + _WEIGHT_RAISE, 3)}
+            "weights": {dim: round(float(DEFAULT_WEIGHTS.get(dim, 0.0)) + WEIGHT_RAISE, 3)}
         })
         return True
     return False

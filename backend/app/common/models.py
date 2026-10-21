@@ -20,6 +20,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -318,6 +319,124 @@ class Favorite(Base):
     vehicle_id: Mapped[int] = mapped_column(Integer, index=True)
     kind: Mapped[str] = mapped_column(String(16), default="series")  # series | variant
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AnonymousIdentity(Base):
+    """匿名身份（未登录用户的稳定标识）。
+
+    2026-10-20 新增，支撑「跨会话的持续个性化」。
+
+    ## 为什么是独立表，不在 `users` 上加列
+
+    - 一个账户可以对应**多个**匿名设备（多浏览器 / 多设备），一行放不下；
+    - 匿名身份登录后要**合并**进账户，此时匿名身份需要失效（标记 merged），
+      而不是继续有效；
+    - 合并需要偏好去重语义（同一偏好在两处各存一份怎么办）。
+
+    仓库已有同构先例 `ExternalSeriesRef`（external_id → series_id + 唯一约束
+    + 独立映射表），故采用**独立映射表**。
+
+    ## token 不存明文
+
+    客户端持有随机 token（`Authorization: Bearer <token>`），库里只存**哈希**——
+    库被拖走也无法反推出可用凭据。明文只在新建时交给客户端一次。
+    """
+
+    __tablename__ = "anonymous_identities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: token 的哈希（sha256 十六进制）。明文只在 Cookie 里。
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    #: 合并到的账户；非空表示已登录合并
+    merged_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
+    #: active | merged
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class PreferenceMemory(Base):
+    """跨会话的偏好记忆（用户明确表达过的、或经确认的偏好）。
+
+    2026-10-20 新增。配合 `AnonymousIdentity` 实现「回访用户不必重讲一遍」。
+
+    ## 词表封闭
+
+    可持久化的键**只有 6 个**（`app/agent/preferences.py::TRACKED_KEYS`）：
+    `usage` / `body_type` / `energy_preference` / `budget` / `passengers` / `avoid`。
+    值必须落在既有封闭枚举内（`app/common/enums.py` 的 `ENERGY_TYPES` / `BODY_TYPES`、
+    `engine._USAGE_HINTS` 的值）。**新造维度必须先证明「确定性内核会算它」**，
+    否则不允许入库——否则记忆里的东西会影响不了推荐，只是噪声。
+
+    ## 推断通道的禁区
+
+    `body_type` / `energy_preference` / `budget` 可以因**用户明说**而持久化
+    （`source_type=explicit`），但**不得**由模型推断产生（`inferred`）：
+    推断猜错会**静默砍掉整个候选集**——用户看不到原因，只看到「推的都不是我要的」。
+
+    ## 一个键只留一行
+
+    同一 `(identity, category, key)` 写新值即覆盖旧值（行 id 稳定）。
+    唯一约束 `(identity_id, category, key, value)` 因此不会挡住「同键不同值」，
+    覆盖由写入逻辑保证——**记忆是「当前状态」，不是「流水账」**。
+
+    ## source_type
+
+    - `explicit`  用户明说
+    - `inferred`  模型推断（**当前不写库**，只落日志）
+    - `behavioral` 行为信号（如「拒过某台」），Phase 3 用
+    """
+
+    __tablename__ = "preference_memories"
+    __table_args__ = (
+        UniqueConstraint(
+            "identity_id", "category", "key", "value", name="uq_pref_memory_identity_cat_key_value"
+        ),
+        Index("ix_pref_memory_identity_category", "identity_id", "category"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: 归属的匿名身份；已合并到账户后指向该账户的身份
+    identity_id: Mapped[int] = mapped_column(
+        ForeignKey("anonymous_identities.id"), index=True
+    )
+    #: 偏好类别（封闭词表）
+    category: Mapped[str] = mapped_column(String(32))
+    #: 偏好键（封闭词表）
+    key: Mapped[str] = mapped_column(String(64))
+    #: 偏好值（封闭词表）
+    value: Mapped[str] = mapped_column(String(128))
+    #: explicit | inferred | behavioral
+    source_type: Mapped[str] = mapped_column(String(16), default="explicit")
+    #: 置信度 0–1
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    #: 是否已确认（用户明说或用户确认过）。**只有 confirmed=True 才写库**
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: 证据片段（用户原话里的那一段）
+    evidence_span: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    #: 来源消息（指向 agent_turn_logs.id）
+    source_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_turn_logs.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    #: 过期时间（**预留**：推断类记忆才用；用户明说的不设过期）。
+    #:
+    #: ⚠️ 当前**没有**推断类记忆——`persist_hints` 只写 `source_type="explicit"`
+    #: （用户原话里正则抽出来的），推断猜错会静默砍掉整个候选集，一律不写。
+    #: ⇒ 这一列目前**恒为 NULL**，过期过滤**永不命中**。
+    #: 留着的理由：若将来放开推断类记忆，TTL 就是它们的兜底（见计划 §七
+    #: 「记忆陈旧错误的缓解（expires_at）无害」——当前设计下它**恒等无害**，
+    #: 也因此**没有真正缓解任何东西**）。
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ExternalSeriesRef(Base):

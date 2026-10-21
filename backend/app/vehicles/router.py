@@ -9,16 +9,16 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.catalog import services as catalog
 from app.catalog.series_index import _brand_leads_series, keyword_needle, keyword_score
 from app.common.database import get_session
-from app.common.enums import MISSING_VALUE_LABEL, NEW_ENERGY_TYPES
+from app.common.enums import MISSING_VALUE_LABEL
 from app.common.errors import not_found
 from app.common.images import proxy_image_url
-from app.common.models import Brand, MonthlySales, OfficialPrice, Source, VehicleSeries, VehicleVariant
+from app.common.models import VehicleVariant
+from app.vehicles import listing
 from app.vehicles.schemas import (
     BrandRef,
     ExternalLinkOut,
@@ -54,112 +54,48 @@ def vehicle_list(
     page_size: int = Query(default=20, ge=1, le=50),
     db: Session = Depends(get_session),
 ) -> VehicleListOut:
-    rows = db.execute(
-        select(VehicleSeries, Brand)
-        .join(Brand, VehicleSeries.brand_id == Brand.id)
-        .where(VehicleSeries.active_status == "active")
-    ).all()
+    """车型列表：过滤 / 聚合 / 排序 / 分页**下推 SQL**（R7.2 无界查询禁令）。
 
-    source_names = {
-        s.id: s.name
-        for s in db.scalars(
-            select(Source).where(Source.id.in_({r.source_id for r, _ in rows if r.source_id}))
-        ).all()
-    }
-
-    # 批量：各车系当前指导价区间（避免逐车系 N+1）
-    # 口径与 /home、详情页一致：在售款型 + official_msrp + 当前生效价（评审 P1）
-    price_ranges: dict[int, tuple[float, float]] = {}
-    for series_id, pmin, pmax in db.execute(
-        select(
-            VehicleVariant.series_id,
-            func.min(OfficialPrice.price_cny),
-            func.max(OfficialPrice.price_cny),
-        )
-        .join(OfficialPrice, OfficialPrice.variant_id == VehicleVariant.id)
-        .where(
-            VehicleVariant.status == "on_sale",
-            OfficialPrice.effective_to.is_(None),
-            OfficialPrice.price_type == "official_msrp",
-        )
-        .group_by(VehicleVariant.series_id)
-    ).all():
-        price_ranges[series_id] = (float(pmin), float(pmax))
-
-    # 批量：各车系最新销量（口径与 /home 一致：最新数据月内零售优先、门户回退，评审 P2）
-    latest_sales: dict[int, MonthlySales] = {}
-    latest_month = catalog.latest_sales_month(db)
-    for sale in db.scalars(
-        select(MonthlySales)
-        .where(
-            MonthlySales.month == latest_month,
-            MonthlySales.sales_type.in_(("retail", "portal")),
-        )
-        .order_by(
-            case((MonthlySales.sales_type == "retail", 0), else_=1),
-            MonthlySales.id.desc(),
-        )
-    ):
-        if sale.series_id not in latest_sales:
-            latest_sales[sale.series_id] = sale
-
-    items: list[tuple[VehicleSeries, Brand, float | None, float | None, MonthlySales | None]] = []
-    for series, brand in rows:
-        pmin, pmax = price_ranges.get(series.id, (None, None))
-        if price_min is not None and (pmax is None or pmax < price_min):
-            continue
-        if price_max is not None and (pmin is None or pmin > price_max):
-            continue
-        if brand_type and brand.brand_type != brand_type:
-            continue
-        if body_type and series.body_type != body_type:
-            continue
-        if energy_type:
-            types = set(series.energy_types or [])
-            if energy_type == "new_energy":
-                if not (types & set(NEW_ENERGY_TYPES)):
-                    continue
-            elif energy_type == "fuel":
-                if types and not (types - set(NEW_ENERGY_TYPES)):
-                    continue
-                if not types:
-                    continue
-            elif energy_type not in types:
-                continue
-        items.append((series, brand, pmin, pmax, latest_sales.get(series.id)))
-
-    # 关键词过滤：命中即按相关度（精确 > 前缀/品牌 > 子串）优先，再按用户选择的排序
-    scores: dict[int, int] = {}
+    关键词的**相关度排序仍由 `keyword_score` 独占**（Python 侧）——
+    它是「搜得到与问得到一致」的口径唯一主人，不在 SQL 里重写一遍
+    （重写就是漂移）。有关键词时 SQL 只负责把过滤后的候选集取出来。
+    """
     needle = keyword_needle(q)
+    rows, total, page = listing.list_series(
+        db,
+        brand_type=brand_type,
+        body_type=body_type,
+        energy_type=energy_type,
+        price_min=price_min,
+        price_max=price_max,
+        sort=sort,
+        page=page,
+        page_size=page_size,
+        keyword=needle or None,
+    )
+
     if needle:
-        matched = []
-        for series, brand, pmin, pmax, sale in items:
-            score = keyword_score(series, brand, needle)
+        # 相关度优先 → 口径由 keyword_score 决定（0 精确 / 1 前缀或品牌 / 2 子串）
+        scores: dict[int, int] = {}
+        matched: list[listing.SeriesRow] = []
+        for row in rows:
+            score = keyword_score(row.series, row.brand, needle)
             if score is None:
                 continue
-            scores[series.id] = score
-            matched.append((series, brand, pmin, pmax, sale))
-        items = matched
-
-    if sort == "price_asc":
-        items.sort(key=lambda x: (scores.get(x[0].id, 0), x[2] is None, x[2] or 0))
-    elif sort == "price_desc":
-        items.sort(key=lambda x: (scores.get(x[0].id, 0), x[3] is None, -(x[3] or 0)))
-    else:  # sales_desc
-        items.sort(
-            key=lambda x: (scores.get(x[0].id, 0), x[4] is None, -(x[4].sales_count if x[4] else 0))
-        )
-
-    total = len(items)
-    total_pages = max((total + page_size - 1) // page_size, 1)
-    # 越界页码钳制到最后一页（评审 P2：page=999 直接空列表不友好）
-    if page > total_pages:
-        page = total_pages
-    start = (page - 1) * page_size
-    page_items = items[start : start + page_size]
+            scores[row.series.id] = score
+            matched.append(row)
+        rows = _sort_by_relevance(matched, scores, sort)
+        total = len(rows)
+        total_pages = max((total + page_size - 1) // page_size, 1)
+        # 越界页码钳制到最后一页（评审 P2：page=999 直接空列表不友好）
+        if page > total_pages:
+            page = total_pages
+        start = (page - 1) * page_size
+        rows = rows[start : start + page_size]
 
     out_items: list[VehicleListItemOut] = []
-    for series, brand, pmin, pmax, sale in page_items:
+    for row in rows:
+        series, brand = row.series, row.brand
         out_items.append(
             VehicleListItemOut(
                 series_id=series.id,
@@ -171,19 +107,39 @@ def vehicle_list(
                 body_type=series.body_type,
                 energy_types=series.energy_types or [],
                 thumbnail_url=proxy_image_url(series.thumbnail_url),
-                price_range=PriceRange(min=pmin, max=pmax),
+                price_range=PriceRange(min=row.pmin, max=row.pmax),
                 price_range_note=series.price_range_note,
                 latest_sales=LatestSales(
-                    month=sale.month if sale else None,
-                    sales_count=sale.sales_count if sale else None,
-                    sales_type=sale.sales_type if sale else None,
-                    source_name=sale.source.name if sale and sale.source else None,
+                    month=row.sale_month,
+                    sales_count=row.sale_count,
+                    sales_type=row.sale_type,
+                    source_name=row.sale_source_name,
                 ),
-                source_name=source_names.get(series.source_id),
+                source_name=row.source_name,
                 data_updated_at=series.last_verified_at,
             )
         )
     return VehicleListOut(total=total, page=page, page_size=page_size, items=out_items)
+
+
+def _sort_by_relevance(
+    rows: list[listing.SeriesRow], scores: dict[int, int], sort: str
+) -> list[listing.SeriesRow]:
+    """关键词路径的排序：相关度优先，其后与无关键词路径同口径。"""
+    if sort == "price_asc":
+        def key(r: listing.SeriesRow):
+            return (scores.get(r.series.id, 0), r.pmin is None, r.pmin or 0)
+    elif sort == "price_desc":
+        def key(r: listing.SeriesRow):
+            return (scores.get(r.series.id, 0), r.pmax is None, -(r.pmax or 0))
+    else:
+        def key(r: listing.SeriesRow):
+            return (
+                scores.get(r.series.id, 0),
+                r.sale_count is None,
+                -(r.sale_count or 0),
+            )
+    return sorted(rows, key=key)
 
 
 @router.get("/vehicles/{series_id}", response_model=VehicleDetailOut)

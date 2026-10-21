@@ -5,8 +5,17 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.common.models import SpecFact
+from app.comparison import analysis as analysis_mod
 from app.comparison.analysis import analyze_comparison, render_analysis_text
 from tests.seed import make_brand, make_series, make_source, make_variant, make_year
+
+
+@pytest.fixture(autouse=True)
+def _fresh_analysis_cache():
+    """差异分析带**进程内缓存**（H7）：每个用例前后清空，用例之间互不串味。"""
+    analysis_mod.reset_analysis_cache()
+    yield
+    analysis_mod.reset_analysis_cache()
 
 
 def _seed_pair(db: Session, *, second_fast_charge: str = "小时", second_fast_charge_value: str = "0.68"):
@@ -301,3 +310,79 @@ def test_conflicting_duplicate_keys_are_flagged_not_compared(db_session: Session
     assert all(p["label"] != "动力（最大功率）" for p in result["key_points"])
     verdict = result["verdict"] or ""
     assert "动力" not in verdict, verdict
+
+
+# ── H7：差异分析的短 TTL 缓存 ───────────────────────────────────────────────
+#
+# 对比页每次查看会调两个端点（面板的确定性结论 + LLM 一句话点评），
+# 两者要的是**同一份**分析——此前 `analyze_comparison` 被完整跑了两遍
+# （每遍对每个款型做十几次库查询）。
+#
+# 事实必须由服务端算：改成「前端把分析结果传回来」等于**允许客户端伪造事实**
+# （那份数据要进 LLM 的提示词）。
+
+
+def _count_evidence_calls(monkeypatch) -> list[int]:
+    """把 `vehicle_evidence` 换成计数版，返回计数列表。"""
+    calls: list[int] = []
+    original = analysis_mod.vehicle_evidence
+
+    def _counting(db, variant_id):
+        calls.append(variant_id)
+        return original(db, variant_id)
+
+    monkeypatch.setattr(analysis_mod, "vehicle_evidence", _counting)
+    return calls
+
+
+def test_second_call_with_same_ids_reuses_the_analysis(db_session: Session, monkeypatch):
+    """同一组款型的第二次分析**不得再查库**。"""
+    a_id, b_id = _seed_pair(db_session)
+    calls = _count_evidence_calls(monkeypatch)
+
+    first = analyze_comparison(db_session, [a_id, b_id])
+    assert len(calls) == 2, f"首次应查 2 次库，实际 {len(calls)}"
+    second = analyze_comparison(db_session, [a_id, b_id])
+    assert len(calls) == 2, f"命中缓存时不该再查库，实际查了 {len(calls)} 次"
+    assert second == first, "缓存命中必须给出**逐字相同**的结果"
+
+
+def test_cache_is_keyed_by_variant_ids(db_session: Session, monkeypatch):
+    """不同款型组合**不能**共用同一份分析。"""
+    a_id, b_id = _seed_pair(db_session)
+    calls = _count_evidence_calls(monkeypatch)
+    analyze_comparison(db_session, [a_id, b_id])
+    analyze_comparison(db_session, [b_id, a_id])  # 顺序不同 → 同一组（键是排序后的集合）
+    assert len(calls) == 2, "顺序不同但集合相同 → 应命中缓存"
+    analyze_comparison(db_session, [a_id])
+    assert len(calls) == 3, "款型集合不同 → 必须重新计算"
+
+
+def test_cached_result_is_a_copy(db_session: Session, monkeypatch):
+    """返回的是**副本**——调用方改了它不能污染缓存。"""
+    a_id, b_id = _seed_pair(db_session)
+    calls = _count_evidence_calls(monkeypatch)
+    first = analyze_comparison(db_session, [a_id, b_id])
+    first["dimensions"] = []
+    first["verdict"] = "被调用方改坏了"
+    second = analyze_comparison(db_session, [a_id, b_id])
+    assert len(calls) == 2, "应命中缓存"
+    assert second["dimensions"], "缓存里的原件不能被调用方改坏"
+    assert second["verdict"] != "被调用方改坏了"
+
+
+def test_cache_expires(db_session: Session, monkeypatch):
+    """TTL 到了必须重算——缓存不能长期陈旧。
+
+    把写入时刻推到**固定**的 1 小时前（不是「当前 TTL - 1」——那会跟着 TTL 常量
+    一起变，TTL 被改成多大都测不出来；变异测试 M3 实测踩到）。
+    """
+    a_id, b_id = _seed_pair(db_session)
+    calls = _count_evidence_calls(monkeypatch)
+    analyze_comparison(db_session, [a_id, b_id])
+    assert len(calls) == 2
+    key = tuple(sorted({a_id, b_id}))
+    stamp, payload = analysis_mod._analysis_cache[key]
+    analysis_mod._analysis_cache[key] = (stamp - 3600.0, payload)
+    analyze_comparison(db_session, [a_id, b_id])
+    assert len(calls) == 4, "过期后必须重算"

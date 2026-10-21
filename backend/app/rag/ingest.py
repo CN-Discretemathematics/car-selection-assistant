@@ -19,6 +19,7 @@ from langgraph.graph import END, START, StateGraph
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
+from app.catalog import services as catalog
 from app.catalog.series_index import (
     HEADLINE_ORDER,
     HEADLINE_PREFIX,
@@ -245,9 +246,9 @@ def _load(state: IngestState) -> IngestState:
     ).all()
 
     sales_by_series: dict[int, tuple[str, int, str]] = {}
-    latest_month = db.scalar(
-        select(func.max(MonthlySales.month)).where(MonthlySales.sales_type.in_(("retail", "portal")))
-    )
+    # 口径收口到 catalog.services（2026-10-21，P6.2）：「最近真有数据的月」不���回退
+    # 最近完整自然月——回退出来的月份会让这里去抓一个库里根本没有的月。
+    latest_month = catalog.latest_sales_month_strict(db)
     if latest_month:
         sales_rows = db.execute(
             select(MonthlySales.series_id, MonthlySales.sales_count, MonthlySales.sales_type)

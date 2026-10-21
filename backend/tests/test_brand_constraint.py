@@ -48,7 +48,12 @@ def test_resolve_brand_mentions_positive_and_negative(db_session: Session):
     # 否定 → 排除项；且不再进正向集合
     neg = resolve_brand_mentions(db_session, "不要奔驰")
     assert "brand_ids" not in neg and neg["brand_exclude_ids"]
-    # 未提及品牌 → 不写入画像
+    # 2026-10-21：**长句里的否定也是约束**——此前否定判定排在「提及即忽略」之后，
+    # 「预算20万，通勤，不要奔驰」里的排除项被当普通提及丢掉了（用户明说的排除
+    # 根本没进画像，跨会话记忆也就无从记起）。
+    long_neg = resolve_brand_mentions(db_session, "预算20万，通勤，不要奔驰")
+    assert "brand_ids" not in long_neg and long_neg["brand_exclude_ids"]
+    # 但**没有否定**的普通提及仍然不是硬约束（「预算 20 万，家用」不写进画像）
     assert resolve_brand_mentions(db_session, "预算 20 万，家用") == {}
 
 

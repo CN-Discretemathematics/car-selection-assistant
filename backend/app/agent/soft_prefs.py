@@ -180,6 +180,9 @@ import os
 import re
 from typing import Any
 
+from app.agent.profile import merge_profile
+from app.agent.weights import DEFAULT_WEIGHTS, USAGE_HINTS, WEIGHT_RAISE
+
 _logger = logging.getLogger("app.agent.soft_prefs")
 
 # 偏好向量版本：随 shadow 记录落盘。改提示词或词表来源时必须递增——跨版本对拍数据
@@ -248,11 +251,14 @@ _ILLEGAL_ITEM_MAX = 24
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
 
-# ── 封闭枚举（延迟导入以避开与 engine 的循环依赖）────────────────────────────
+# ── 封闭枚举 ───────────────────────────────────────────────────────────────
+#
+# 2026-10-20：下面三处**函数内延迟 import** 是 `engine ↔ soft_prefs`
+# 循环依赖的疤痕（engine 顶层 import soft_prefs，soft_prefs 函数内反向 import engine），
+# 不是设计。权重知识收拢到 `app/agent/weights.py` 后，engine 不再是这些值的来源，
+# 延迟 import 可以全部去掉。
 def usage_values() -> list[str]:
-    from app.agent.engine import _USAGE_HINTS
-
-    return sorted(set(_USAGE_HINTS.values()))
+    return sorted(set(USAGE_HINTS.values()))
 
 
 def pain_point_values() -> list[str]:
@@ -264,8 +270,6 @@ def pain_point_values() -> list[str]:
 
 def dimension_keys() -> list[str]:
     """8 个**真被测量**的评分维度（= DEFAULT_WEIGHTS 的键）。"""
-    from app.agent.tools import DEFAULT_WEIGHTS
-
     return sorted(DEFAULT_WEIGHTS)
 
 
@@ -722,11 +726,13 @@ def to_hints(prefs: dict[str, Any] | None) -> dict[str, Any]:
     翻译成 hints 再交给既有的 `merge_profile`，而不是自己改画像——权重数值、
     WEIGHT_CEILING 上限、累加语义全部复用正则路径那份实现。**两处各写一份必然漂移**：
     早先的手写版把「空间优先」算成 0.20，正则路径算成 0.30，同一句话两种结果。
+
+    2026-10-20：权重常量收拢到 `app/agent/weights.py` 后，这里的延迟 import
+    已不需要——**「同一句『空间优先』两条路径算出两个数」的根因被消除**，
+    而不只是被注释掩盖。
     """
     if not prefs:
         return {}
-    from app.agent.engine import _WEIGHT_RAISE
-    from app.agent.tools import DEFAULT_WEIGHTS
 
     hints: dict[str, Any] = {}
     if prefs.get("usage_scenario"):
@@ -735,12 +741,12 @@ def to_hints(prefs: dict[str, Any] | None) -> dict[str, Any]:
         hints["passengers"] = HOUSEHOLD_SIZES[prefs["household_size"]]
     order = prefs.get("priority_order") or []
     if order:
-        # 增量取自 engine._WEIGHT_RAISE 而不是本地常量：正则路径调它、L1 也调它，
+        # 增量取自 weights.WEIGHT_RAISE（唯一一处）：正则路径调它、L1 也调它，
         # 改一处即可，不会出现「同一句『空间优先』两条路径算出两个数」
         hints["weights"] = {
             dim: round(
                 DEFAULT_WEIGHTS.get(dim, 0.0)
-                + (_WEIGHT_RAISE if rank == 0 else _WEIGHT_RAISE / 2),
+                + (WEIGHT_RAISE if rank == 0 else WEIGHT_RAISE / 2),
                 3,
             )
             for rank, dim in enumerate(order)
@@ -779,8 +785,6 @@ def apply_soft_prefs(profile: Any, prefs: dict[str, Any] | None) -> bool:
     hints = effective_hints(profile, prefs)
     if not hints:
         return False
-    from app.agent.engine import merge_profile
-
     merge_profile(profile, hints)
     return True
 

@@ -27,19 +27,22 @@ from pathlib import Path
 from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
 
 from app.common.database import get_session_factory
-from app.common.models import MonthlySales
 from app.rag.ingest import build_chunks
 from app.rag.service import db_counts, get_dense_backend, run_reindex
 from app.retrieval.config import MAX_CHUNKS
 
 
 def _latest_sales_month(db) -> str | None:
-    """构建时库内最新销量月份（写入 marker 供 /ops/rag 水位对比）。"""
-    try:
-        from sqlalchemy import func, select
+    """构建时库内最新销量月份（写入 marker 供 /ops/rag 水位对比）。
 
-        latest = db.scalar(select(func.max(MonthlySales.month)))
-        return str(latest) if latest is not None else None
+    2026-10-21（P6.2）：口径收口到 `catalog.services.latest_sales_month_strict`
+    （**任意口径**——水位对比看的是「库里最新有没有新销量」，不是用户看得到的那两种）。
+    此前这里自己写了一份 `max(MonthlySales.month)`，与 `rag/service.py` 各写一份。
+    """
+    try:
+        from app.catalog.services import latest_sales_month_strict
+
+        return latest_sales_month_strict(db, sales_types=None)
     except Exception:  # noqa: BLE001 - 查询失败不影响重建主流程
         return None
 

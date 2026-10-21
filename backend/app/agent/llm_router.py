@@ -58,6 +58,7 @@ from typing import Any
 
 from app.agent.routing import (
     INTENTS,
+    LLM_FILL_INTENTS,
     RouteDecision,
     _mask_pii,
     extract_comparison_variant_ids,
@@ -536,9 +537,13 @@ def log_shadow_record(
 # LLM 的 3 个分歧全部栽在 regex 有意为之的特化 quirk 上）；LLM 的价值通道是
 # **regex 兜底时的补位**——兜底规则（1: 无购车词落闲聊 / 4: 推荐兜底）是 regex 自认
 # 的盲区（金标 known_gap「一共有几款」正属此类），高置信的 LLM 具体意图在此补位。
-_LLM_FILL_INTENTS = frozenset(
-    {"catalog_count", "series_qa", "brand_lineup", "tool_loop", "comparison"}
-)
+# LLM 允许**补位**的意图集合。
+#
+# 2026-10-20：改为从 `routing.INTENT_SPECS` 表**派生**，不再在此处维护第二份清单。
+# 此前这里硬写 5 个，而 `routing.INTENTS` 硬写另外 8 个——**同一份知识两处维护**，
+# 改一处漏一处就会让「LLM 能补位哪些意图」与「提示词枚举」对不上。
+# 表的形状见 `routing.IntentSpec`。
+_LLM_FILL_INTENTS = LLM_FILL_INTENTS
 _LLM_FILL_MIN_CONFIDENCE = 0.75
 _REGEX_FALLBACK_RULES = ("1:", "4:")
 

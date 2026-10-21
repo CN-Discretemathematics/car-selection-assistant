@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.schemas import UserProfile
 from app.agent.series_qa import should_answer
-from app.catalog.brands import brand_entries
+from app.catalog.brands import brand_entries, is_ambiguous_brand
 from app.catalog.series_index import normalize_name
 
 # ── 意图路由正则（自 engine.py 原样迁移，定义不变）──────────────────────────
@@ -55,6 +55,56 @@ _CAR_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 _CAR_BUY_RE = re.compile(r"(?:买|购|选|提|试)[^。！？!?]{0,6}车")
+# 用户明确要求「看其他车」：清空已锁定车系，回到广泛推荐。
+# 收窄为明确句式（评审 P1：「另外…」「再看…」等话语词不得误清空锁定）
+#
+# 2026-10-20：自 engine.py 原样迁移（与 `app/agent/turn.py` 的画像推进同批）。
+# 放在本模块是因为它是**路由判定**的一部分（决定「本轮是否解锁锁定车系」、
+# 「本轮是否是对比跟随」），而 routing 已被 engine 与 turn 共同依赖——
+# 放这里不成环；留在 engine 则 turn 必须反向 import engine，成环。
+_UNLOCK_RE = re.compile(
+    r"(看看其他|看看别的|其他车|别的车|其他选择|别的选择|还有什么选择|更多选择|"
+    r"换个|换一换|换别的|不要只看|不只看|都看看|别的车型|其他车型)"
+)
+# 2026-10-05（用户拍板）：本轮只点名一台、另一台在**会话历史**里时的对比标记。
+# 有了它才把锁定车系并入 resolved——否则「它的续航够不够」这种参数追问
+# 会被误当成两车对比（实测该问法应走单车系档案）。
+_COMPARE_FOLLOWUP_RE = re.compile(
+    r"(对比|比较|相比|哪个好|哪款好|哪个更好|差在哪|差多少|区别|差别|不一样|"
+    r"比一下|比起|比呢|跟.{1,8}比|和.{1,8}比|与.{1,8}比)"
+)
+
+#: **上下文追问**（用户看过一批推荐，想要「更多」）——
+#: 这些句子**本句不含购车关键词**，语义上却明确是要「再给一批」。
+#:
+#: 2026-10-21 实测（本地快照库，多轮题库第三轮）：
+#: 「还有别的吗」「再看看其他的」被规则 1 判成**普通对话** ⇒ 引擎回一句闲聊模板，
+#: **一张车都不推**——而此时画像里预算/用途/人数俱全（探针逐轮打印确认）。
+#: 用户明确在要车，引擎却反问「可以告诉我你的预算吗？」：**问的是它已经知道的**。
+#:
+#: ⚠️ 只收**整句**匹配：「还有问题吗」「还有别的优惠吗」这类**不是**要车，
+#: 落到本正则之外（`还有` 后只允许可选的「别的/其他/推荐的…」+「吗/呢」）。
+_REASK_RE = re.compile(
+    r"^(?:"
+    r"还有(?:别的|其他的|别的车|其他车|推荐|推荐的|推荐的车型)?(?:吗|呢)?"
+    r"|再(?:推荐|看看|来|给我|多推|多来|选)(?:几款|一些|一批|几个|点|别的|其他的|别的车)?"
+    r"|多(?:推|来)(?:几款|一批|一些|几个)"
+    r"|推荐几款"
+    r"|换个推荐|继续推荐|再选几款|多选几款|多推几款"
+    r"|就这些(?:吗|啊)?|就这几个|就这些车"
+    r"|其他(?:的)?呢|别的(?:的)?呢"
+    r")[!！。？?~～\s]*$",
+    re.IGNORECASE,
+)
+
+
+def asks_more_cars(message: str) -> bool:
+    """是否是「再给一批」的上下文追问（`还有别的吗` / `再看看其他的`）。
+
+    与「本句含购车关键词」是**两件事**：本函数只看**句式**，
+    是否真的该再推一批由调用方结合**会话上下文**判断（见 `decide_route` 规则 1a）。
+    """
+    return bool(_REASK_RE.match(message.strip()))
 
 
 def _ranking_intent_skips_consultation(
@@ -154,10 +204,14 @@ _CAR_CONTEXT_RE = re.compile(
 # 泛消费电子/无关品类 denylist：单字「车/配置」会误命中「车厘子」「手机配置」（第三轮审查 L2）
 # 注意：**不要用单字词**（曾写「表」「房」，把「销量表现」误判成非汽车话题；2026-09-15 实测）
 _NON_CAR_RE = re.compile(r"(手机|电脑|相机|耳机|平板|笔记本|车厘子|化妆品|房产|二手房|手表|股票|基金)")
-# 易混短品牌名（既是品牌也是日常词）：见 mentions_known_brand 的说明
-_AMBIGUOUS_BRAND_NAMES = frozenset(
-    {"大众", "现代", "银河", "北京", "长安", "理想", "未来", "启辰", "东风", "红旗", "长城"}
-)
+# 易混短品牌名（既是品牌也是日常词）：见 mentions_known_brand 的说明。
+#
+# 2026-10-20 单一归属：此前本文件持有一份 11 词的本地副本，
+# 而 `catalog/brands.py` 另有一份 6 词的表——**同一个知识切成两半**，
+# 导致硬约束路径与语境路径对同一个词给出不同判定。
+# 现在词表统一由 `app.catalog.brands` 持有（`BRAND_AMBIGUITY`），
+# 本模块只保留**语境用途的规则**（需句中另有汽车信号）。
+# 硬约束用途的规则仍归 `brands.resolve_brand_mentions` 所有。
 
 
 def is_chatty(message: str) -> bool:
@@ -301,16 +355,18 @@ def mentions_known_brand(db: Session, message: str) -> bool:
     **易混短名排除**（第三轮审查 M1）：`大众/现代/银河/北京/长安` 既是品牌也是日常词
     （「大众化」「现代人」「银河系」「北京堵车」），2 字子串匹配必然误命中；这些名字
     只在句中已有其它汽车信号时才算数。
+
+    2026-10-20：易混词表改为**单一归属** `app.catalog.brands.BRAND_AMBIGUITY`，
+    本模块只保留**语境用途**的规则（`rule="context"`）。
     """
     normalized = normalize_name(message)
     if not normalized:
         return False
-    ambiguous = _AMBIGUOUS_BRAND_NAMES
     other_signal = bool(_CAR_CONTEXT_RE.search(message) or has_car_intent(message))
     for name, _bid, _label in brand_entries(db):
         if name not in normalized:
             continue
-        if len(name) <= 2 and name in ambiguous and not other_signal:
+        if len(name) <= 2 and is_ambiguous_brand(name, rule="context") and not other_signal:
             continue
         return True
     return False
@@ -332,15 +388,89 @@ def profile_has_core_constraints(profile: UserProfile) -> bool:
 # ── 路由决策 ────────────────────────────────────────────────────────────────
 # intent 字符串枚举：与 engine 既有分支一一对应，取值固定不收敛进 Enum
 # （金标集/日志/测试都用字面量比对，避免引入新的抽象层）。
-INTENTS = (
-    "comparison",
-    "series_qa",
-    "brand_lineup",
-    "catalog_count",
-    "tool_loop",
-    "chitchat",
-    "general_advice",
-    "recommendation",
+#
+# ⚠️ 2026-10-20：此前这里只有一份 `INTENTS`（8 个），但**意图其实有 9 个**——
+# `decide_route` 还会产出 `sales_ranking`（`routing.py` 的 0.7a2 分支）。
+# 而 `INTENTS` 的**真实用途**是「LLM 输出协议白名单」（`llm_router` 用
+# `intent not in INTENTS` 拒掉非法输出），不是「全部意图」。
+# 两者语义不同，**不是漏列**：`sales_ranking` 由纯确定性规则判定，LLM 路由
+# 不允许产出它。
+#
+# 真正的毛病是**名字骗人 + 完整集合无处可查**：一个叫 `INTENTS` 的常量只管
+# LLM 那一半，而 `RouteDecision` 的 docstring 写着「命中的链路（INTENTS 之一）」
+# ——**那句话是错的**。新读代码的人会以为 `INTENTS` 就是全部意图，
+# 给 `decide_route` 加新意图时也不知道要同步哪几处。
+#
+# 现在用一张表把三件事说清楚，每个 intent 带上它在各路径下的角色：
+@dataclass(frozen=True)
+class IntentSpec:
+    """一个意图在**各条路径**下的角色。
+
+    ## 为什么有两列布尔
+
+    | 列 | 含义 | 谁用 |
+    | --- | --- | --- |
+    | `llm_protocol` | LLM 能否**输出**这个 intent | `llm_router` 的输出校验 + 提示词枚举 |
+    | `llm_fill` | LLM 能否**补位**采用这个 intent | `arbitrate_route` 的第 3 道闸门 |
+
+    两者**不是**同一件事：
+    - `chitchat` / `general_advice` / `recommendation` 是**兜底型**意图——
+      LLM 可以输出它们，但**不许**用它们改写 regex 的具体规则命中
+      （换一个兜底等于没改写）。
+    - `sales_ranking` 是**纯确定性**意图——LLM 连输出都不许。
+
+    ## 守卫规则不在这里
+
+    「某个 intent 在当前上下文下能不能执行」（`llm_intent_executable`）与
+    「能不能输出 / 能不能补位」是**两回事**，前者由各 intent 自己的
+    前置条件决定，**刻意不合并**（见 `llm_intent_executable` 的 docstring：
+    「勿按『逐条一致』回改」）。强行合并会让某个用途迁就另一个。
+    """
+
+    name: str
+    llm_protocol: bool
+    llm_fill: bool
+
+
+#: **全部**意图 —— `decide_route` 能产出的每一个。
+#:
+#: 这是「意图」的权威清单。金标集覆盖度检查、测试断言都应引用它，
+#: 而不是各自维护一份。
+#:
+#: ⚠️ **顺序有意义**：`INTENTS` 的顺序直接决定 LLM 提示词里的枚举顺序
+#: （`llm_router` 用 `"- {name}\n"` 逐行拼），改了会影响 LLM 的输出分布。
+#: 故表的顺序与迁移前 `INTENTS` 的**原始顺序逐位一致**（兜底型在末尾），
+#: `sales_ranking` 追加在最后——它是纯确定性意图，不进 LLM 协议。
+INTENT_SPECS: tuple[IntentSpec, ...] = (
+    # 具体型（LLM 可输出，且可在 regex 兜底时补位）
+    IntentSpec("comparison", llm_protocol=True, llm_fill=True),
+    IntentSpec("series_qa", llm_protocol=True, llm_fill=True),
+    IntentSpec("brand_lineup", llm_protocol=True, llm_fill=True),
+    IntentSpec("catalog_count", llm_protocol=True, llm_fill=True),
+    IntentSpec("tool_loop", llm_protocol=True, llm_fill=True),
+    # 兜底型（LLM 可输出，但不许用它们改写 regex 的具体规则命中）
+    IntentSpec("chitchat", llm_protocol=True, llm_fill=False),
+    IntentSpec("general_advice", llm_protocol=True, llm_fill=False),
+    IntentSpec("recommendation", llm_protocol=True, llm_fill=False),
+    # 纯确定性（LLM 连输出都不许——它由 `asks_sales_ranking` 等规则判定）
+    IntentSpec("sales_ranking", llm_protocol=False, llm_fill=False),
+)
+
+#: 全部意图名。
+ALL_INTENTS: tuple[str, ...] = tuple(spec.name for spec in INTENT_SPECS)
+
+#: LLM 输出**协议白名单**（进提示词枚举 + 输出校验）。
+#:
+#: ⚠️ 名字保留 `INTENTS` 是为了不动 `llm_router` 与金标测试的既有导入面；
+#: 它的语义是「LLM 能说这些词」，**不是**「全部意图」——全部意图见
+#: `ALL_INTENTS`。2026-10-20 之前这两个语义被混为一谈。
+INTENTS: tuple[str, ...] = tuple(
+    spec.name for spec in INTENT_SPECS if spec.llm_protocol
+)
+
+#: LLM 允许**补位**的具体意图（`arbitrate_route` 第 3 道闸门）。
+LLM_FILL_INTENTS: frozenset[str] = frozenset(
+    spec.name for spec in INTENT_SPECS if spec.llm_fill
 )
 
 
@@ -348,7 +478,8 @@ INTENTS = (
 class RouteDecision:
     """一次意图路由的结果。
 
-    intent        命中的链路（INTENTS 之一）；
+    intent        命中的链路（**`ALL_INTENTS` 之一**——共 9 个，含 `sales_ranking`；
+                  `INTENTS` 只有 8 个，那是「LLM 能输出的协议白名单」，不是全部意图）；
     matched_rule  命中的分支名与关键正则名（可观测/评测用）；
     slots         分发执行所需的载荷（如 comparison 的款型 ID 列表）；
     signals       判定过程中的关键布尔/计数值（排障用，不参与分发）。
@@ -599,6 +730,27 @@ def decide_route(
 
     # 1) 无购车意图的普通对话（如「今天天气不错」「帮我算个题」）→ 自然回复
     if not (has_car_intent(message) or structured):
+        # 1a) **上下文追问**（「还有别的吗」「再看看其他的」）——
+        #     本句没有购车关键词，但**会话里已经建立了明确的购车诉求**
+        #     ⇒ 应当**再推一批**，而不是回一句闲聊。
+        #
+        # 2026-10-21 实测：旧行为是回一句「可以告诉我你的预算、主要用途和乘坐人数吗？」
+        # （而画像里预算/用途/人数**俱全**——探针逐轮打印确认），**一张车都不推**。
+        # 用户明确在要车，引擎却反问它已经知道的：这不是风格问题，是**答非所问**。
+        #
+        # 守卫：必须有**核心约束**（预算/用途/人数/车身）才这么判——
+        # 没有购车上下文的「还有别的吗」（如「还有别的优惠吗」）仍走普通对话。
+        if asks_more_cars(message) and profile_has_core_constraints(profile):
+            return RouteDecision(
+                intent="recommendation",
+                matched_rule="1a:asks_more_cars+profile_core_constraints",
+                signals={
+                    "has_car_intent": False,
+                    "structured": False,
+                    "reask": True,
+                    "car_context": car_context,
+                },
+            )
         return RouteDecision(
             intent="chitchat",
             matched_rule="1:not(has_car_intent or structured)",
@@ -645,6 +797,10 @@ def decide_route(
             "has_car_intent": has_car_intent(message),
             "structured": structured,
             "car_context": car_context,
+            # 「再给一批」的标记（2026-10-21）：执行层据此**排除已展示过的款型**。
+            # 引擎是确定性的 ⇒ 不排除的话同一画像必然推回逐位相同的那一批
+            # （实测：宽需求下候选池 3162 台，第二轮仍是同一批 5 台）。
+            "reask": asks_more_cars(message),
         },
     )
 
