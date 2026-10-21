@@ -60,7 +60,13 @@ def upgrade() -> None:
         sa.Column("value", sa.String(length=128), nullable=False),
         sa.Column("source_type", sa.String(length=16), nullable=False, server_default="explicit"),
         sa.Column("confidence", sa.Float(), nullable=False, server_default="1"),
-        sa.Column("confirmed", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+        # ⚠️ 布尔列的默认值必须是**布尔字面量**，不能是 0/1：
+        # PostgreSQL 报 `column "confirmed" is of type boolean but default expression
+        # is of type integer`，整个迁移事务回滚 ⇒ 容器起不来 ⇒ 部署回滚。
+        # SQLite 接受 `DEFAULT 0`，所以本地（以及 CI）**永远测不出来**——
+        # 2026-10-21 生产部署就是这么被它挡下来的（详见
+        # docs/2026-10-21-postgres-boolean-default.md）。
+        sa.Column("confirmed", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("evidence_span", sa.String(length=500), nullable=True),
         sa.Column("source_message_id", sa.Integer(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
