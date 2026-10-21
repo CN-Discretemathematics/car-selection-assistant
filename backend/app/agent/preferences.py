@@ -74,38 +74,55 @@ def get_mode() -> str:
     return raw if raw in VALID_MODES else MODE_OFF
 
 
-def is_enabled() -> bool:
-    """是否允许写库并回填（仅 `on`）。
+@dataclass(frozen=True)
+class ModeCapabilities:
+    """某一档**具体能做什么**——能力，不是名字。
 
-    `off` 与 `shadow` 都**不回填**：回填会改变推荐结果，那已经不是「观察」了。
+    ## 为什么要有它（2026-10-21 代码审查 Major M2）
+
+    此前三档的语义被拆在**两个布尔门**里：`is_enabled()`（写库并回填）与
+    `is_observed()`（解析身份）。事故就出在「选错了门」：
+
+    - 2026-10-21 生产实测：路由层用 `is_enabled()` 决定「是否解析身份」，
+      而 `shadow` 档的 `is_enabled()` 是假 ⇒ **影子日志一条都不落**
+      ⇒ `shadow` 成了**空档**（不写库、也不观察），「先观察一两天再切 on」
+      那道观察期是**假的**。
+
+    ⇒ 那次修复的方式是「**再加一个门**」⇒ 选错门的触发面变大而不是变小。
+    ⇒ 现在：**一张表**说清每档能做什么，调用点按**能力**取，按名字猜不了。
+
+    | 档位 | observe | write | refill |
+    | --- | --- | --- | --- |
+    | `off` | ✗（连查都不查） | ✗ | ✗ |
+    | `shadow` | ✓ | ✗ | ✗ |
+    | `on` | ✓ | ✓ | ✓ |
+
+    三个能力的含义：
+
+    - **observe**：解析匿名身份 + 落观察日志（`shadow` 的全部价值就在这里）；
+    - **write**：写库（偏好记忆 / 拒绝反馈）；
+    - **refill**：回填进画像——它会**改变推荐结果**，所以 `shadow` 绝不能做。
     """
-    return get_mode() == MODE_ON
+
+    observe: bool
+    write: bool
+    refill: bool
 
 
-def is_observed() -> bool:
-    """这一档是否**观察**身份相关行为（`shadow` 与 `on` 都是）。
+#: 三档的能力表。**唯一**的真值点——别在别处再写一遍「哪档能干什么」。
+MODE_CAPABILITIES: dict[str, ModeCapabilities] = {
+    MODE_OFF: ModeCapabilities(observe=False, write=False, refill=False),
+    MODE_SHADOW: ModeCapabilities(observe=True, write=False, refill=False),
+    MODE_ON: ModeCapabilities(observe=True, write=True, refill=True),
+}
 
-    ## 为什么需要它（2026-10-21 生产实测）
 
-    `shadow` 档的**全部价值**是「落日志、不写不读」——而两条影子日志
-    （`persist_hints` 的「偏好记忆（shadow，未写库）」与
-    `record_rejection` 的「拒绝反馈（shadow，未写库）」）**都以「有身份」为前提**
-    （两者开头都是 `if identity is None: return`）。
+def mode_capabilities(mode: str | None = None) -> ModeCapabilities:
+    """某一档的能力。未知档位**回退到最保守的那档**（off：什么都不做）。
 
-    而路由层当时用的是 `is_enabled()`（只在 `on` 为真）来解析身份 ⇒
-    **`shadow` 档的身份恒为 None** ⇒ 影子日志**永远不会触发**
-    ⇒ `shadow` 成了**空档**：不写库（对）也不观察（错）。
-    「先观察一两天再切 on」那道观察期于是是**假的**——观察不到任何东西。
-
-    ## 三档的分工
-
-    | 档位 | 解析身份 | 写库 | 回填 | 落观察日志 |
-    | --- | --- | --- | --- | --- |
-    | `off` | ✗（连查都不查） | ✗ | ✗ | ✗ |
-    | `shadow` | ✓ | ✗ | ✗ | **✓** |
-    | `on` | ✓ | ✓ | ✓ | ✓（另有写入结果） |
+    `mode` 省略时读当前档（`get_mode()`）。
     """
-    return get_mode() != MODE_OFF
+    return MODE_CAPABILITIES.get(mode or get_mode(), MODE_CAPABILITIES[MODE_OFF])
 
 
 # ── 身份 ────────────────────────────────────────────────────────────────────
@@ -383,7 +400,7 @@ def remember(
         _logger.info("记忆未确认，未写入: %s/%s", category, key)
         return WriteOutcome(written=False, reason=reason, identity_id=identity.id, key=key)
     mode = get_mode()
-    if mode != MODE_ON:
+    if not mode_capabilities(mode).write:
         _logger.info("记忆未写入（模式 %s）: %s/%s", mode, category, key)
         return WriteOutcome(
             written=False, reason=f"模式 {mode} 不写库", identity_id=identity.id, key=key
@@ -811,7 +828,7 @@ def effective_brand_exclusions(
 
     这正是三层消解规则在品牌维度上的落法：**本轮 > 本会话 > 记忆**。
     """
-    if identity is None or not is_enabled():
+    if identity is None or not mode_capabilities().refill:
         return {}
     turn = turn_brand_hints or {}
     names = list(_memory_value(db, identity, "brand_exclude"))
@@ -873,7 +890,7 @@ def restore_into_profile(
     它需要**本轮与本会话的品牌要求**才能消解冲突（见
     `effective_brand_exclusions`）——本 module 拿不到「用户这轮要哪个品牌」。
     """
-    if identity is None or not is_enabled():
+    if identity is None or not mode_capabilities().refill:
         return profile
     mem = memories_to_hints(db, identity)
     if not mem and not brand_exclusions:
@@ -954,7 +971,9 @@ def persist_hints(
     if identity is None:
         return []
     mode = get_mode()
-    if mode == MODE_OFF:
+    caps = mode_capabilities(mode)
+    if not caps.observe:
+        # `off` 档：连观察都不观察（这条路径本就不该被走到——路由层已不解析身份）
         return []
 
     effective = effective_tracked(db, identity, hints)
@@ -962,7 +981,8 @@ def persist_hints(
         labels = [str(v) for v in (brand_exclusions.get("brand_exclude_labels") or [])]
         if labels:
             effective["brand_exclude"] = labels
-    if mode == MODE_SHADOW:
+    if not caps.write:
+        # `shadow` 档：只落日志，不写库、不回填
         _logger.info(
             "偏好记忆（shadow，未写库）: %s",
             json.dumps(effective, ensure_ascii=False, sort_keys=True),

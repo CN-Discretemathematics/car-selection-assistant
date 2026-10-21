@@ -35,7 +35,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent.preferences import MODE_OFF, MODE_SHADOW, get_mode
+from app.agent.preferences import mode_capabilities
 from app.common.models import AnonymousIdentity, VariantFeedback, VehicleVariant
 
 _logger = logging.getLogger("app.agent.feedback")
@@ -62,10 +62,12 @@ def record_feedback(
     """
     if identity is None or not variant_ids:
         return []
-    mode = get_mode()
-    if mode == MODE_OFF:
+    caps = mode_capabilities()
+    if not caps.observe:
+        # `off` 档：连观察都不观察
         return []
-    if mode == MODE_SHADOW:
+    if not caps.write:
+        # `shadow` 档：只落日志，不写库
         _logger.info(
             "拒绝反馈（shadow，未写库）: %s",
             json.dumps(
@@ -126,8 +128,8 @@ def load_rejected_variant_ids(
     """
     if identity is None:
         return []
-    mode = get_mode()
-    if mode in (MODE_OFF, MODE_SHADOW):
+    # 只有 `on` 档写过反馈 ⇒ 其余档位读它**必然是空**（读它就会改变推荐结果）
+    if not mode_capabilities().write:
         return []
     rows = db.execute(
         select(VariantFeedback.variant_id).where(
