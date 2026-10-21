@@ -56,6 +56,7 @@ MEMORY_SCENARIOS = (
     "returning_user_memory",
     "memory_deleted",
     "rejection_remembered_across_sessions",
+    "exclusion_memory",
 )
 
 #: 场景类型 → 它检验的**记忆类型**（用于报告里的分列）。
@@ -63,6 +64,7 @@ MEMORY_TYPE = {
     "returning_user_memory": "预算（回访记忆生效）",
     "memory_deleted": "预算（记忆删除后不生效）",
     "rejection_remembered_across_sessions": "拒绝/排除（跨会话还记得）",
+    "exclusion_memory": "**排除项**（品牌级，跨会话还记得）",
 }
 
 MODES = ("on", "off")

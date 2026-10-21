@@ -64,6 +64,42 @@ def test_ambiguous_brand_requires_intent(db_session: Session):
     assert resolve_brand_mentions(db_session, "我想买理想")["brand_labels"] == ["理想"]
 
 
+def test_ambiguous_brand_still_resolves_in_negation_context(db_session: Session):
+    """「不要大众」必须被认成**排除**「大众」——否定语境里没有歧义。
+
+    ## 为什么（2026-10-21 实测）
+
+    歧义守卫（理想/长安/大众/未来/启辰/东风 需带**强意图词**才认）本来是防
+    「理想的预算 20 万」把日常词「理想」当成品牌。可它排在否定判定**之前**，
+    于是「不要大众」也被当成日常词丢掉 ⇒ 品牌排除项**根本没进画像**
+    ⇒ 跨会话记忆无从记起 ⇒ 计划 §七「硬约束排除项是记忆的第一价值」那条判断
+    在**最常见的品牌排除**上直接落空。
+
+    实测：本地快照库 92 个品牌里「大众」在否定语境下解析失败
+    （`resolve_brand_names(['大众'])` → `([], [])`，而「丰田」「比亚迪」正常），
+    「排除项跨会话」评测里 3/23 条因此红。
+    """
+    source = make_source(db_session)
+    vw = make_brand(db_session, name="大众", brand_type="domestic", source=source)
+    series = make_series(db_session, vw, name="大众迈腾", energy_types=("ICE",), source=source)
+    year = make_year(db_session, series)
+    make_variant(db_session, series, year, config_version="标准版", energy_type="ICE",
+                 price_cny="200000", source=source)
+    db_session.commit()
+
+    # 否定语境 ⇒ 排除项成立
+    neg = resolve_brand_mentions(db_session, "预算15万，不要大众")
+    assert neg.get("brand_exclude_ids") == [vw.id], neg
+    assert neg.get("brand_exclude_labels") == ["大众"], neg
+    assert "brand_ids" not in neg, "否定语境不该同时进正向集合"
+
+    # ⚠️ **非否定语境**的老行为**不能变**：歧义守卫仍然拦着
+    assert resolve_brand_mentions(db_session, "大众的预算大概是 20 万") == {}
+    assert resolve_brand_mentions(db_session, "大众化产品不错") == {}
+    # 强意图词仍然认（正向约束）
+    assert resolve_brand_mentions(db_session, "我想买大众")["brand_labels"] == ["大众"]
+
+
 def test_merge_profile_accumulates_and_excludes_brands():
     profile = merge_profile(UserProfile(), {"brand_ids": [1], "brand_labels": ["奔驰"]})
     assert profile.brand_ids == [1] and profile.brand_labels == ["奔驰"]

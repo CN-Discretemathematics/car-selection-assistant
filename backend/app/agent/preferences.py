@@ -740,16 +740,30 @@ def resolve_brand_names(db: Session, names: list[str]) -> tuple[list[int], list[
     为什么存**名字**而不是 brand_id：库重导入时 id 会重排
     （评测锚点 406/410 那个坑——题库的 id 指向的车与题面说的不是同一台）。
     名字与 id 无关 ✓，所以记忆里存名字。
+
+    ## ⚠️ 必须按**排除**语境解析（2026-10-21 实测纠正）
+
+    记忆里存的是「**用户明说不要的品牌**」——这个语境**没有歧义**：
+    「不要大众」不可能是日常词。而按**正向约束**解析会撞上歧义守卫
+    （理想/长安/大众/未来/启辰/东风 这类名字需带强意图词才认）
+    ⇒ 实测 `resolve_brand_names(['大众'])` 返回 `([], [])`
+    ⇒ **跨会话回填时，品牌排除项静默失效**（没有任何报错）。
+
+    ⇒ 这里统一用「不要 {name}」去解析：走的是**否定语境**那条路，
+    歧义守卫对否定语境不适用（见 `catalog/brands.py::resolve_brand_mentions`）。
     """
     from app.catalog.brands import resolve_brand_mentions
 
     ids: list[int] = []
     labels: list[str] = []
     for name in names:
-        hints = resolve_brand_mentions(db, name, assume_constraint=True)
+        clean = str(name or "").strip()
+        if not clean:
+            continue
+        hints = resolve_brand_mentions(db, f"不要{clean}")
         for bid, label in zip(
-            hints.get("brand_ids") or [],
-            hints.get("brand_labels") or [],
+            hints.get("brand_exclude_ids") or [],
+            hints.get("brand_exclude_labels") or [],
             strict=False,
         ):
             if bid not in ids:

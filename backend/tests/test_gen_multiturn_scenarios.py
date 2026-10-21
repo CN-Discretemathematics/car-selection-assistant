@@ -227,3 +227,54 @@ def test_generator_emits_three_scenarios_with_the_requested_count(db_session):
         if scenario["scenario"] != "reject_then_no_recommend":
             assert scenario["enabled"] is False, scenario
             assert scenario.get("reason_disabled"), scenario
+
+
+def test_exclusion_memory_scenario_shape_and_is_not_vacuous(db_session):
+    """场景 5（**排除项**跨会话记住）的形状 + **非恒真**。
+
+    ## 为什么单独立一条
+
+    计划 §七的第一条判断是「**硬约束排除项**是记忆的第一价值」，
+    而在此之前跨会话题库里**没有这一类** ⇒ 那条判断在评测层面是空的。
+
+    ## 「非恒真」是什么意思
+
+    「该品牌不该再出现」在**没有记忆**时也可能为真——如果那个品牌**本来就不在榜**。
+    所以生成器必须**先验一遍**：不带排除项时，那个品牌的车**确实在推荐里**才收。
+    这条用例把那个前提**钉住**：它重跑一遍推荐，确认品牌确实在榜。
+    """
+    _seed(db_session)
+    rng = random.Random(5)
+    requirements = gen.sample_requirements(db_session, rng, 3)
+    scenarios = gen.gen_exclusion_memory_scenarios(
+        rng, requirements, db_session, enabled=True
+    )
+    assert scenarios, "一个都没生成（种子库里至少有一个品牌的车该在榜）"
+    for scenario in scenarios:
+        turns = scenario["turns"]
+        assert scenario["scenario"] == "exclusion_memory", scenario
+        assert scenario["enabled"] is True, scenario
+        # 两个会话：第一轮说排除项，第二轮换会话问 ⇒ 才是「跨会话」
+        assert [t.get("session") for t in turns] == ["first", "second"], scenario
+        brand = turns[1]["assert"][0]["brand"]
+        assert turns[1]["assert"] == [
+            {"type": "brand_not_recommended", "brand": brand}
+        ], scenario
+        assert brand in turns[0]["user"], scenario
+        # 非恒真：那个品牌**本来就在榜**（否则断言白送）
+        base_turn = turns[0]["user"].replace(f"，不要{brand}", "")
+        pairs = gen._recommended_series_brands(db_session, base_turn)
+        assert any(b == brand for _name, b in pairs), (
+            f"「{brand}」本来就不在推荐里 ⇒ 断言恒真（这个场景什么都没验）"
+        )
+
+
+def test_exclusion_memory_scenario_is_disabled_by_default(db_session):
+    """默认关（依赖跨会话记忆）✓ —— 没合入时跑了必然红，不该混进分母。"""
+    _seed(db_session)
+    rng = random.Random(5)
+    requirements = gen.sample_requirements(db_session, rng, 2)
+    scenarios = gen.gen_exclusion_memory_scenarios(rng, requirements, db_session)
+    for scenario in scenarios:
+        assert scenario["enabled"] is False, scenario
+        assert scenario.get("reason_disabled"), scenario

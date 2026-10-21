@@ -880,6 +880,73 @@ def test_brand_exclusion_applies_in_the_next_session(
     assert "测试比亚迪" not in brands, f"记忆里的品牌排除项未生效：{brands}"
 
 
+def test_ambiguous_brand_exclusion_applies_in_the_next_session(
+    client, db_session, durable_on
+):
+    """**歧义品牌**（大众/理想/长安…）的排除项也必须在下一段对话里生效。
+
+    ## 为什么（2026-10-21 实测）
+
+    「大众」既是品牌也是日常词 ⇒ 歧义守卫要求它带**强意图词**才被当作品牌。
+    可守卫排在**否定判定之前** ⇒「不要大众」被当日常词丢掉；
+    回填时 `resolve_brand_names(['大众'])` 又按**正向约束**解析 ⇒ 同样落空。
+    ⇒ 品牌排除项在**最常见的品牌**上静默失效（**没有任何报错**），
+    计划 §七「硬约束排除项是记忆的第一价值」那条判断直接落空。
+
+    上面那条 `test_brand_exclusion_applies_in_the_next_session` 用的是「测试比亚迪」
+    ——不是歧义品牌 ⇒ 覆盖不到这条路径。
+    """
+    source = make_source(db_session, name="官方测试来源")
+    for name in ("大众", "测试奔驰"):
+        brand = make_brand(db_session, name=name, source=source)
+        series = make_series(
+            db_session, brand, name=f"{name}车系", body_type="sedan",
+            energy_types=("BEV",), source=source,
+        )
+        year = make_year(db_session, series)
+        make_variant(
+            db_session, series, year, config_version="标准版", energy_type="BEV",
+            price_cny="150000", source=source,
+        )
+    db_session.commit()
+
+    headers = _identity_headers(client)
+
+    # 前提：没有记忆时，「大众」确实会被推荐（否则本用例测的是空气）
+    plain_headers = _identity_headers(client)
+    plain_sid = _create_session(client)
+    plain = client.post(
+        f"/api/v1/agent/sessions/{plain_sid}/messages",
+        json={"message": "预算20万，通勤，两三个人"},
+        headers=plain_headers,
+    ).json()
+    assert "大众" in {
+        v.get("brand_name") for v in plain.get("recommended_variants", [])
+    }, "前提不成立：没有记忆时「大众」并未被推荐，本用例测的是空气"
+
+    # 第一段：记住「不要大众」（歧义品牌的否定语境必须被认出来）
+    sid1 = _create_session(client)
+    client.post(
+        f"/api/v1/agent/sessions/{sid1}/messages",
+        json={"message": "预算20万，通勤，不要大众"},
+        headers=headers,
+    )
+    rows = client.get("/api/v1/agent/preferences", headers=headers).json()
+    brand_rows = [r for r in rows if r["key"] == "brand_exclude"]
+    assert brand_rows, f"歧义品牌的排除项应当被记住，实际记住了：{[r['key'] for r in rows]}"
+    assert brand_rows[0]["value"] == '["大众"]', brand_rows[0]["value"]
+
+    # 第二段（新会话）：被排除的「大众」不该再出现
+    sid2 = _create_session(client)
+    resp = client.post(
+        f"/api/v1/agent/sessions/{sid2}/messages",
+        json={"message": "预算20万，通勤，两三个人"},
+        headers=headers,
+    ).json()
+    brands = {v.get("brand_name") for v in resp.get("recommended_variants", [])}
+    assert "大众" not in brands, f"歧义品牌的记忆排除项未生效：{brands}"
+
+
 def test_turn_requirement_beats_the_remembered_exclusion(
     client, db_session, durable_on
 ):

@@ -137,12 +137,11 @@ def _band_for(price: float) -> tuple[int, int]:
     return (max(1, lo - 2), hi + 2)
 
 
-def _recommended_series(db, turn: str) -> list[str]:
-    """跑一次**真实推荐**，返回被推荐的车系名。
+def _recommended_series_brands(db, turn: str) -> list[tuple[str, str]]:
+    """跑一次**真实推荐**，返回 (车系名, 品牌名) 列表。
 
-    用来确认「被拒的那台」确实在榜里——否则「它不该再被推荐」是**恒真**的
-    （实测：宽预算档下 7/50 恒真，窄档下仍有 5/50）。
-    走引擎的真实路径（`respond`），不自己复现一遍筛选逻辑（复现＝会漂）。
+    为什么要**品牌**也带出来：排除项是**品牌级**的（用户说「不要丰田」⇒ 该品牌全部车系出局），
+    而库里一个品牌往往有多个车系 ⇒ 只看车系名判不出「这个品牌还有没有车在榜」。
     """
     import asyncio
 
@@ -152,7 +151,20 @@ def _recommended_series(db, turn: str) -> list[str]:
     engine = get_agent_engine()
     store = get_session_store()
     out = asyncio.run(engine.respond(db, store.create(), turn))
-    return [v.series_name for v in out.recommended_variants or []]
+    return [
+        (str(v.series_name), str(getattr(v, "brand_name", "") or ""))
+        for v in out.recommended_variants or []
+    ]
+
+
+def _recommended_series(db, turn: str) -> list[str]:
+    """跑一次**真实推荐**，返回被推荐的车系名。
+
+    用来确认「被拒的那台」确实在榜里——否则「它不该再被推荐」是**恒真**的
+    （实测：宽预算档下 7/50 恒真，窄档下仍有 5/50）。
+    走引擎的真实路径（`respond`），不自己复现一遍筛选逻辑（复现＝会漂）。
+    """
+    return [name for name, _brand in _recommended_series_brands(db, turn)]
 
 
 def _price_bucket(band: tuple[int, int]) -> int:
@@ -589,6 +601,75 @@ def gen_rejection_remembered_scenarios(
     return out
 
 
+def gen_exclusion_memory_scenarios(
+    rng: random.Random, requirements: list[dict], db, *, enabled: bool = False
+) -> list[dict]:
+    """场景 5：排除项**跨会话**还记得吗？（说「不要 X 品牌」→ 换会话 → 该品牌不再出现）
+
+    ## 为什么必须单独有一类（2026-10-21）
+
+    计划 §七的第一条判断是「**硬约束排除项**是记忆的第一价值」，
+    而在此之前跨会话题库里**根本没有排除项这一类**：预算（回访/删除）与拒绝（跨会话）都验过，
+    **唯独「排除项」没验过** ⇒ 那条判断在**评测层面是空的**（实测：生产三张新表长期 0 行，
+    排除项从没被真正跑起来过）。
+
+    ## 断言为什么不会恒真
+
+    「该品牌不该再出现」在**没有记忆**时也可能为真（那个品牌本来就不在榜）⇒
+    所以生成时**先验一遍**：**不带**排除项时跑一次真实推荐，
+    那个品牌的车**确实在榜**才收 ⇒ 断言有对象可验（否则 off 档也会「通过」⇒ 白验）。
+    """
+    out: list[dict] = []
+    for i, req in enumerate(requirements):
+        brand = str(req.get("brand") or "")
+        if not brand:
+            continue
+        lo_w, hi_w = req["band"]
+        # 不带排除项的需求句（用于验「那个品牌本来就在榜」）
+        base_turn = (
+            f"预算{lo_w}到{hi_w}万，{req['body_cn']}，{req['energy_cn']}的，"
+            f"{req['usage_cn']}为主，家里{req['passengers']}口人用"
+        )
+        try:
+            pairs = _recommended_series_brands(db, base_turn)
+        except Exception:  # noqa: BLE001 —— 单个候选验不过不该让整批失败
+            continue
+        if not any(b == brand for _name, b in pairs):
+            # 该品牌本来就不在榜 ⇒ 「它不该再出现」是**恒真**的 ⇒ 不收
+            continue
+        out.append(
+            {
+                "id": f"mt_exclusion_{i + 1:04d}",
+                "scenario": "exclusion_memory",
+                "enabled": enabled,
+                "reason_disabled": "依赖 Phase 1：持久化身份 + 偏好记忆（排除项回填）",
+                "turns": [
+                    {
+                        "user": f"{base_turn}，不要{brand}",
+                        "assert": [],
+                        "session": "first",
+                    },
+                    {
+                        # ⚠️ 第二轮**重复硬约束**（预算/车身/能源/用途/人数）但**不重复排除项**。
+                        #
+                        # 为什么不能只问「按我之前说的条件推荐」：**没有记忆时**（off 档）
+                        # 引擎手里没有预算 ⇒ 它会**反问**「预算大概多少？」
+                        # ⇒ 推荐列表是**空的** ⇒ 「该品牌不在榜」**白送**（断言恒真）。
+                        # 实测：那样生成的话，off 档 23/23 全过 ⇒ 这类场景证明不了任何事。
+                        #
+                        # 重复硬约束后，off 档**也能推出一批车** ⇒ 「那个品牌在不在榜」
+                        # 才是真判据 ⇒ 记忆生效时它不在（断言成立），
+                        # 记忆不生效时它**应该**在（断言红）⇒ 这一类才测得住。
+                        "user": f"还是{base_turn}",
+                        "assert": [{"type": "brand_not_recommended", "brand": brand}],
+                        "session": "second",
+                    },
+                ],
+            }
+        )
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="生成多轮场景题库")
     parser.add_argument("--out", default="eval/multiturn.json", help="输出路径")
@@ -598,7 +679,8 @@ def main(argv: list[str] | None = None) -> int:
         "--enable-memory-scenarios",
         action="store_true",
         help=(
-            "启用三个**跨会话**场景（回访记忆 / 删记忆 / 拒绝跨会话记住；默认关）。需要："
+            "启用四个**跨会话**场景（回访记忆 / 删记忆 / 拒绝跨会话记住 / "
+            "**排除项跨会话**；默认关）。需要："
             "引擎 handle 支持 identity + DURABLE_PREFS_MODE=on"
             "（off/shadow 模式不回填记忆、不读写反馈，断言必然红）"
         ),
@@ -606,25 +688,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     rng = random.Random(args.seed)
+    # ⚠️ 会话必须**开着**直到场景生成完：排除项场景要跑真实推荐来验
+    # 「那个品牌本来就在榜」（否则断言恒真）⇒ 不能在 with 块外用它。
     with get_session_factory()() as db:
         requirements = sample_requirements(db, rng, args.count)
-    if len(requirements) < args.count:
-        print(
-            f"⚠️ 库里只抽到 {len(requirements)} 个可满足的需求（要 {args.count} 个）——"
-            f"请检查库里在售车系的价格档与车身/能源标注。"
+        if len(requirements) < args.count:
+            print(
+                f"⚠️ 库里只抽到 {len(requirements)} 个可满足的需求（要 {args.count} 个）——"
+                f"请检查库里在售车系的价格档与车身/能源标注。"
+            )
+        scenarios = (
+            gen_reject_scenarios(rng, requirements)
+            + gen_returning_scenarios(
+                rng, requirements, enabled=args.enable_memory_scenarios
+            )
+            + gen_memory_deleted_scenarios(
+                rng, requirements, enabled=args.enable_memory_scenarios
+            )
+            + gen_rejection_remembered_scenarios(
+                rng, requirements, enabled=args.enable_memory_scenarios
+            )
+            + gen_exclusion_memory_scenarios(
+                rng, requirements, db, enabled=args.enable_memory_scenarios
+            )
         )
-    scenarios = (
-        gen_reject_scenarios(rng, requirements)
-        + gen_returning_scenarios(
-            rng, requirements, enabled=args.enable_memory_scenarios
-        )
-        + gen_memory_deleted_scenarios(
-            rng, requirements, enabled=args.enable_memory_scenarios
-        )
-        + gen_rejection_remembered_scenarios(
-            rng, requirements, enabled=args.enable_memory_scenarios
-        )
-    )
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
