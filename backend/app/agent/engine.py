@@ -1565,7 +1565,14 @@ class AgentEngine:
         # 混合检索证据（§13：官方资料片段作为解释佐证；检索不可用不影响推荐）
         evidence = await run_in_threadpool(self._collect_evidence, db, profile, top)
 
-        explanation = await self._explain(profile, result, source_names, evidence)
+        explanation, explain_fell_back = await self._explain(profile, result, source_names, evidence)
+        if explain_fell_back:
+            # 降级必须**对调用方可见**——否则「解释被换成了模板」这件事没人知道，
+            # 质量下降就不可观测（工具循环路径有同样的打标 `contract_fallback`）。
+            filters = {
+                **(filters or {}),
+                "contract_fallback": True,
+            }
 
         recommended = [
             RecommendedVariant(
@@ -2590,10 +2597,25 @@ class AgentEngine:
         result: dict,
         source_names: list[str],
         evidence: list[dict] | None = None,
-    ) -> str:
+    ) -> tuple[str, bool]:
+        """生成解释文本。
+
+        返回 `(文本, 是否回退)`——回退时调用方要在 filters 上打标
+        （`contract_fallback`），否则「降级了」这件事对调用方不可见。
+
+        ## ⚠️ 数字守卫（ADR-0005，2026-10-21）
+
+        解释路径此前**没有任何数字校验** ⇒ 模型编的数字（如「续航 802 公里」）
+        直接进用户屏幕。工具循环有守卫、解释路径没有 ⇒ 同一个承诺（每句数字可溯源）
+        在两条链路上**强度不同**。
+
+        ⇒ 现在照抄工具循环的三级处理：**违规 → 回灌重写一次 → 再校验 → 仍不合格
+        → 回退确定性模板**（宁可话糙，不编数据）。
+        判据只守**数字**不守**名字**（名字容差匹配误杀面更大，见 ADR-0005）。
+        """
         template = self._template_explanation(profile, result, source_names, evidence or [])
         if not self._llm.available:
-            return template
+            return template, False
         try:
             context = json.dumps(
                 {
@@ -2616,10 +2638,69 @@ class AgentEngine:
             text = (resp["choices"][0]["message"]["content"] or "").strip()
             ok, _ = safety_guard(text)
             if ok and text:
-                return text
+                allowed_numbers = self._explain_allowed_numbers(profile, result, evidence)
+                numbers_ok, reason = answer_numbers_allowed(text, allowed_numbers)
+                if numbers_ok:
+                    return text, False
+                # 违规 → 回灌重写一次（照抄工具循环的处理）
+                logging.getLogger("app.agent.answer_contract").info(
+                    "解释路径出现库外数字（%s），要求模型重写一次", reason
+                )
+                try:
+                    resp2 = await self._llm.chat(
+                        [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": context},
+                            {
+                                "role": "user",
+                                "content": (
+                                    "你上一条解释里的数字没有依据（不在候选车型、检索证据或已知条件里）：\n"
+                                    f"- {reason}\n"
+                                    "请重新给出解释：只保留有依据的数字，"
+                                    "没有依据的写「官方资料未披露」。"
+                                ),
+                            },
+                        ],
+                        temperature=0.3,
+                    )
+                    candidate = (resp2["choices"][0]["message"]["content"] or "").strip()
+                    guard_ok, _guard = safety_guard(candidate)
+                    if (
+                        guard_ok
+                        and candidate
+                        and answer_numbers_allowed(candidate, allowed_numbers)[0]
+                    ):
+                        return candidate, False
+                except (LLMError, KeyError, TypeError, IndexError, ValueError):
+                    pass  # 重写失败按不合格处理（原则 7：宁可不答，不编数）
+                logging.getLogger("app.agent.answer_contract").info(
+                    "解释路径重写仍不合格，回退确定性模板"
+                )
+                return template, True
         except (LLMError, KeyError, TypeError, IndexError, ValueError):
             pass  # LLM 不可用/响应结构异常：回退确定性模板，Agent 仍可用（原则 7）
-        return template
+        return template, False
+
+    @staticmethod
+    def _explain_allowed_numbers(
+        profile: UserProfile, result: dict, evidence: list[dict] | None
+    ) -> set[float]:
+        """解释路径的**数字允许集**（与工具循环同口径，见 ADR-0005）。
+
+        = 候选款型（result）+ 检索证据（evidence）+ 画像（profile）里的数字。
+
+        ⚠️ 用 `tool_result_universe` 收：**它已经把「元 ↔ 万元」两种口径都收进来了**
+        （`n / 10000`）—— 画像里存的是元 150000，而回答里常写「15 万」，
+        差一个量纲就会被判成编造 ⇒ 合法回答被误杀。
+        """
+        numbers, _names = tool_result_universe(
+            {
+                "result": result,
+                "evidence": evidence or [],
+                "profile": llm_profile_view(profile),
+            }
+        )
+        return numbers
 
     @staticmethod
     def _template_explanation(
