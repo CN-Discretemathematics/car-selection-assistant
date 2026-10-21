@@ -31,7 +31,7 @@ from app.agent.engine import get_agent_engine
 from app.agent.preferences import (
     get_identity_by_token,
     get_or_create_identity,
-    is_enabled,
+    is_observed,
     list_memories,
 )
 from app.agent.schemas import (
@@ -89,7 +89,13 @@ async def send_message(
     #
     # ⚠️ 闸门关着时**连查都不查**：`off` = 完全不介入，而每次请求多一次
     # 按 token_hash 的 SELECT 是白付的代价（token_hash 有索引，但不查是零）。
-    identity = _resolve_identity(db, authorization) if is_enabled() else None
+    #
+    # 但 `shadow` 档**必须解析身份**（2026-10-21 实测）：影子日志
+    # （「偏好记忆（shadow，未写库）」/「拒绝反馈（shadow，未写库）」）
+    # 都以「有身份」为前提 ⇒ 这里用 `is_enabled()`（只在 on 为真）的话，
+    # `shadow` 档的身份恒为 None ⇒ 影子日志永不触发 ⇒ 观察期是**假的**。
+    # `is_observed()` = `shadow` 与 `on` 都解析，只有 `off` 不解析。
+    identity = _resolve_identity(db, authorization) if is_observed() else None
     return await get_agent_engine().handle(
         db, session_id, payload.message, identity=identity
     )

@@ -12,6 +12,7 @@
 #   - 先构建后切换：构建失败保持旧版本继续服务
 #   - 切换后做健康检查（/api/v1/ready 就绪 + 首页 200），失败自动回滚到上一版镜像
 #   - flock 单实例：不会与手工部署或上一次未完成的部署叠加
+#   - **远端 SHA 必须两处交叉核对才可信**（2026-10-21 事故后加，见下）
 set -uo pipefail
 
 REPO="CN-Discretemathematics/car-selection-assistant"
@@ -50,17 +51,58 @@ fi
 
 mkdir -p "$STATE_DIR"
 
-remote_sha=$(curl -fsSL -m 30 "https://api.github.com/repos/${REPO}/commits/${BRANCH}" 2>/dev/null \
-  | sed -n 's/.*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
+# ── 取远端 SHA：三层防护，缺一不可（2026-10-21 事故后加）────────────────────
+#
+# 事故（真实发生，不是假想）：2026-10-08 ~ 10-21 连续 **13 天**，本脚本每天在
+# 05:00 记一行「已是最新（621833da…），无需部署」，而 main 早已前进几十笔。
+# 生产因此停在 13 天前——durable memory、拒绝反馈、账户合并、多轮评测**全部没上线**。
+#
+# 根因不是脚本逻辑写错，而是**把一次未认证的 API 读当成了唯一事实源**：
+# 那次读到的��**陈旧响应**（疑似中间链路的 HTTP 缓存），脚本毫无察觉，
+# 于是「远端 == 已部署」这个判断在陈旧读上恒为真 ⇒ 每天安静地跳过。
+#
+# 三层防护各自对应一个独立的失效模式（缺一层就还会再坏一次）：
+#   ① cache-buster：URL 每次唯一 ⇒ 任何 HTTP 缓存都命不中（治本）
+#   ② 两个独立端点交叉核对：/commits/{branch} 与 /branches/{branch} 的 SHA 必须一致
+#   ③ 源码包时间戳 vs API 提交时间：codeload 源码包的 mtime 就是它那个提交的
+#      提交时间（实测：main 的包 mtime = 该提交的 committer date）。
+#      两者差出容差 ⇒ 必有一方陈旧 ⇒ 报错退出，**不猜**。
+remote_json=$(curl -fsSL -m 30 -H 'Cache-Control: no-cache' \
+  "https://api.github.com/repos/${REPO}/commits/${BRANCH}?_=$(date +%s)" 2>/dev/null)
+remote_sha=$(printf '%s' "$remote_json" | sed -n 's/.*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
+# committer 的 date 是第 2 个 "date"（第 1 个是 author 的；合并提交两者相同）
+remote_date=$(printf '%s' "$remote_json" | grep -o '"date": *"[0-9-]*T[0-9:]*Z"' | sed -n 2p \
+  | sed 's/.*"\([0-9-]*T[0-9:]*Z\)"/\1/')
+[ -n "${remote_date:-}" ] || remote_date=$(printf '%s' "$remote_json" \
+  | grep -o '"date": *"[0-9-]*T[0-9:]*Z"' | sed -n 1p | sed 's/.*"\([0-9-]*T[0-9:]*Z\)"/\1/')
+branch_json=$(curl -fsSL -m 30 -H 'Cache-Control: no-cache' \
+  "https://api.github.com/repos/${REPO}/branches/${BRANCH}?_=$(date +%s)" 2>/dev/null)
+branch_sha=$(printf '%s' "$branch_json" | sed -n 's/.*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
 if [ -z "${remote_sha:-}" ]; then
   log "ERROR 无法获取 ${BRANCH} 最新 SHA（网络或 API 限流），本次跳过"
   exit 1
 fi
+if [ -n "${branch_sha:-}" ] && [ "$branch_sha" != "$remote_sha" ]; then
+  log "ERROR 两个 GitHub 端点给出的 ${BRANCH} SHA 不一致（commits=${remote_sha} branches=${branch_sha}）"
+  log "      至少有一个返回了陈旧数据（疑似中间链路缓存）——本次跳过，不猜"
+  exit 1
+fi
 current_sha=$(cat "$STATE_FILE" 2>/dev/null || echo "")
+
+# 「已部署多久」= 状态文件的最后写入时间（部署成功时写）。
+# 它是**第三个独立信号**：若它已经很旧，而 API 偏偏说「与已部署相同」，
+# 那这个「相同」就不可信（正是 13 天事故的形状）⇒ 不走快路径，改用源码包核对。
+state_mtime=$(stat -c %Y "$STATE_FILE" 2>/dev/null || echo 0)
+[ "${state_mtime:-0}" -gt 0 ] 2>/dev/null || state_mtime=0
+state_age_days=0
+if [ "$state_mtime" -gt 0 ]; then
+  state_age_days=$(( ( $(date +%s) - state_mtime ) / 86400 ))
+fi
+STALE_DAYS="${CARSEL_DEPLOY_STALE_DAYS:-5}"
 
 if [ "$MODE" = "check" ]; then
   log "远端 ${BRANCH}=${remote_sha}"
-  log "已部署=${current_sha:-<未知>}"
+  log "已部署=${current_sha:-<未知>}（${state_age_days} 天前装的）"
   # 运行中容器自报的提交号（需镜像构建时注入 GIT_SHA，见 /api/v1/version）
   running_sha=$(curl -fsSL -m 10 "${HEALTH_URL%/ready}/version" 2>/dev/null \
     | sed -n 's/.*"commit_sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
@@ -71,12 +113,23 @@ if [ "$MODE" = "check" ]; then
   if [ -n "$running_sha" ] && [ "$running_sha" != "$remote_sha" ]; then
     log "⚠️ 运行中的容器与 main 不一致：站外验版本请 curl .../api/v1/version"
   fi
+  if [ "$state_age_days" -gt "$STALE_DAYS" ]; then
+    log "⚠️ 已 ${state_age_days} 天没有部署过（阈值 ${STALE_DAYS} 天）"
+    log "   若期间 main 有过更新，说明取 SHA 的链路在返回陈旧数据（2026-10-21 事故的形状）"
+  fi
   exit 0
 fi
 
-if [ "$remote_sha" = "$current_sha" ] && [ "$FORCE" != "1" ]; then
+# 快路径：远端 == 已部署，**且** 状态文件不算太旧。
+# 「状态文件太旧」这一条正是 13 天事故的形状：那时 API 每天返回同一个陈旧 SHA，
+# 于是这条快路径天天命中。现在它不成立了——宁可多下一次源码包去核对。
+if [ "$remote_sha" = "$current_sha" ] && [ "$FORCE" != "1" ] && [ "$state_age_days" -le "$STALE_DAYS" ]; then
   log "已是最新（${remote_sha}），无需部署"
   exit 0
+fi
+if [ "$remote_sha" = "$current_sha" ] && [ "$FORCE" != "1" ]; then
+  log "WARN 已 ${state_age_days} 天没有部署过，却读到 ${BRANCH}=${remote_sha} 与已部署相同"
+  log "     这个「相同」**不可信**：改用源码包的提交时间核对，确认为真才算「已是最新」"
 fi
 
 # 单实例锁（--check 不加锁；dry-run 也加，避免与真实部署并行下载）
@@ -117,6 +170,38 @@ if [ ! -d "$src_dir/backend/app" ] || [ ! -f "$src_dir/deploy/docker-compose.yml
   exit 1
 fi
 log "源码包就绪：$(du -sh "$tmp_dir/src.tar.gz" | cut -f1)"
+
+# 2) 交叉核对：源码包的提交时间 vs API 的提交时间
+#
+# codeload 生成的源码包里，每个条目的 mtime 就是**该提交的提交时间**
+# （实测：main 的包 mtime = 该提交的 committer date，06:30 UTC 对得上）。
+# 于是它是一个**与 API 独立**的新鲜度信号：API 说 10-08、源码包说 10-21，
+# 必有一方陈旧 —— 这种时候**不猜**，报错退出。
+#
+# 为什么必须放到下载之后：只有拿到包，才能知道包有多新。
+tarball_epoch=$(stat -c %Y "$src_dir" 2>/dev/null || echo 0)
+remote_epoch=$(date -d "${remote_date:-}" +%s 2>/dev/null || echo 0)
+[ "${tarball_epoch:-0}" -gt 0 ] 2>/dev/null || tarball_epoch=0
+[ "${remote_epoch:-0}" -gt 0 ] 2>/dev/null || remote_epoch=0
+if [ "$tarball_epoch" -gt 0 ] && [ "$remote_epoch" -gt 0 ]; then
+  drift=$(( tarball_epoch - remote_epoch ))
+  [ "$drift" -lt 0 ] && drift=$(( -drift ))
+  if [ "$drift" -gt 21600 ]; then
+    log "ERROR 源码包的提交时间与 API 的提交时间相差 ${drift}s（容差 6h）"
+    log "      源码包=$(date -u -d "@$tarball_epoch" '+%F %T') UTC  API=$(date -u -d "@$remote_epoch" '+%F %T') UTC"
+    log "      有一方是陈旧数据——本次跳过，不猜"
+    exit 1
+  fi
+  log "提交时间核对一致：源码包=$(date -u -d "@$tarball_epoch" '+%F %T') UTC  API=$(date -u -d "@$remote_epoch" '+%F %T') UTC"
+else
+  log "WARN 提交时间核对做不了（源码包或 API 的时间戳取不到），本次只按 SHA 判断"
+fi
+
+# 3) 重新判定「已是最新」——这次是**核对过**的（走快路径到这里说明状态文件太旧）
+if [ "$remote_sha" = "$current_sha" ] && [ "$FORCE" != "1" ]; then
+  log "已是最新（${remote_sha}，已用源码包的提交时间核对）"
+  exit 0
+fi
 
 # 2) 同步源码（--delete 让删除的文件也同步；服务器本地文件与运行期数据一律排除）
 #    排除项说明：
@@ -213,7 +298,7 @@ fi
 echo "$remote_sha" > "$STATE_FILE"
 [ -n "$prev_deployed" ] && echo "$prev_deployed" > "$PREV_FILE"
 cat > "${STATE_DIR}/last-deploy.json" <<EOF
-{"sha":"${remote_sha}","previous":"${prev_deployed}","at":"$(date -Is)","status":"ok","host":"$(hostname)"}
+{"sha":"${remote_sha}","previous":"${prev_deployed}","at":"$(date -Is)","status":"ok","host":"$(hostname)","src_date":"$(date -u -d "@${tarball_epoch:-0}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "")"}
 EOF
 log "部署完成：${remote_sha}（ready=${api_code} site=${site_code}）"
 exit 0

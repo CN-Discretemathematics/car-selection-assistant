@@ -2,7 +2,13 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { createAgentSession, resetAgentSession, sendAgentMessage, subscribeAgentStream } from "@/lib/agent";
+import {
+  createAgentSession,
+  ensureIdentityToken,
+  resetAgentSession,
+  sendAgentMessage,
+  subscribeAgentStream,
+} from "@/lib/agent";
 import {
   ENERGY_LABELS,
   formatPrice,
@@ -177,9 +183,15 @@ export default function AgentChat() {
     setInput("");
     setBusy(true);
     try {
-      const sid = sessionId ?? (await createAgentSession());
+      // 身份与建会话**并行**：两者互不依赖，串行会多等一个来回。
+      // 身份拿不到时 identityToken 为 null —— 后端对缺身份的请求不报错，
+      // 只是这一轮没有跨会话记忆（问车照常）。
+      const [sid, identityToken] = await Promise.all([
+        sessionId ?? createAgentSession(),
+        ensureIdentityToken(),
+      ]);
       setSessionId(sid);
-      const payload = await sendAgentMessage(sid, trimmed);
+      const payload = await sendAgentMessage(sid, trimmed, identityToken);
       const assistantIndex = messages.length + 1;
       setMessages((prev) => [
         ...prev,
