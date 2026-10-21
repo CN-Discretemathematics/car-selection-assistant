@@ -25,7 +25,15 @@ export default function PrivacyPage() {
                 只有在你主动使用「收藏」功能时，才需要登录；登录只收集<strong className="font-semibold text-ink">邮箱地址</strong>
                 （或未来接入的手机号），不收集姓名、性别、生日、地址等任何其他信息。
               </li>
-              <li>购车助手的对话内容仅保存在你的会话中（服务端短期缓存，过期自动清除），不与你个人身份关联，不用于其他用途。</li>
+              <li>购车助手的对话内容仅保存在你的会话中（服务端短期缓存，过期自动清除），不用于其他用途。</li>
+              <li>
+                使用购车助手时，我们会在你的浏览器里保存一个<strong className="font-semibold text-ink">匿名标识</strong>
+                （一串随机字符；我们只保存一段无法反推回原文的摘要），用来在你下次回来时沿用你说过的预算、用途与排除项。
+                <strong className="font-semibold text-ink">该功能目前处于观察阶段</strong>：我们只记录、不生效。
+                它不与你的邮箱等账号信息关联。
+                {/* ⚠️ 生产闸门切到「生效」档时，删掉上面「该功能目前处于观察阶段」那一句——
+                    文案过期就是骗人。闸门：DURABLE_PREFS_MODE（off / shadow / on 三档）。 */}
+              </li>
             </ul>
           </div>
         </Reveal>
@@ -48,6 +56,9 @@ export default function PrivacyPage() {
               <li>登录状态与会话数据设有过期时间，过期自动清除；</li>
               <li>
                 你可以随时取消收藏；登录状态下可在「我的收藏」页面底部注销账号（不可恢复），注销后账号不再可登录。
+              </li>
+              <li>
+                清除浏览器中本站的数据即可让那个匿名标识失效——此后我们不再能认出你，也不再沿用你的偏好。
               </li>
             </ul>
           </div>
