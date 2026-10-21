@@ -17,6 +17,29 @@ class VerifyIn(BaseModel):
     code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
 
 
+class MergeIdentityIn(BaseModel):
+    """把某个**匿名身份**的数据并进当前账户。
+
+    匿名 token 放**请求体**而不是请求头：请求头已经带着**账户令牌**了 ✓
+    （两个令牌不能共用一个 `Authorization` 头 ✓）。
+    """
+
+    anonymous_token: str = Field(min_length=8, max_length=200)
+
+
+class MergeIdentityOut(BaseModel):
+    """合并结果。
+
+    `token` 是**账户身份**的新令牌——**仅在新建时**有值（明文只给这一次 ✓，
+    与 `/agent/identity` 同一约定 ✓）。
+    """
+
+    identity_id: int
+    token: str | None = None
+    memories_moved: int = 0
+    feedbacks_moved: int = 0
+
+
 class UserOut(BaseModel):
     id: int
     email: str | None = None

@@ -76,6 +76,7 @@ from app.agent.answer_contract import (
     tool_result_universe,
     validate_tool_answer,
 )
+from app.agent.feedback import record_feedback
 from app.agent.history_budget import select_history, truncation_note
 from app.agent.llm_router import (
     ROUTER_MODEL_ENV,
@@ -1270,11 +1271,24 @@ class AgentEngine:
         # ——与仓库里「async 里不得直接碰同步 DB」的纪律一致
         # （守卫见 `tests/test_event_loop_blocking.py`，那条守卫是另一条分支的，
         # 本分支自己还没有 ⇒ 一直没被逮到；合流时被它揪了出来 ✓）。
+        before_rejected = set(profile.rejected_variant_ids)
         reject_note = await run_in_threadpool(
             _apply_rejection, profile, message, db=db, resolved=resolved
         )
         if reject_note:
             structured = True
+        # 拒绝**跨会话记住**（计划 Phase 2b「反馈表」）：本轮**新增**的排除项写进反馈表
+        # ⇒ 下次会话读回时并进 `profile.rejected_variant_ids`（排除逻辑与会话内完全同一套 ✓）。
+        # ⚠️ 差集（拒绝前 vs 拒绝后）——已排除过的款型不重复写 ✓。
+        new_rejected = [i for i in profile.rejected_variant_ids if i not in before_rejected]
+        if new_rejected:
+            await run_in_threadpool(
+                record_feedback,
+                db,
+                identity,
+                new_rejected,
+                reason=message[:200],
+            )
         # 唯一一次落盘：无条件，覆盖上面品牌合并 / 解锁 / 重新锁定三种变更。
         # 原来分散在 3 处条件写里，任何一条分支漏写都会丢画像——统一到末尾后，
         # 「本轮结束前画像一定已持久化」成为结构性保证而非人工纪律。
