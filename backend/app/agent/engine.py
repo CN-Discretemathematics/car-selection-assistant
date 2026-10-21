@@ -1266,10 +1266,10 @@ class AgentEngine:
         #    「这个名字是不是真车系」——「不要 SUV」里的 SUV 是车身类型（硬约束 ✗）。
         #
         # ⚠️ **走线程池**（2026-10-21）：`_apply_rejection` 内部要查库（点名式拒绝
-        # 要取该车系的在售款型 id ⇒ 一次同步 DB 查询）。
-        # 分支 12 的 AST 契约守卫（`tests/test_event_loop_blocking.py`：
-        # 「async 函数里不得直接碰同步 DB」）在合并态下把它揪了出来 ✓✓ ——
-        # 单看分支 17 时没有这条守卫，这条路径一直**裸调**着（事件循环被阻塞）。
+        # 要取该车系的在售款型 id ⇒ 一次同步 DB 查询）。裸调会**阻塞事件循环**
+        # ——与仓库里「async 里不得直接碰同步 DB」的纪律一致
+        # （守卫见 `tests/test_event_loop_blocking.py`，那条守卫是另一条分支的，
+        # 本分支自己还没有 ⇒ 一直没被逮到；合流时被它揪了出来 ✓）。
         reject_note = await run_in_threadpool(
             _apply_rejection, profile, message, db=db, resolved=resolved
         )
