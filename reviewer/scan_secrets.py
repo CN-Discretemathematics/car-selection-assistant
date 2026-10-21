@@ -137,6 +137,29 @@ RULES = [
         "带用户名:口令的数据库/消息队列 URL",
     ),
     (
+        # 2026-10-21 代码审查 Blocker：`tools/smoke_durable_memory.py` 曾把
+        # `DATABASE_URL` 原样 print 出去 ⇒ 生产口令明文进 CI 日志 / 终端历史。
+        #
+        # 为什么上面那条 `db-url-with-credentials` 抓不到它：那条扫的是**源码里的
+        # 凭据字面量**，而这里回显的是**运行期从环境变量取到的值**——源码里
+        # 根本没有那串凭据 ⇒ 字面量规则永远看不到它。
+        #
+        # 判据 = 同一行里同时出现
+        #   ①**输出口**（print / logger.info / logging.warning …）
+        #   ②**连接串来源**（DATABASE_URL 环境变量 或 `settings.database_url`）
+        # ⇒ 就是「把连接串直接打进输出」的那一行。
+        #
+        # 正确写法必须**先把连接串交给脱敏函数**（`describe_database_url()`），
+        # 且**分两行**写（先取值、再打印脱敏结果）——本规则只认「来源与输出口同行」。
+        "raw-db-url-echo",
+        "HIGH",
+        re.compile(
+            r"(?=[^\n]*\b(?:print|logger\.\w+|_logger\.\w+|logging\.\w+)\s*\()"
+            r"(?=[^\n]*(?:\bDATABASE_URL\b|\.database_url\b))[^\n]*"
+        ),
+        "疑似把数据库连接串（含口令）原样打进输出——先过脱敏函数 describe_database_url()",
+    ),
+    (
         "jwt-token",
         "MEDIUM",
         re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),

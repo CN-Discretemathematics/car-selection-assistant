@@ -404,6 +404,7 @@ def resolve_brand_mentions(
     *,
     series_names: list[str] | None = None,
     assume_constraint: bool = False,
+    exclude_context: bool = False,
 ) -> dict:
     """解析消息中的品牌 → {"brand_ids": [...], "brand_labels": [...], "brand_exclude_ids": [...]}。
 
@@ -416,6 +417,21 @@ def resolve_brand_mentions(
     3. **长名优先落实在 span 上**（2026-10-05 实测）：`零跑汽车` 消息会同时命中
        「零跑汽车」与「零跑」两个 brand_id——它们是同一个公司的两个品牌记录，
        约束落在两个 id 上会让后续过滤/画像多带一个无关 id。
+
+    ## `exclude_context`：把「排除语境」变成**显式参数**（2026-10-21 结构修复）
+
+    调用方**已经知道**语境是「排除」时（例如跨会话记忆里存的就是
+    「用户明说不要的品牌」），就**别再靠拼一句话把它暗示出去**。
+
+    此前 `agent/preferences.py::resolve_brand_names` 的做法是拼 `f"不要{name}"`
+    再调本函数 ⇒ 语境只存在于**否定前缀词表**与**前 4 字窗口**这两个隐式约定里。
+    那套约定一旦被改动（换词表、改窗口），记忆回填会**静默失效**——
+    无报错、无日志，只是「排除项又不见了」。
+    （2026-10-21 的「歧义品牌排除项静默失效」就是同一类问题的又一次现身。）
+
+    ⇒ 显式参数带来的改变：
+      - 歧义守卫（大众/理想/长安…）在**排除语境**下不适用——「不要大众」没有第二种解释；
+      - 且这条路径**不再依赖否定词表**——词表怎么改都不影响它。
     """
     normalized = normalize_name(message)
     if not normalized:
@@ -447,8 +463,11 @@ def resolve_brand_mentions(
         # 实测：本地快照库 92 个品牌里「大众」在否定语境下解析失败
         # （`resolve_brand_names(['大众'])` → `([], [])`，而「丰田」「比亚迪」正常），
         # 「排除项跨会话」评测里 3/23 条因此红。
+        #
+        # ⚠️ 2026-10-21（结构修复）：`exclude_context=True` 时**不看词表**——
+        # 语境由调用方显式声明 ⇒ 词表怎么改都不影响这条路径。
         prefix = normalized[max(0, start - 4): start]
-        negated = any(neg in prefix for neg in NEGATION_PREFIXES)
+        negated = exclude_context or any(neg in prefix for neg in NEGATION_PREFIXES)
         if (
             is_ambiguous_brand(name, rule="constraint")
             and not negated

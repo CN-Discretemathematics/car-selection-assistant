@@ -17,6 +17,7 @@ import {
   type RecommendedVariant,
 } from "@/lib/api";
 import { MISSING_VALUE_LABEL } from "@/lib/labels";
+import MemoryPanel from "./MemoryPanel";
 import { readCompareIds, writeCompareIds } from "./CompareBar";
 import { AGENT_ASK_EVENT } from "@/lib/agentTriggers";
 
@@ -61,6 +62,9 @@ export default function AgentChat() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nudge, setNudge] = useState(false);
+  // 面板里有两个视图：对话 / 「我记住的偏好」。记忆会改变下一次推荐的硬约束
+  // ⇒ 用户得能看见并撤回（见 MemoryPanel 的注释）。
+  const [view, setView] = useState<"chat" | "memory">("chat");
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const launcherRef = useRef<HTMLButtonElement>(null);
@@ -282,6 +286,10 @@ export default function AgentChat() {
               </div>
             </div>
 
+            {view === "memory" ? (
+              <MemoryPanel onBack={() => setView("chat")} />
+            ) : (
+              <>
             {/* 消息区：异步回复对读屏播报（aria-live） */}
             <div
               ref={listRef}
@@ -328,7 +336,23 @@ export default function AgentChat() {
               )}
             </div>
 
+                {/* 「我记住的偏好」入口：让用户看得见被记住的东西，并能逐条撤回。
+                    记忆会改变下一次推荐的硬约束 ⇒ 用户看不到就改不了。 */}
+                <div className="border-t border-black/[0.06] bg-white/40 px-3 pt-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setView("memory")}
+                    className="press flex w-full items-center justify-between rounded-full px-2 py-1.5 text-[11.5px] font-medium text-ash hover:bg-black/[0.04] hover:text-ink"
+                  >
+                    <span>我记住的偏好</span>
+                    <span aria-hidden>›</span>
+                  </button>
+                </div>
+              </>
+            )}
+
             {/* 输入区：iMessage 式圆形发送键 */}
+            {view === "chat" && (
             <div className="border-t border-black/[0.06] bg-white/60 p-3 backdrop-blur-xl">
               <div className="flex items-center gap-2">
                 <input
@@ -358,6 +382,7 @@ export default function AgentChat() {
                 </button>
               </div>
             </div>
+            )}
           </div>
         )}
 

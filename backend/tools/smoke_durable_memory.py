@@ -52,7 +52,7 @@ from sqlalchemy import delete, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from app.auth.security import get_token_store  # noqa: E402
-from app.common.database import get_session_factory  # noqa: E402
+from app.common.database import describe_database_url, get_session_factory  # noqa: E402
 from app.common.models import (  # noqa: E402
     AnonymousIdentity,
     PreferenceMemory,
@@ -324,7 +324,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed-car", action="store_true", help="库里没有在售车时造一台（CI 用）")
     parser.add_argument("--keep", action="store_true", help="不清理本次造出来的行")
     args = parser.parse_args(argv)
-    print(f"目标数据库：{os.environ.get('DATABASE_URL', '<未设，走默认>')}")
+    # ⚠️ 连接串**必须脱敏后**再打印（2026-10-21 代码审查 Blocker）：
+    # 生产连接串带「用户名:口令@主机」前缀，原样打印＝
+    # **口令明文进 CI 日志 / 终端历史**。
+    url = os.environ.get("DATABASE_URL", "")
+    print(f"目标数据库：{describe_database_url(url)}")
     return run(args.seed_car, args.keep)
 
 
