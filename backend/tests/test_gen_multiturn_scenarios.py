@@ -109,6 +109,39 @@ def test_rejected_car_is_the_sampled_series(db_session):
         ], scenario
 
 
+def test_rejection_remembered_scenario_shape(db_session):
+    """场景 4（拒绝跨会话记住）的形状 ✓。
+
+    三个要点：
+    - **两个会话**（`first` / `second`）——同一场里换会话才是「跨会话」✓；
+    - 第二轮是**拒绝**那一轮 ✓；
+    - 第三轮断言那台车**不再出现** ✓（且被拒的车必须是需求里那台 ⇒ 不恒真 ✓）。
+    """
+    _seed(db_session)
+    rng = random.Random(5)
+    requirements = gen.sample_requirements(db_session, rng, 2)
+    scenarios = gen.gen_rejection_remembered_scenarios(rng, requirements, enabled=True)
+    assert scenarios
+    for scenario, req in zip(scenarios, requirements, strict=True):
+        turns = scenario["turns"]
+        assert scenario["scenario"] == "rejection_remembered_across_sessions"
+        assert [t.get("session") for t in turns] == ["first", "first", "second"]
+        assert turns[1]["user"].startswith(req["series_name"]), scenario
+        assert turns[2]["assert"] == [
+            {"type": "not_recommended", "car": req["series_name"]}
+        ], scenario
+
+
+def test_rejection_remembered_scenario_is_disabled_by_default(db_session):
+    """默认关（依赖 Phase 2b）✓ —— 没合入时跑了必然红，不该混进分母。"""
+    _seed(db_session)
+    rng = random.Random(5)
+    requirements = gen.sample_requirements(db_session, rng, 1)
+    scenarios = gen.gen_rejection_remembered_scenarios(rng, requirements)
+    assert scenarios[0]["enabled"] is False
+    assert scenarios[0].get("reason_disabled")
+
+
 def test_memory_deleted_scenario_has_a_positive_control(db_session):
     """「删记忆」场景必须**先**在另一个会话验过「记忆还在」。
 
