@@ -1422,7 +1422,15 @@ class AgentEngine:
         #    推荐根本没重出。
         # 4) 必须在**车系解析之后**：点名式拒绝（「甲车系不要」）要靠解析结果判断
         #    「这个名字是不是真车系」——「不要 SUV」里的 SUV 是车身类型（硬约束 ✗）。
-        reject_note = _apply_rejection(profile, message, db=db, resolved=resolved)
+        #
+        # ⚠️ **走线程池**（2026-10-21）：`_apply_rejection` 内部要查库（点名式拒绝
+        # 要取该车系的在售款型 id ⇒ 一次同步 DB 查询）。裸调会**阻塞事件循环**
+        # ——与仓库里「async 里不得直接碰同步 DB」的纪律一致
+        # （守卫见 `tests/test_event_loop_blocking.py`，那条守卫是另一条分支的，
+        # 本分支自己还没有 ⇒ 一直没被逮到；合流时被它揪了出来 ✓）。
+        reject_note = await run_in_threadpool(
+            _apply_rejection, profile, message, db=db, resolved=resolved
+        )
         if reject_note:
             structured = True
 
