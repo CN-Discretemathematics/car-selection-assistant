@@ -52,6 +52,19 @@ _PASSENGERS_PEOPLE_RE = re.compile(
 _PASSENGERS_SEATS_RE = re.compile(
     r"([一二两三四五六七八九十\d]+)\s*座\s*(以上|开以上|或以上|以内|以下|之内|内)?"
 )
+#: 家庭人数的**另一种口语说法**（2026-10-22 生产实测补）。
+#:
+#: 人数正则要求带「人」字（「四口人」「4 人」✓），于是**不带「人」**的家庭说法
+#: 一律解析不出来：「一家四口」「四口之家」「一家五口」「我们一家 5 口」→ `None`
+#: ⇒ 用户明明说了家里几口，Agent 还会追问「几口人？」（生产实测：
+#: 「预算35万，一家四口，长途出行SUV」首轮落进追问分支，0 款推荐）。
+#:
+#: 只认**带家庭语境**的两种写法：`一家N口` 与 `N口之家`。
+#: 「N口」**不能裸匹配**——「三两口菜」「两口锅」会被读成 3 口 / 2 口；
+#: 当前实现对这两句返回 `None`，别把它改坏（见 tests 里的反例断言）。
+_HOUSEHOLD_SIZE_RE = re.compile(
+    r"一家([一二两三四五六七八九十\d]+)口|([一二两三四五六七八九十\d]+)口之家"
+)
 #: 人数侧出现这些后缀时按**开区间**读（「超过 N 人」），座位下限 +1。
 #: 必须覆盖正则里所有「以上」写法（审查 L1 实测：原先只有「以上」，
 #: 「5 人开以上」「5 人或以上」会漏掉 +1，同一语义三种写法两种结果）。
@@ -69,6 +82,20 @@ def parse_passengers(text: str) -> int | None:
 
     人数分支与座位分支同时命中时取**文本中靠前**的那个（沿用旧正则「谁先出现谁
     生效」的行为，不在这里悄悄改语义）。
+
+    ## 家庭人数兜底（2026-10-22）
+
+    「一家四口」「四口之家」这类**不带「人」字**的家庭说法，人数正则认不出来
+    ⇒ 返回 `None` ⇒ Agent 认为用户没说人数，转去追问「几口人？」。
+
+    兜底**只在人数与座位两个分支都没命中时**生效，理由三条：
+
+    1. **现有表达逐位不变**——「四口人」「5 人以上」「6 座」走的还是原分支，
+       开区间 +1 的口径（人数侧 +1、座位侧含端点）一个字都没动；
+    2. **明确的座位硬约束优先**——「一家四口，要6座的车」仍取 6 座（座位分支先命中），
+       不会被兜底抢成 4；
+    3. 兜底值是**确切人数**（「一家四口」= 4 口），**不套开区间 +1**
+       ——那是「超过 N 人」的产品口径（「5 人以上」= 6 座），与「一家四口」无关。
     """
     people = _PASSENGERS_PEOPLE_RE.search(text or "")
     seats = _PASSENGERS_SEATS_RE.search(text or "")
@@ -77,7 +104,10 @@ def parse_passengers(text: str) -> int | None:
     elif seats:
         token, suffix, is_people = seats.group(1), seats.group(2), False
     else:
-        return None
+        household = _HOUSEHOLD_SIZE_RE.search(text or "")
+        if household is None:
+            return None
+        token, suffix, is_people = household.group(1) or household.group(2), None, True
     n = _cn_int(token or "")
     if not n:
         return None
