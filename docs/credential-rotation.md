@@ -11,7 +11,7 @@
 | 管理后台 Bearer | `ADMIN_API_TOKEN` | ✅ 已轮换（32 字节 CSPRNG，服务器 `/root/carsel-admin-token.txt`，600） |
 | 部署 SSH 密钥对 | `.deploy/ecs_key` | ✅ 已重新生成并只在本地保留 |
 | GitHub 访问令牌 | —（未入库） | ✅ 已轮换 |
-| RDS 数据库口令 | `DATABASE_URL` | ✅ 已轮换并同步生产（2026-09-13，见 §5） |
+| RDS 数据库口令 | `DATABASE_URL` | ✅ 已轮换并同步生产（2026-09-13，见 §5）；**二次轮换 2026-10-22**（自助 `ALTER USER`，见 §5-2） |
 | DeepSeek API Key | `DEEPSEEK_API_KEY` | ✅ 已轮换并同步生产 |
 | 嵌入模型 Key | `EMBEDDING_API_KEY` | ✅ 已轮换并同步生产 |
 | 重排模型 Key | `RERANK_API_KEY` | ✅ 已轮换并同步生产（与嵌入同值） |
@@ -138,6 +138,58 @@ curl -s -X POST localhost:8000/api/v1/auth/email-code -H 'Content-Type: applicat
    （`ReadOnlyAccess` + 各服务 `*ReadOnlyAccess`），`CreateAccessKey` / `DeleteAccessKey` 都会
    `NoPermission`。这既是安全设计，也意味着「轮换 OSS AK」这一步无法自动化，必须在 RAM 控制台完成。
 
+## 5-2. 实战教训（2026-10-22 二次轮换：RDS 口令**可以自助轮换**）
+
+**背景**：生产 RDS 口令的明文此前散落在**服务器 9 个 `.env.bak-*`** + 本机 `.deploy/server.env`
+共 10 处；且 9 份备份的口令与现役 `.env` **完全相同**（是重复副本，不是历史版本）。
+用户此前的判断是「必须在阿里云 RDS 控制台改密码」——**实测这个前提不成立**。
+
+### 关键发现：应用账号可以改自己的口令
+
+`hpadmin` 不是超级用户（`rolsuper=False`），但 PostgreSQL 允许**任何角色改自己的口令**；
+阿里云 RDS 对普通账号的这项权限**未加限制**。实测（**空改**，用同一个口令做 `ALTER USER`，
+零风险探针）：
+
+```
+ALTER: OK
+NEW_PASSWORD_CONN OK
+OLD_PASSWORD_CONN FAIL  FATAL: password authentication failed for user "hpadmin"
+```
+
+⇒ **RDS 口令轮换可以完全自助，不需要进控制台**（控制台入口留给 AK/密钥托管那类无法自助的凭据）。
+
+⚠️ 两个实现细节（踩过的坑）：
+
+1. **`ALTER USER ... WITH PASSWORD` 不能用绑定参数**——`text("... WITH PASSWORD :pw")` 会报
+   `syntax error at or near "$1"`。口令必须是**字面量**：用户名先校验标识符
+   （`^[A-Za-z_][A-Za-z0-9_]*$`），口令做单引号加倍转义后再拼进 SQL。
+2. **口令不要经过对话记录**：容器内脚本把新口令写进 `/srv/carsel/backend/.tmp/`（宿主机 bind mount），
+   宿主脚本再从那里读出来改 `.env`——**全程不落终端、不落聊天记录**。
+
+### 本次执行顺序（可复用）
+
+1. 容器内：`ALTER USER` → **用新口令开一条全新连接验证** → **用旧口令开一条全新连接验证失败**
+   （这两条一起才算"轮换真的生效"）→ 新口令写入 `.tmp/`。
+   ⚠️ 保持**执行 ALTER 的那个会话活着**：新口令连不上时，用它把口令改回去即可回滚。
+2. 宿主：备份 `.env` 到 `/root/.env.pre-rotation`（600）→ 只替换 `DATABASE_URL` 里的口令部分
+   （host / 库名 / 参数保持服务器原值，见 §5 教训 5）。
+3. `docker compose up -d --force-recreate api`（**必须重建**：§5 教训 2——`/ready` 会说谎，
+   连接池里的既有连接在改口令后仍然可用）。
+4. 验证：容器 healthy + `/api/v1/ready` 200 + `/api/v1/home` 200 +
+   **跑一轮真实对话**（`/agent/sessions/{id}/messages`，看是否真的出了推荐）。
+5. 全部通过 ⇒ 删回滚副本 + 删 9 份 `.env.bak-*`；任一失败 ⇒ 恢复 `.env` + 把口令改回去 + 重建。
+
+### 收尾
+
+- 9 份 `.env.bak-*` 已删（其中 **2 份是 `.env.bak.2026…` 点号命名**，`rm .env.bak-*` 的
+  glob **匹配不到**，要同时清 `.env.bak.*`）；部署脚本只 `rsync --exclude` 这些文件、
+  **不会重建它们**，所以删掉是永久清理，不会反弹。
+- 本机 `.deploy/server.env` 已同步（`.deploy/` 已被 `.gitignore` 覆盖，不是仓库泄漏面）；
+  另外 3 个 `.deploy/*.sh` 只含**主机名**、不含口令，无需改。
+- ⚠️ 轮换后**容器日志清零**（重建容器所致）——那批影子日志行是同期采集的观察样本，
+  结论已记在「影子档 brand_exclude 观察缺口」的专项文档里（该文档随修复分支提交，
+  尚未并入 main），结论不受影响。
+
 ## 6. OSS AK 归属与最小权限（2026-09-13 收尾后现状）
 
 | RAM 用户 | 创建时间 | 权限 | 现状 |
@@ -156,7 +208,8 @@ curl -s -X POST localhost:8000/api/v1/auth/email-code -H 'Content-Type: applicat
 ## 7. 轮换周期与后续改进
 
 - **周期**：常规 90 天一轮；人员变动、疑似泄漏、凭据误提交时立即轮换。
-- **权限收敛（待办）**：`power-application-user` 降权或删除（见 §6）；RDS 拆「应用账号 / 运维账号」；
+- **权限收敛（待办）**：`power-application-user` 降权或删除（见 §6）；RDS 拆「应用账号 / 运维账号」
+  （2026-10-22 二次轮换后仍是 `hpadmin` 一个账号**既跑应用又做运维**，只是口令可自助改了）；
   `.env` 逐步迁移到 KMS / 密钥托管（当前决策为暂缓）。
 - **管理凭据与入口已加固（2026-09-14）**：
   * 凭据改为**多标签** `ADMIN_API_TOKENS="label:token,..."`——可单独吊销，审计里能区分
