@@ -43,6 +43,13 @@ import os
 import sys
 from typing import Any
 
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
+
+# Windows 控制台默认 GBK ⇒ 打印「⇒」这类字符会 UnicodeEncodeError，**本地跑必崩**
+# （CI/服务器是 UTF-8 不受影响，但本工具的文档用法就是「本地跑一遍」）⇒ 这里做兜底。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # ⚠️ 必须在 import app 之前设好：闸门决定「写不写库、回填不回填」。
 os.environ.setdefault("DURABLE_PREFS_MODE", "on")
 os.environ.setdefault("RETRIEVAL_BACKEND", "inmemory")
