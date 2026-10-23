@@ -32,6 +32,22 @@ DEPLOY_LOG="${CARSEL_DEPLOY_LOG:-/var/log/carsel-deploy.log}"
 HEALTH_URL="http://127.0.0.1:8000/api/v1/ready"
 SITE_URL="http://127.0.0.1/"
 
+# ── 预热（2026-10-23 新增）────────────────────────────────────────────────
+#
+# 容器重建后，**新进程**里的稀疏索引（BM25）是空的 ⇒ 由**第一个用户请求**
+# 同步重建它（实测 14032 chunk ≈ 5.4 秒）⇒ 那一笔请求的端到端从 ~4s 变成 ~10s。
+#
+# 这里在切流后主动打一次检索，把这笔钱花在部署窗口里，而不是用户的请求上。
+# 用 admin 的 RAG「试运行」端点：**只走检索链**（分词 → BM25 → 向量 → RRF → 重排），
+# 不调 LLM、不调 embedding ⇒ 预热成本 ≈ 5.4 秒 CPU，零外部调用费用。
+#
+# 为什么不用 Milvus 原生 hybrid（那样就不必重建）：那是架构级决策，
+# 代价是失去「按查询类型动态切权重」与「向量库挂了还有 BM25 兜底」，
+# 详见 docs/2026-10-23-rag-retrieval-architecture-decision.md。
+WARMUP_URL="http://127.0.0.1:8000/api/v1/admin/rag/query"
+WARMUP_QUERY="预算15万 家用SUV"   # 只为触发检索，不看内容
+WARMUP_TIMEOUT=90
+
 MODE="deploy"
 case "${1:-}" in
   --check) MODE="check" ;;
@@ -43,6 +59,40 @@ esac
 FORCE="${FORCE:-0}"
 
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
+
+# 预热稀疏索引：让**新进程**先建好 BM25，用户的第一笔请求不必付那 5.4 秒。
+# 返回 0 = 成功；1 = 失败（调用方据此回滚）。
+#
+# ⚠️ 必须打在**运行中的新进程**上：另起进程重建的索引会随那个进程退出而丢弃
+# （生产模式不会按数据量自动重建）——这正是部署脚本注释里记过的那条。
+warmup_retrieval() {
+  local f token raw code body hits
+  for f in /root/carsel-nightly-token.txt /root/carsel-admin-token.txt; do
+    if [ ! -r "$f" ]; then continue; fi
+    token="$(cat "$f")"
+    raw="$(curl -s -m "$WARMUP_TIMEOUT" -w '\n%{http_code}' -X POST \
+      -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
+      -d "{\"query\":\"${WARMUP_QUERY}\",\"top_k\":3}" "$WARMUP_URL" 2>/dev/null || true)"
+    code="$(printf '%s' "$raw" | tail -n 1 | tr -d '\r')"
+    body="$(printf '%s' "$raw" | sed '$d')"
+    # ⚠️ 401/403 = 这个 token 不可用（过期/无权限）；404 = 该镜像没有这个端点
+    # ⇒ 都**不是**检索链不通 ⇒ 换下一个 token 试；全都不可用才跳过预热。
+    # （否则 token 一过期，所有部署都会被卡死——一个可选优化不该有阻断力。）
+    case "$code" in
+      401|403|404) continue ;;
+    esac
+    # 每条命中都带 series_id ⇒ 数它即可，不必解析 JSON（避开格式差异）
+    hits="$(printf '%s' "$body" | grep -o '"series_id"' | wc -l | tr -d ' ')"
+    if [ "${hits:-0}" -ge 1 ]; then
+      log "预热完成：检索链可用，命中 ${hits} 条（稀疏索引已在新进程建好）"
+      return 0
+    fi
+    log "ERROR 预热失败：检索无命中或不可达（HTTP=${code:-无响应}，响应前 200 字：$(printf '%s' "$body" | head -c 200)）"
+    return 1
+  done
+  log "WARN 预热不可用（admin token 过期/无权限，或该镜像没有此端点）⇒ 跳过预热，不阻断部署"
+  return 0
+}
 
 # 日志自截断（保留最近 2000 行），避免长期运行撑爆磁盘
 if [ -f "$DEPLOY_LOG" ] && [ "$(wc -l < "$DEPLOY_LOG")" -gt 2500 ]; then
@@ -311,6 +361,19 @@ fi
 # ⇒ 部署后当场断言，失败即回滚（与健康检查同级）。
 if ! bash "$APP_DIR/deploy/tests/verify_non_root.sh" deploy-api-1 deploy-web-1; then
   log "ERROR 容器以 root 运行（见上），回滚到上一版镜像"
+  docker tag deploy-api:rollback deploy-api:latest 2>/dev/null
+  docker tag deploy-web:rollback deploy-web:latest 2>/dev/null
+  docker compose up -d
+  sleep 20
+  log "已回滚；当前 ready=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$HEALTH_URL" || echo 无响应)"
+  exit 1
+fi
+
+# 6.6) 预热稀疏索引（2026-10-23 新增）：容器重建后进程内的 BM25 是空的，
+#      由**第一个用户请求**同步重建（实测 5.4 秒）⇒ 那一笔请求从 ~4s 变 ~10s。
+#      这里主动打一次检索把这笔钱花在部署窗口里；失败即回滚（检索链不通的部署不算成功）。
+if ! warmup_retrieval; then
+  log "ERROR 预热失败，回滚到上一版镜像"
   docker tag deploy-api:rollback deploy-api:latest 2>/dev/null
   docker tag deploy-web:rollback deploy-web:latest 2>/dev/null
   docker compose up -d
