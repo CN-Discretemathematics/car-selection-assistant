@@ -83,6 +83,16 @@ def test_production_12_47_replay_usage_asked_at_most_once(
     | 4 | 「suv」 | ❗**第三次问用途** |
 
     ⇒ 缺陷 = **同一个问题连问三遍**。
+
+    ## 与姊妹文件的关系（2026-10-24 审计澄清）
+
+    `test_agent_vague_user_guidance.py::test_waived_usage_is_never_asked_twice`
+    跑**同一段 5 轮脚本**，判据「用途最多被问一次」——**本条更强**（`== 0`）。
+
+    两份并存的理由：vague 那条盯「每轮都在给车」（逐轮断言 `need_clarification is False`
+    + `recommended_variants` 非空），本条盯「**第 2/4 轮不许再问用途**」这一条缺陷本身。
+    ⚠️ 审计建议合并成一条，**不采纳**：合并后会让其中一份文件失去自己的判据维度。
+    但两边的**上界**必须一致 ⇒ vague 那条已同步收紧为「第 0 轮可问、第 1 轮起不许」。
     """
     _seed(db_session)
     session_id = _create_session(client)

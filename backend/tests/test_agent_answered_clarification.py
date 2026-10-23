@@ -1,34 +1,47 @@
 # -*- coding: utf-8 -*-
-"""用户**已经答了**被追问的那一项，引擎却还在问它（2026-10-23 14:50 生产实测）
+"""用户**回答了**正在被追问的那一项 ⇒ 下一轮必须**用上**它（2026-10-24 审计改写）
 
-## 来源：生产**真实用户会话**（不是构造的探针）
+## ⚠️ 本文件经过一次审计改写（初版是假绿）
 
-2026-10-23 14:50，生产上有一段 3 轮真实对话（`agent_turn_logs` 里 session
-`ad80af79…`）：
+初版把根因写成「追问卡在**画像推进之前**发出」——**那是错的**，已由生产实测纠正。
 
-| 轮 | 用户说 | 助手回答 | 问题 |
-| --- | --- | --- | --- |
-| 0 | 「预算12万油车有什么推荐」 | 追问卡（正文空） | 明确要推荐，却一款车都没拿到 |
-| 1 | 「上下班通勤」（**答用途**） | 追问卡（正文空） | ❗**用途已经答了，还在问人数**（可接受）——但正文空、用户看不到任何进展 |
-| 2 | 「1~2人」 | 给出了 5 款车 | 这轮正常 |
+**真实机制**（2026-10-23 生产实测）：
 
-第 1 轮是本文件的靶心：**用户明确回答了「主要用途」**（上一轮问的就是用途），
-引擎却发了追问卡。
+- 顺序是 **画像推进 → 追问**（`engine.py:1301` `advance_profile`
+  → `turn.py:443` `merge_profile` 把本轮线索并进画像 → `engine.py:1494`
+  `next_clarification(profile)`）；
+- 所以「用户答了用途 ⇒ 用途已进画像」是**成立**的
+  （实测 `next_clarification` 返回 `missing=['passengers']`）；
+- 真正的风险在**别处**：#93 之后「用户明确要清单」**不再发追问卡**
+  （改用 `followup` 尾巴问，`engine.py:1553`）⇒
+  「答了某项就不许再问它」这个判据**由 `followup` 承担**，不是由追问卡承担。
 
-## 根因
+### 初版为什么是假绿（审计实测复现）
 
-`engine.respond` 的追问卡在 **画像推进之前**发出：
-`next_clarification(profile)` 读到的 `profile` 里**还没有本轮解析出的用途**
-⇒ 用途仍算缺失 ⇒ 追问卡照发。
+初版判据是「用户答了用途 ⇒ 不许**再问**用途」。实测发现：把用途**整个解析不出来**
+（`USAGE_HINTS` 的「通勤」「上下班」两键都改掉 ⇒ `extract_hints('上下班通勤')` 返回 `{}`），
+**这 4 条用例照样全绿**。
 
-⇒ 用户明明答了，系统装作没听见 ⇒ 「说了等于没说」。
-（#93 修的是「用户放弃某一项」（「都可以」），**没有**修「用户回答了某一项」。）
+原因：用途没解析出来时，引擎**根本不会走到「问用途」那一步**
+（第 0 轮问的就是用途）⇒ 「不再问用途」在两种情况下都成立 ⇒ 判据**不区分**它们。
+
+⇒ 改用**能区分**的强判据：**用户答了用途 ⇒ 下一轮的追问文案必须回显「用途通勤」**
+（回执来自 `_priority_phrase`，读的是 `profile.usage`）。
+用途没进画像 ⇒ 回执里就没有「用途」⇒ 用例变红。
 
 ## 本文件的判据
 
-- 用户回答了正在被追问的那一项 ⇒ **不许再发那张追问卡**；
-- 即便仍要问别的（人数），也**不许装作用途没被回答**；
-- 不回归：用户**没有**回答时，追问卡照发。
+1. **回显**：用户答了用途 ⇒ 下一轮追问文案里必须出现「用途通勤」
+   （这一条才真的钉住「答了要算数」）；
+2. **不再问**：已答的用途不得**再被问**（两种机制——追问卡与 `followup`——都不许）；
+3. **无条件断言**：不用 `if clarification is not None:` 包着——
+   否则「追问机制整个坏掉、永远返回 None」也会让测试照绿（**空转**）；
+4. **不回归**：用户**没有**回答时，仍要问。
+
+## 与姊妹文件的关系
+
+`test_agent_production_replay_1247.py` 按**时间线**复刻 2026-10-23 的真人对话；
+本文件按**机制**盯「用户答了某一项」⇒ 两者互补，不重复。
 """
 from __future__ import annotations
 
@@ -88,27 +101,54 @@ def _asked_missing(payload: dict) -> list[str]:
     return []
 
 
-def test_answering_the_pending_question_is_not_asked_again(db_session: Session, client: TestClient):
-    """**核心判据**：用户答了正在被追问的那一项 ⇒ 不许再问它。
+def _question_of(payload: dict) -> str:
+    """这一轮的追问文案（前端渲染的就是它，见 AgentChat.tsx 的 ClarificationChips）。"""
+    if payload.get("clarification"):
+        return payload["clarification"].get("question") or ""
+    if payload.get("followup"):
+        return payload["followup"].get("question") or ""
+    return ""
 
-    复现 2026-10-23 14:50 的生产实测：第 0 轮问用途，第 1 轮用户答「上下班通勤」，
-    引擎却仍把用途当缺失（追问卡正文空，用户看不到任何进展）。
+
+def test_answered_usage_is_echoed_back(db_session: Session, client: TestClient):
+    """**核心判据**：用户答了用途 ⇒ 下一轮的追问文案**必须回显**它。
+
+    这是「答了要算数」的**可观测**形态：回执由 `_priority_phrase` 读
+    `profile.usage` 生成 ⇒ 用途没进画像 ⇒ 回执里就没有「用途」。
+
+    ⚠️ 判据**不能**写成「不许再问用途」——实测把用途整个解析不出来时，
+    引擎压根不会走到「问用途」那一步，「不许再问」照样成立 ⇒ 判据不区分 ⇒ 假绿。
     """
     _seed(db_session)
     session_id = _create_session(client)
 
-    # 第 0 轮：给预算，要推荐 ⇒ 引擎问的是「用途」
-    first = _send(client, session_id, "预算12万油车有什么推荐")
-    assert "usage" in _asked_missing(first), f"第 0 轮应问用途：{first}"
+    # 第 0 轮：只给预算（**不**说「有什么能选」）⇒ 引擎发**追问卡**问用途
+    first = _send(client, session_id, "预算12万油车")
+    assert first.get("need_clarification"), f"第 0 轮应发追问卡：{first}"
+    assert first["clarification"].get("missing") == ["usage"], first
 
     # 第 1 轮：用户**明确回答用途**
     second = _send(client, session_id, "上下班通勤")
 
-    # ❗ 用途已被回答 ⇒ 绝不能**再问用途**
+    # ✅ 用途必须被回显（这才证明「答了要算数」）
+    question = _question_of(second)
+    assert "通勤" in question, f"用户答了用途，追问文案却没回显：{question!r} / {second}"
+
+
+def test_answered_usage_is_not_asked_again(db_session: Session, client: TestClient):
+    """已答的用途**不得再被问**（追问卡与 `followup` 两种机制都不许）。"""
+    _seed(db_session)
+    session_id = _create_session(client)
+
+    _send(client, session_id, "预算12万油车")
+    second = _send(client, session_id, "上下班通勤")
+
     assert "usage" not in _asked_missing(second), f"用户已答用途，却又被问用途：{second}"
 
 
-def test_answering_pending_question_still_allows_asking_others(db_session: Session, client: TestClient):
+def test_answering_pending_question_still_allows_asking_others(
+    db_session: Session, client: TestClient
+):
     """答了用途后**仍可问人数**——但不能因此「装作用途没被回答」。
 
     真人销售会问细节，但不会假装没听见上一句。
@@ -116,20 +156,14 @@ def test_answering_pending_question_still_allows_asking_others(db_session: Sessi
     _seed(db_session)
     session_id = _create_session(client)
 
-    _send(client, session_id, "预算12万油车有什么推荐")
+    _send(client, session_id, "预算12万油车")
     second = _send(client, session_id, "上下班通勤")
 
     missing = _asked_missing(second)
     assert missing != ["usage"], f"不该再问用途：{second}"
     if missing:
         # 若还在追问，**追问文案本身**必须体现已收到的用途
-        # （前端渲染的是 clarification.question / followup.question，见 AgentChat.tsx
-        #   的 ClarificationChips ⇒ 正文在这两个字段里，不在 explanation）
-        question = ""
-        if second.get("clarification"):
-            question = second["clarification"].get("question") or ""
-        elif second.get("followup"):
-            question = second["followup"].get("question") or ""
+        question = _question_of(second)
         assert question.strip(), f"追问文案不能为空：{second}"
         assert "通勤" in question, f"追问文案应体现已收到的用途（已记住…通勤）：{second}"
 
@@ -139,27 +173,18 @@ def test_unanswered_question_still_asks(db_session: Session, client: TestClient)
     _seed(db_session)
     session_id = _create_session(client)
 
-    first = _send(client, session_id, "预算12万油车有什么推荐")
+    first = _send(client, session_id, "预算12万油车")
     assert "usage" in _asked_missing(first), f"没回答时应问用途：{first}"
-
-
-def test_answered_usage_is_kept_in_profile(db_session: Session, client: TestClient):
-    """画像层：用户答的用途**要真的落进画像**（否则下一轮又当没答过）。"""
-    _seed(db_session)
-    session_id = _create_session(client)
-
-    _send(client, session_id, "预算12万油车有什么推荐")
-    second = _send(client, session_id, "上下班通勤")
-
-    # 本轮返回的 filters 里应已带上用途对应的过滤（能源=ICE 来自第 0 轮，
-    # 用途不在 filters 里 ⇒ 改查「不再问用途」这个可观测后果）
-    assert "usage" not in _asked_missing(second), second
 
 
 def test_next_clarification_respects_answered_usage():
     """单元层：`next_clarification` 在画像**已含**用途时不得再问用途。
 
     这是上面端到端用例的判据内核——若这一层问用途，端到端必然问。
+
+    ⚠️ 断言写成**无条件**：初版用 `if clarification is not None:` 包着，
+    于是「追问机制整个坏掉、永远返回 None」也会让测试照绿（**空转**）。
+    改成无条件后：既要「不再问用途」，也要「确实还在追问（问人数）」。
     """
     profile = UserProfile()
     profile.budget = Budget(max=120000.0, currency="CNY", type="official_msrp")
@@ -167,5 +192,5 @@ def test_next_clarification_respects_answered_usage():
     from app.agent.engine import next_clarification
 
     clarification = next_clarification(profile)
-    if clarification is not None:
-        assert "usage" not in clarification.missing, clarification
+    assert clarification is not None, "用途已答、人数未答 ⇒ 应当继续追问人数"
+    assert clarification.missing == ["passengers"], clarification
