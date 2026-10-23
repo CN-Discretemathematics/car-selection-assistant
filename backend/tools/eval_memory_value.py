@@ -47,6 +47,8 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from _bootstrap import ensure_backend_on_path  # noqa: F401  (import-time side effect: puts backend/ on sys.path; being an import, it also stops E402 on the app.* imports below)
+
 from app.agent.preferences import MODE_ENV
 from app.common.database import get_session_factory
 from tools.eval_multiturn import load_scenarios, run_scenario
