@@ -107,6 +107,53 @@ def asks_more_cars(message: str) -> bool:
     return bool(_REASK_RE.match(message.strip()))
 
 
+#: 用户表示「这一项你随便定」的口语（2026-10-23 从 engine.py 下沉到这里）。
+#:
+#: 为什么下沉：这类话**必须结合会话上下文**才能判——它是**对追问的回答**，
+#: 不是独立话题。判据要放进路由层（`decide_route` 拿得到 `profile`），
+#: 否则会重演「engine 知道、routing 不知道」的两套口径。
+#:
+#: 生产真实用户会话实测（2026-10-23）：「都可以」被路由成 `chitchat` ⇒
+#: ① 绕开推荐链（用户一款车都没拿到）；② LLM 在回答里说「用途不限」但
+#: **不回写画像** ⇒ 下一轮确定性追问又把用途当缺失 ⇒ **同一个问题连问三遍**。
+_GIVE_UP_RE = re.compile(
+    r"(随便|无所谓|都可以|都行|你看着办|你推荐|听你的|你来定|相信你|先看推荐|直接推荐|先推荐)"
+)
+
+
+def gives_up_on_profile(message: str) -> bool:
+    """用户是否表示「这一项你随便定」（「都可以」「随便」「你看着办」…）。
+
+    ⚠️ 这只说明**用户放弃了指定**，**不等于**他放弃的是哪一项——
+    哪一项由调用方结合「当前正在追问什么」判定（见 `engine.respond` 的追问分支）。
+    """
+    return bool(_GIVE_UP_RE.search(message or ""))
+
+
+#: 用户**明确要一份候选清单**的问法（2026-10-23 生产真实用户会话实测）。
+#:
+#: 「15万预算有什么能选的」此前被当成普通推荐问句 ⇒ 引擎进入「最小化追问」
+#: ⇒ 用户拿到一张追问卡、**一款车都没有**。他明确在要清单，引擎却先反问：
+#: 这是**答非所问**，不是风格问题（真人销售的做法是**先给人看，再问细节**）。
+#:
+#: 只收「要清单」的问法，**不**收「还有别的吗」这类**上下文追问**（那是 `_REASK_RE`）。
+_LIST_REQUEST_RE = re.compile(
+    r"(有什么能选|有什么(?:车|车型|款型)?(?:可选|能选|推荐|选择)|"
+    r"有哪(?:些|什么)(?:车|车型|款型)?(?:能选|可选|推荐|选择)|"
+    r"能选什么|选哪些(?:车|车型)?|帮我选|给我选|推荐几款|推几款|来几款|"
+    r"看看有什么(?:车|车型)|什么样的车|哪些车(?:比较)?(?:好|合适))"
+)
+
+
+def asks_for_candidates(message: str) -> bool:
+    """用户是否在要一份**候选清单**（「有什么能选的」「帮我选几款」…）。
+
+    与 `asks_more_cars`（再给一批）是**两件事**：那个是**上一轮已经推过**，
+    这个是**第一轮就在要清单**。两者都指向 recommendation 链，守卫不同。
+    """
+    return bool(_LIST_REQUEST_RE.search(message or ""))
+
+
 def _ranking_intent_skips_consultation(
     hints: dict, resolved: list, profile: UserProfile
 ) -> bool:
@@ -749,6 +796,28 @@ def decide_route(
                     "structured": False,
                     "reask": True,
                     "car_context": car_context,
+                },
+            )
+        # 1b) **对追问的回答**（「都可以」「随便」「你看着办」）——
+        #     本句没有购车关键词、也没有可解析线索，但它**回答的正是上一轮的追问**：
+        #     `profile.unknowns` 非空 = 会话里正有维度在追问中。
+        #
+        #     2026-10-23 生产真实用户会话实测：这句话此前被判成 `chitchat` ⇒
+        #       ① 绕开推荐链 → 用户问「有什么能选的」，却一款车都没拿到；
+        #       ② LLM 在回答里说「用途不限」，但**不回写画像** → 下一轮
+        #          确定性追问又把用途当缺失 → **同一个问题连问三遍**
+        #          （实测第 2 轮与第 4 轮都在问「主要用途是什么？」）。
+        #
+        #     ⇒ 走推荐链（engine 会把被放弃的那一维记成「不限」，不再问它）。
+        if gives_up_on_profile(message) and profile.unknowns:
+            return RouteDecision(
+                intent="recommendation",
+                matched_rule="1b:give_up_answers_pending_clarification",
+                signals={
+                    "has_car_intent": False,
+                    "structured": False,
+                    "car_context": car_context,
+                    "give_up": True,
                 },
             )
         return RouteDecision(

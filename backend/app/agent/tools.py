@@ -239,6 +239,53 @@ def retrieval_search(
     ]
 
 
+def _profile_has_no_soft_info(profile: UserProfile) -> bool:
+    """用户**说不清需求**吗（用途/人数/车身/能源一个都没说）。
+
+    2026-10-23（生产真实用户会话实测）：用户问「15万预算有什么能选的」，
+    画像里**只有预算** ⇒ 软评分的 8 个维度几乎全是中性分（0.5）
+    ⇒ 排序实际由「车长/功率」这类客观参数决定 ⇒ 给用户的不是「热销的」，
+    而是「参数最唬人的」——对「不知道要什么」的用户**毫无参考价值**。
+
+    ⇒ 这时**按销量排**（用户建议：推荐销量高的车型）。
+    候选**集合不变**（硬约束照旧过滤），只改顺序 ⇒ 风险极低。
+    """
+    return not (
+        profile.usage
+        or profile.passengers is not None
+        or profile.body_type
+        or profile.energy_preference
+    )
+
+
+def _latest_sales_by_series(db: Session, series_ids: set[int]) -> tuple[str, dict[int, int]]:
+    """车系 → 最新月的销量（口径与 `sales_search` 一致：**零售优先、门户回退**）。
+
+    返回 `(月份, {车系 id: 销量})`；没有销量数据时返回 `(月份, {})`。
+    """
+    if not series_ids:
+        return "", {}
+    month = catalog.latest_sales_month(db)
+    if not month:
+        return "", {}
+    rows = db.execute(
+        select(MonthlySales.series_id, MonthlySales.sales_type, MonthlySales.sales_count)
+        .where(
+            MonthlySales.month == month,
+            MonthlySales.series_id.in_(series_ids),
+            MonthlySales.sales_type.in_(("retail", "portal")),
+        )
+        .order_by(MonthlySales.sales_count.desc())
+    ).all()
+    out: dict[int, int] = {}
+    for sid, stype, count in rows:
+        # 与 `sales_search` 同一口径：零售优先（后到的 retail 覆盖 portal），
+        # 但**后到的 portal 不覆盖 retail**。
+        if sid not in out or stype == "retail":
+            out[int(sid)] = int(count or 0)
+    return month, out
+
+
 # ── 工具 6：recommendation_tool（硬约束 + 软评分）────────────────────────────
 def _parse_number(value: str | None) -> float | None:
     if not value:
@@ -717,7 +764,27 @@ def recommendation_tool(
             )
         )
 
-    scored.sort(key=lambda item: item[0], reverse=True)
+    # 排序口径（2026-10-23）：用户**说不清需求**时按**销量**排。
+    #
+    # 候选**集合不变**（硬约束照旧过滤），只改顺序 ⇒ 画像里有任何软线索时，
+    # 走的还是原来的软评分排序 ⇒ 对既有推荐结果零影响。
+    sales_by_series: dict[int, int] = {}
+    if scored and _profile_has_no_soft_info(profile):
+        _month, sales_by_series = _latest_sales_by_series(
+            db, {int(item[1]["series_id"]) for item in scored}
+        )
+        for _score, item in scored:
+            count = sales_by_series.get(int(item["series_id"]))
+            if count is not None:
+                # 带上销量数字：解释模块可以据此说「上个月卖了多少」，
+                # 且这个数字**可溯源**（候选数据里的真实字段，不是模型编的）。
+                item["sales_count"] = count
+    if sales_by_series:
+        scored.sort(
+            key=lambda item: (int(item[1].get("sales_count") or 0), item[0]), reverse=True
+        )
+    else:
+        scored.sort(key=lambda item: item[0], reverse=True)
 
     # ── 取舍叙事（2026-10-02 修活 L3，纯计算）────────────────────────────────
     # 「好处」是 matched（这台自身达标项），「代价」必须**相对同批候选**才有意义：

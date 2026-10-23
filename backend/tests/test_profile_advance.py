@@ -77,6 +77,11 @@ def test_engine_no_longer_assigns_profile_fields():
         # 不由本轮线索驱动 ⇒ 不属于「画像推进」，留在 engine 是对的。
         "rejected_variant_ids",
         "shown_series_ids",
+        # 事件型字段（2026-10-23）：用户本轮**放弃**了某一项（「都可以」「不限预算」）
+        # ⇒ 该项不再被追问。同样是**事件**驱动（不是线索推导出的画像），
+        # 且**只有 engine 知道放弃的是哪一项**——那一项正是它此刻在追问的；
+        # 提前在 turn.py 记下会让 next_clarification 换一题、判定随之偏。
+        "waived_dims",
     }
     fields = {attr for _ln, attr in _assigned_profile_fields(ENGINE_PY)}
     assert fields <= allowed, (

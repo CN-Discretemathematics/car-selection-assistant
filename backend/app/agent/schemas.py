@@ -61,6 +61,18 @@ class UserProfile(BaseModel):
     # 存的是**维度键**而不是文案：文案会改，键不会。
     probed_dims: list[str] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
+    # 用户**明确表示「不限」的维度**（2026-10-23 生产真实用户会话实测）。
+    #
+    # 场景：助手问「主要用来跑什么？」→ 用户回「都可以」→ 那是**这一项不限**的回答，
+    # 不是「没听见」。此前系统只把这句话交给 LLM 自由发挥，**不回写画像** ⇒
+    # 下一轮确定性追问仍把用途当缺失 ⇒ **同一个问题连问三遍**
+    # （实测第 2 轮与第 4 轮都在问「主要用途是什么？」）。
+    #
+    # 与 `probed_dims` 同构（都是「别再问」），但**含义不同**：
+    # - `probed_dims` = 「问过了」（软偏好维度 space/energy/power…）；
+    # - `waived_dims` = 「用户说不限」（硬约束维度 budget/usage/passengers/body_type）。
+    # 存维度键而不是文案：文案会改，键不会。
+    waived_dims: list[str] = Field(default_factory=list)
     # 用户已点名的车系（会话记忆）：开始就确定车型时，推荐只关注这些车系，
     # 直到用户明确表示「看看其他车」才解锁（评审：指定车型优先）
     locked_series_ids: list[int] = Field(default_factory=list)
