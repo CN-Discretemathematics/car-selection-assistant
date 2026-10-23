@@ -258,7 +258,11 @@ def resolve_batch(args: list[str]) -> list[str]:
         capture_output=True, encoding="utf-8", errors="replace",
     )
     if upstream.returncode == 0 and upstream.stdout.strip():
-        shas = run_git("rev-list", "--reverse", f"{upstream.stdout.strip()}..HEAD").split()
+        # `--not origin/main` 与 hook 路径保持一致：只核对本次推送真正新增的提交
+        # （详见 _shas_from_push_lines 的 docstring：force-push 时该范围会含 main 历史）
+        shas = run_git(
+            "rev-list", "--reverse", f"{upstream.stdout.strip()}..HEAD", "--not", "origin/main"
+        ).split()
     else:  # 无 upstream 的本地分支：退而核对相对 origin/main 的新增提交
         shas = run_git("rev-list", "--reverse", "origin/main..HEAD").split()
     return shas
@@ -284,6 +288,20 @@ def _shas_from_push_lines(lines: list[str]) -> list[str] | None:
     行格式：`<local-ref> SP <local-object-name> SP <remote-ref> SP <remote-object-name>`。
     ref 删除行（local-ref = "(delete)"，对象名为全零）不产生待推提交。
     返回 None 表示没有可用的行（回退默认模式）。
+
+    ## 为什么 force-push 要排除 origin/main 上的提交
+
+    force-push 时 `remote_sha..local_sha` 这个范围**含 main 的新提交**：
+    分支 rebase 过 ⇒ 远端旧基线到本地新基线之间，main 上所有新提交都被算进来。
+    于是门禁会去核对**别人已经合并、已经评审过**的提交。
+
+    2026-10-23 实测的误报：force-push 一个 rebase 过的分支时，
+    main 上同时存在两笔同标题的等价提交（`e4daecd` 与 `7a5c1f7`，
+    同一改动在 rebase 前后各留了一份），R4「标题完全相同」把它们判成串台，
+    **把一个完全正常的 force-push 拦死**。
+
+    ⇒ 核对范围只取「**这次推送真正新增**的提交」：在 origin/main 上的提交一律排除。
+    这也让 R4 回到它本来的意思：*同一批新增提交*之间标题重复才是串台。
     """
     shas: list[str] = []
     for line in lines:
@@ -296,7 +314,10 @@ def _shas_from_push_lines(lines: list[str]) -> list[str] | None:
         if set(remote_sha) == {"0"}:  # 新分支：所有不在远端的提交
             shas += run_git("rev-list", "--reverse", local_sha, "--not", "--remotes=origin").split()
         else:
-            shas += run_git("rev-list", "--reverse", f"{remote_sha}..{local_sha}").split()
+            # `--not origin/main` 排除 main 上已有的提交（见上方 docstring）
+            shas += run_git(
+                "rev-list", "--reverse", f"{remote_sha}..{local_sha}", "--not", "origin/main"
+            ).split()
     return shas if shas else None
 
 
