@@ -51,8 +51,15 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ⚠️ 必须在 import app 之前设好：闸门决定「写不写库、回填不回填」。
-os.environ.setdefault("DURABLE_PREFS_MODE", "on")
-os.environ.setdefault("RETRIEVAL_BACKEND", "inmemory")
+#
+# 这里用**强制赋值**而不是 `setdefault`（2026-10-23 修）：
+# `setdefault` 会**沿用环境里已有的值** ⇒ 在生产容器里（`DURABLE_PREFS_MODE=shadow`）
+# 跑这个脚本，闸门仍是 shadow ⇒ 记忆**不写库** ⇒ 报出
+# 「记忆真的写进库 —— 写了 0 行」「记忆搬进了账户 —— memories_moved=0」
+# 等一堆**误导性失败**：看起来像「记忆功能坏了」，实际只是「闸门没开」。
+# 本脚本的语义就是「校验跨会话记忆功能」⇒ 闸门**必须**是 on。
+os.environ["DURABLE_PREFS_MODE"] = "on"
+os.environ["RETRIEVAL_BACKEND"] = "inmemory"
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import delete, select  # noqa: E402

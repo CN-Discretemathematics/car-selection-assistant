@@ -221,7 +221,6 @@ python tools/import_data.py payload.json --dry-run
 ```powershell
 cd backend
 python -m pytest -q                   # 1660 用例（随迭代增长，以实际输出为准）
->>>>>>> 02f93fd (fix(vehicles+test): 「一家四口」也算人数——家庭规模的口语说法没被解析)
 cd ..\web
 npx tsc --noEmit                      # 前端类型检查
 ```
@@ -328,7 +327,9 @@ nginx -t && systemctl reload nginx
 - 数据库访问全部参数化（无字符串拼接 SQL）；图片代理为域名白名单（拒绝内网/元数据地址）
 - 会话 ID 为 122 位随机值；CORS 非通配
 
-> 已知待办：容器非 root 运行、RAG 数据面的并发与优雅降级加固。
+> 已知待办：RAG 数据面的并发与优雅降级加固。
+> 容器已改为**非 root 运行**（2026-10-22，部署后有运行时断言，见
+> [deployment.md §10](docs/deployment.md)）。
 > HTTPS 已上线（ACME 证书，HTTP 301 → HTTPS），HSTS 头可后续开启。
 
 ## 设计原则

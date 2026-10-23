@@ -32,6 +32,16 @@ COPY --from=build /srv/carsel/web/.next ./.next
 COPY --from=build /srv/carsel/web/node_modules ./node_modules
 COPY --from=build /srv/carsel/web/package.json ./package.json
 COPY --from=build /srv/carsel/web/public ./public
+
+# ── 非 root 运行（同 backend.Dockerfile 的理由，2026-10-22 落地）────────────
+#
+# Next.js 生产模式会往 `.next/cache` 写图片优化缓存 ⇒ 目录要归运行用户所有
+# （chown 放在 COPY 之后，只改元数据、不复制数据）。
+# 监听 3000（>1024）不需要特权。
+RUN useradd --create-home --uid 10002 --shell /usr/sbin/nologin carsel \
+ && chown -R carsel:carsel /srv/carsel/web
+USER carsel
+
 EXPOSE 3000
 # 运行时直接调用镜像内的 next 二进制（node_modules 已随镜像带入）：
 # 不用 corepack/pnpm——它们会在容器启动时联网下载 pnpm 本体，大陆节点不可达时
