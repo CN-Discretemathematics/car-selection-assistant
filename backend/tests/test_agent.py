@@ -188,6 +188,44 @@ def test_agent_clarify_twice_then_guides_gently(client: TestClient, db_session: 
     assert out["recommended_variants"], "画像齐全 + 授权宽松后应正常推荐"
 
 
+def test_agent_give_up_on_a_pending_dimension_stops_asking_it(
+    client: TestClient, db_session: Session
+):
+    """「随便」= **放弃当前正在被追问的那一项** ⇒ 该项不再问（2026-10-24 审计补）。
+
+    ## 为什么上面那条 `test_agent_clarify_twice_then_guides_gently` 不够
+
+    它第 3 轮说「随便推荐吧」时，`unknowns` 里只有 `budget`——
+    **用途还没进 unknowns** ⇒ 引擎走的是「继续问下一项」那条路
+    （2026-09 拍板：「随便」= 跳过当前这题、继续问下一项），
+    **并没有**走到 #93 新增的「放弃正在被追问的那一项 ⇒ 不再问它」那条分支。
+
+    ⇒ 「随便」的**两种含义**当时只钉住了一种：
+    - 该维度**还没被追问过** → 继续问（既有测试钉着 ✓）
+    - 该维度**正在被追问** → 放弃它、不再问、直接给车（**此前无人钉住** ✗）
+
+    本条补上第二种。
+    """
+    _seed_agent_data(db_session)
+    session_id = _create_session(client)
+
+    # 第 0 轮：给预算但**不说**要清单 ⇒ 引擎发**追问卡**问用途（正在追问态）
+    first = _send(client, session_id, "预算15万")
+    assert first["need_clarification"] is True
+    assert first["clarification"]["missing"] == ["usage"], first
+
+    # 第 1 轮：用户说「随便」= 放弃**正在被追问的用途**
+    second = _send(client, session_id, "随便")
+
+    # 用途被放弃 ⇒ 下一轮**不许**再问用途
+    asked = []
+    if second.get("clarification"):
+        asked = list(second["clarification"].get("missing") or [])
+    if second.get("followup"):
+        asked = list(second["followup"].get("missing") or [])
+    assert "usage" not in asked, f"用户已放弃用途，却又问用途：{second}"
+
+
 def test_agent_give_up_requires_core_profile(client: TestClient, db_session: Session):
     """仅能源偏好不足以授权宽松推荐（评审 S1）：无预算/用途/人数时给引导而非硬推。"""
     _seed_agent_data(db_session)

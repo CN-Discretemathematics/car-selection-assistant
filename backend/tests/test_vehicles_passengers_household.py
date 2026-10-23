@@ -68,7 +68,20 @@ def test_household_phrase_equals_people_phrase():
 
 
 def test_people_branch_unchanged():
-    """人数分支：开区间 +1、含端点不加——产品拍板的口径一个字都不动。"""
+    """人数分支：开区间 +1、含端点不加——产品拍板的口径一个字都不动。
+
+    ⚠️ 这 5 条与 `test_seat_disclosure.py::test_all_yishang_spellings_get_the_same_open_bound`
+    **逐字重复**——**有意保留**，不是漏清理：
+
+    - `test_seat_disclosure.py` 是**更早**的文件（47ef36f，2026-09），它记着
+      「审查 L1：原先后缀集只有『以上』」的缺陷来源；
+    - 本文件是 2026-10-22 的家庭场景补充（#90），判据 3「现有表达逐位不变」
+      指的是**这次改动不能误伤旧口径** ⇒ 它必须**自带**一份旧口径的基线，
+      否则「改家庭解析时顺手改坏了开区间 +1」这条回归就没人拦了。
+
+    ⇒ 两个文件各自独立守护同一口径，是**刻意的冗余**（防的正是「改 A 改坏了 B」）。
+    审计建议删其一，**不采纳**：删掉任一份，那份文件自己的「不回归」证据就没了。
+    """
     assert parse_passengers("5人以上") == 6
     assert parse_passengers("5人开以上") == 6
     assert parse_passengers("5人或以上") == 6

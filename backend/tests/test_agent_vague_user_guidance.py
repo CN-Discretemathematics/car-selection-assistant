@@ -180,7 +180,15 @@ def test_give_up_turn_still_recommends(client: TestClient, db_session: Session):
 
 
 def test_waived_usage_is_never_asked_twice(client: TestClient, db_session: Session):
-    """5 轮真实对话复刻：**用途最多被问一次**，其余各轮都在给车。"""
+    """5 轮真实对话复刻：**用途最多被问一次**，其余各轮都在给车。
+
+    ⚠️ 判据**收紧**（2026-10-24 审计）：初版写 `asked_usage <= 1`，
+    而第 0 轮本来就用 `followup` 尾巴问一次用途（#93 之后「要清单」不阻塞，
+    缺口改用尾巴问）⇒ `<= 1` 允许「第 2 轮**又问**用途」通过 ⇒ 判据比看起来弱。
+
+    ⇒ 改成：**第 0 轮**（用户还没放弃用途）问一次可以；
+    **第 1 轮起**（用户已说「都可以」= 放弃用途）一次都不许再问。
+    """
     _seed_agent_data(db_session)
     sid = _create_session(client)
 
@@ -198,6 +206,10 @@ def test_waived_usage_is_never_asked_twice(client: TestClient, db_session: Sessi
         assert payload["recommended_variants"], (i, msg, payload)
         if "usage" in _asked_missing(payload):
             asked_usage += 1
+            # 第 0 轮问一次用途是正常的（用户还没放弃）；第 1 轮起**不许**再问
+            assert i == 0, (
+                f"第 {i} 轮（用户已放弃用途）又问了一次用途：{msg!r} / {payload}"
+            )
 
     assert asked_usage <= 1, f"用途被问了 {asked_usage} 次（生产实测里是 3 次）"
 
