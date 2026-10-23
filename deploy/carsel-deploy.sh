@@ -268,14 +268,34 @@ log "镜像构建完成（commit=${remote_sha}）"
 
 # 5) 切流
 #
-# 非 root 运行的前置（2026-10-22）：宿主侧 `backend/.tmp` 要归 api 容器的运行用户所有。
-# compose 把该目录 bind-mount 进容器，而管理审计日志（admin-audit.log）、
-# dense 水位标记、销量导入 flag 都落在这个目录 ⇒ 容器内 uid 10001 必须能写。
-# 本脚本以 root 运行 ⇒ 这里 chown 是安全的；目录本身不会被 rsync 覆盖
-# （RSYNC_ARGS 已排除 `backend/.tmp/`），但每次部署都重新授权一次，
-# 防止有人手工改过属主后被静默带进生产。
+# ── 共享目录 `backend/.tmp` 的权限 ──────────────────────────────────────
+#
+# compose 把宿主 `backend/.tmp` bind-mount 进 api 容器，管理审计日志
+# （admin-audit.log）、dense 构建水位标记、销量导入 flag 都落在这里
+# ⇒ 容器里那个身份必须能写。
+#
+# 身份有**两个**（2026-10-23 实测）：
+#   ① 容器内 uid 10001（carsel，见 deploy/backend.Dockerfile）；
+#   ② 宿主 root —— 夜间任务 `carsel-nightly.sh` 在宿主上跑，
+#      以 root 读/删 `sales-changed.flag`、读水位标记。
+#
+# ⚠️ compose 里 `cap_drop: ALL` ⇒ 连**以 root 跑**的容器都没有 DAC_OVERRIDE
+# ⇒ 权限位是唯一依据（uid 0 ≠ 无所不能）⇒ 两种身份都得能写：
+#   目录 1777（sticky：谁都能写，但只有属主能删自己的文件）
+#   + 现有文件 666（新建文件由 umask 决定，故每次部署都重新放开一遍）。
+#
+# 写不进去的后果**不是**接口报错（审计写入已吞 OSError），而是更隐蔽的两个：
+#   ① 管理审计日志不再落盘（只剩 docker logs 里的那一份）；
+#   ② **dense 构建水位标记写不进去** ⇒ 状态页永远判「向量集合落后」
+#      ⇒ 夜间任务每晚都白全量重建一次（5 分钟 CPU + embedding 费用）。
+#
+# chown 放在 chmod 之后：chown 可能清掉 setuid/setgid 位，顺序反了权限位会被抹掉。
+# 目录本身不会被 rsync 覆盖（RSYNC_ARGS 已排除 `backend/.tmp/`），
+# 但每次部署都重新授权一次，防止有人手工改过属主/权限后被静默带进生产。
 mkdir -p "$APP_DIR/backend/.tmp"
-chown -R 10001:10001 "$APP_DIR/backend/.tmp"
+chmod 1777 "$APP_DIR/backend/.tmp" 2>/dev/null || true
+find "$APP_DIR/backend/.tmp" -maxdepth 1 -type f -exec chmod 666 {} + 2>/dev/null || true
+chown -R 10001:10001 "$APP_DIR/backend/.tmp" 2>/dev/null || true
 
 if ! docker compose up -d; then
   log "ERROR 容器启动失败，尝试回滚"
