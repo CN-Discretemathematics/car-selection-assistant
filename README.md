@@ -220,7 +220,7 @@ python tools/import_data.py payload.json --dry-run
 
 ```powershell
 cd backend
-python -m pytest -q                   # 1684 用例（随迭代增长，以实际输出为准）
+python -m pytest -q                   # 1689 用例（随迭代增长，以实际输出为准）
 >>>>>>> 6e42a87 (chore(deploy+test+sync): 部署后预热稀疏索引——用户的首笔请求不再付 5.7 秒)
 cd ..\web
 npx tsc --noEmit                      # 前端类型检查
