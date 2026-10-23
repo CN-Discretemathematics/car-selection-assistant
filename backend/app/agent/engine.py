@@ -102,10 +102,12 @@ from app.agent.routing import (
     _COMPARE_FOLLOWUP_RE,
     asks_brand_lineup,
     asks_catalog_count,
+    asks_for_candidates,
     asks_general_advice,
     asks_tool_assist,
     decide_route,
     extract_comparison_variant_ids,
+    gives_up_on_profile,
     has_car_intent,
     is_chatty,
     llm_intent_executable,
@@ -236,15 +238,16 @@ def _load_series_pairs(
 # 用户授权「宽松推荐」的口语表达（「没想好/不知道」表示信息缺失，不算授权）。
 # 2026-09 用户反馈补充：「先看推荐/直接推荐/先推荐」= 明确要求跳过剩余追问、
 # 按已有画像直接出推荐（与「随便」同一语义档；仍受 profile_has_core_constraints 门控）。
-_GIVE_UP_RE = re.compile(r"(随便|无所谓|都可以|你看着办|你推荐|听你的|你来定|相信你|先看推荐|直接推荐|先推荐)")
+#
+# 2026-10-23：`_GIVE_UP_RE` 与 `gives_up_on_profile` **下沉到 app.agent.routing**——
+# 「都可以」是**对追问的回答**，判据要结合会话上下文（`profile.unknowns`），
+# 而只有路由层拿得到画像。两处口径（engine 知道、routing 不知道）正是
+# 「同一个问题连问三遍」的根因。此处保留 re-export，既有导入面不变。
+#
 # 明确「不限预算」的表达（2026-09 用户反馈：场景句「推荐一款适合短途自驾游的车」
 # 被反复追问预算，需要一个放掉预算硬门槛的出口）。注意「还没想好预算/没定预算」
 # 是信息缺失不是放弃，绝不入列——那类表述仍走温和引导。
 _BUDGET_WAIVER_RE = re.compile(r"(不限预算|预算不限|不用管预算|预算没上限|没有预算上限)")
-
-
-def gives_up_on_profile(message: str) -> bool:
-    return bool(_GIVE_UP_RE.search(message))
 
 
 def energy_asked_in(message: str) -> list[str] | None:
@@ -741,6 +744,29 @@ def _pending_phrase(profile: UserProfile, exclude: str = "") -> str:
     return "（" + "、".join(pending) + "也一起说一下，我一次排完）"
 
 
+def _waive_dim(profile: UserProfile, dim: str) -> None:
+    """把用户**明确表示「不限」**的维度记进画像 ⇒ 之后不再问这一项。
+
+    2026-10-23（生产真实用户会话实测）：用户回「都可以」= 对上一轮追问的回答，
+    但这句话此前**只被交给 LLM 自由发挥、不回写画像** ⇒ 下一轮确定性追问
+    仍把该项当缺失 ⇒ **同一个问题连问三遍**。
+    ⇒ 放弃必须**落到结构化画像**，不能只出现在回复措辞里。
+
+    ## 为什么它留在 engine（画像推进的归属是 turn.py）
+
+    这是**事件驱动**字段（和 `rejected_variant_ids` / `shown_series_ids` 同类）：
+    「用户在本轮放弃了这一项」是**本轮的事件**，不是本轮线索推导出的画像。
+    更关键：**只有 engine 知道用户放弃的是哪一项**——那一项正是它此刻在追问的
+    （`missing`）；若提前在 turn.py 记下，`next_clarification` 就会**换一题**，
+    engine 的判定随之偏（「随便推荐吧」会变成追问人数而不是温和引导）。
+
+    ⇒ 记在 `profile.waived_dims`；`tests/test_profile_advance.py::
+    test_engine_no_longer_assigns_profile_fields` 的白名单里已登记该字段。
+    """
+    if dim and dim not in (profile.waived_dims or []):
+        profile.waived_dims = [*profile.waived_dims, dim]
+
+
 def next_clarification(profile: UserProfile) -> Clarification | None:
     """最小化追问策略：一次只问一个关键问题（12.2/13）。
 
@@ -748,15 +774,23 @@ def next_clarification(profile: UserProfile) -> Clarification | None:
     1. **回执已说过的侧重维度**——「动力优先」四个字先说出来，用户才知道
        自己的话被用上了，而不是被丢在一边；
     2. **一次性告知还差什么**——否则「先问一下预算 / 再问一下用途」像盘问。
+
+    ## 已放弃的维度不再问（2026-10-23）
+
+    `profile.waived_dims` 里的维度是**用户明确表示「不限」**的
+    （「都可以」「随便」——那是对上一轮追问的回答）。
+    ⇒ **同一个问题不许问第二遍**：真人销售不会把用户已经回答过的问题再问一次。
+    （2026-10-23 生产真实用户会话实测：同一个「主要用途是什么？」被问了 3 遍。）
     """
-    if profile.budget.min is None and profile.budget.max is None:
+    waived = set(profile.waived_dims or [])
+    if "budget" not in waived and profile.budget.min is None and profile.budget.max is None:
         return Clarification(
             question=f"{_priority_phrase(profile)}预算大概多少？"
             f"{_pending_phrase(profile, 'budget')}",
             options=_budget_options(profile),
             missing=["budget"],
         )
-    if not profile.usage:
+    if "usage" not in waived and not profile.usage:
         return Clarification(
             # 「这辆车」预设了一辆还不存在的车（2026-10-05 生产实测）：用户只说了
             # 「20 万预算」，从没提过任何车，却被问「**这辆车**的主要用途是什么呢」。
@@ -767,7 +801,7 @@ def next_clarification(profile: UserProfile) -> Clarification | None:
             options=["上下班通勤", "家庭出行", "长途自驾", "商务接待"],
             missing=["usage"],
         )
-    if profile.passengers is None:
+    if "passengers" not in waived and profile.passengers is None:
         return Clarification(
             question=f"{_priority_phrase(profile)}平时几个人坐？"
             f"{_pending_phrase(profile, 'passengers')}",
@@ -870,6 +904,31 @@ def collect_tradeoffs(top: list[dict], limit: int = 4) -> list[str]:
     return out
 
 
+#: 硬约束维度 → 给模型看的中文标签（解释提示词用）。
+#:
+#: 这四个维度会**下推 SQL 筛选**，也会被追问；画像里没有它们时模型**不许替用户编**
+#: （2026-10-23：画像不全也进推荐链 ⇒ 模型会看到 `usage: []` ⇒ 可能编一个用途）。
+_HARD_DIM_LABELS: dict[str, str] = {
+    "budget": "预算",
+    "usage": "用途",
+    "passengers": "乘坐人数",
+    "body_type": "车身类型",
+}
+
+
+def _hard_dim_set(profile: UserProfile, dim: str) -> bool:
+    """该硬约束维度在画像里**已经明确**了吗（只认用户明说过的）。"""
+    if dim == "budget":
+        return profile.budget.min is not None or profile.budget.max is not None
+    if dim == "usage":
+        return bool(profile.usage)
+    if dim == "passengers":
+        return profile.passengers is not None
+    if dim == "body_type":
+        return bool(profile.body_type)
+    return True
+
+
 def _explain_system_prompt(profile: UserProfile) -> str:
     """解释模块的 system 提示。
 
@@ -879,6 +938,15 @@ def _explain_system_prompt(profile: UserProfile) -> str:
 
     首要维度（计划 §1.2）：用户**明确抬高**的那个维度 → 点名并要求**先讲它**，
     再讲取舍与妥协。没有 `top_dim` 时提示**一个字都不改**。
+
+    ## 画像不全时的「不许替他假设」（2026-10-23）
+
+    画像不全也进推荐链（用户说「随便」「有什么能选的」）⇒ 模型会看到
+    `usage: []` 这种空字段 ⇒ **可能替用户编一个用途**（「适合家庭出行」）——
+    用户从没说过的偏好被当成他说过的 ⇒ 回答不诚实。
+
+    ⇒ 画像缺项时明确告诉模型「哪些还没说、哪些用户说不限，**都不要替他假设**」。
+    画像**完整**时（绝大多数轮次）提示一个字都不改 ⇒ 既有行为逐位不变。
     """
     system = (
         "你是汽车选车助手的解释模块。只能使用下面给定的候选数据，逐条引用其中的价格、配置与来源；"
@@ -890,6 +958,19 @@ def _explain_system_prompt(profile: UserProfile) -> str:
             f"用户最在意的是「{_DIM_LABELS[profile.top_dim]}」——"
             f"**先讲这个维度**，再讲取舍与妥协；"
         )
+    # 画像缺项 ⇒ 明说「没说什么」，免得模型替用户编（2026-10-23）。
+    missing = [
+        label
+        for dim, label in _HARD_DIM_LABELS.items()
+        if dim not in set(profile.waived_dims or []) and not _hard_dim_set(profile, dim)
+    ]
+    waived = [
+        label for dim, label in _HARD_DIM_LABELS.items() if dim in set(profile.waived_dims or [])
+    ]
+    if missing:
+        system += f"用户还没说的：{'、'.join(missing)}——**不要替他假设**，只按已知的条件说；"
+    if waived:
+        system += f"用户明确表示不限的：{'、'.join(waived)}——**不要替他猜一个具体的**；"
     return system
 
 
@@ -1418,11 +1499,25 @@ class AgentEngine:
                 and (profile.usage or profile.passengers is not None or profile.body_type)
             ):
                 clarification = None
+                # 「不限预算」= 预算这项**不再问**（否则尾巴追问会把它问回来）
+                _waive_dim(profile, "budget")
             elif missing in profile.unknowns:
                 # 「授权宽松推荐」必须已有核心画像（预算/用途/人数/车身）；
                 # 仅能源偏好或 avoid 不足以授权，避免空画像硬推（评审 S1）
+                #
+                # 2026-10-23：用户放弃（「都可以」「随便」）时，**这一项不再问**——
+                # 放弃状态记进 `profile.waived_dims`（`next_clarification` 会跳过它）。
+                #
+                # 此前这句话只被交给 LLM 自由发挥、**不回写画像** ⇒ 下一轮确定性追问
+                # 仍把该项当缺失 ⇒ **同一个问题连问三遍**（生产真实用户会话实测：
+                # 第 2 轮与第 4 轮都在问「主要用途是什么？」）。
+                #
+                # ⚠️ 语义边界（2026-09 用户拍板，勿改）：「随便」是**跳过当前这题、
+                # 继续问下一项**，不是「什么都别问、直接给车」——
+                # 既有测试 `test_agent_clarify_twice_then_guides_gently` 钉着这一点。
                 if gives_up_on_profile(message) and profile_has_core_constraints(profile):
                     clarification = None  # 用户授权「宽松推荐」（unknowns 已含 missing，不重复追加）
+                    _waive_dim(profile, missing)
                 elif structured:
                     # 用户本轮提供了可解析的新信息（如「预算12万，2个人」），但还缺一项：
                     # 复述已收集内容 + 只问缺的那一项（确定性引导，避免「慢慢想就好」乱回）
@@ -1439,14 +1534,29 @@ class AgentEngine:
             else:
                 profile.unknowns.append(missing)
                 await run_in_threadpool(self._store.set_profile, session_id, profile.model_dump())
-                # 追问也要落会话历史与 last_result（评审 P2：此前缺失，SSE 回放拿不到追问）
-                clarify_out = AgentMessageOut(
-                    session_id=session_id,
-                    need_clarification=True,
-                    clarification=clarification,
-                )
-                await self._emit(session_id, clarification.question, clarify_out)
-                return clarify_out
+                # 2026-10-23：用户**明确要一份清单**（「有什么能选的」「帮我选几款」）
+                # 且画像里**已有预算**（能筛出候选）⇒ **不阻塞**：
+                # 先给候选，缺口改用 followup 尾巴问。
+                #
+                # 此前这里一律发追问卡 ⇒ 用户问「15万预算有什么能选的」拿到的是
+                # 一张追问卡、**一款车都没有**——他明确在要清单，引擎却先反问：
+                # 这是**答非所问**，不是风格问题（真人销售：先给人看，再问细节）。
+                #
+                # 守卫：没有预算**仍然先问预算**——预算是硬门槛，
+                # 没有它就没有「预算内」这个范围可言。
+                if asks_for_candidates(message) and (
+                    profile.budget.min is not None or profile.budget.max is not None
+                ):
+                    clarification = None  # → 落进推荐链；缺口由 followup 尾巴问
+                else:
+                    # 追问也要落会话历史与 last_result（评审 P2：此前缺失，SSE 回放拿不到追问）
+                    clarify_out = AgentMessageOut(
+                        session_id=session_id,
+                        need_clarification=True,
+                        clarification=clarification,
+                    )
+                    await self._emit(session_id, clarification.question, clarify_out)
+                    return clarify_out
 
         # 4.5) 本轮新硬约束与锁定车系冲突 → 自动解除锁定并明确告知（用户反馈 P1）
         #      评审 M1：必须放在追问分支之后。此前放在 0.6 步，若本轮以追问/普通对话
@@ -1594,9 +1704,17 @@ class AgentEngine:
 
         # L4：软缺口追问**随推荐一起给出**，不阻塞本轮结果。
         # 记下问过哪两个维度（profile.probed_dims）——真人销售不会把同一个问题问两遍。
-        followup = soft_probe.probe_question(profile)
-        if followup is not None:
-            soft_probe.mark_probed(profile, soft_probe._pick_dims(profile))
+        #
+        # 2026-10-23：**硬缺口优先**（用途/人数比软偏好更影响筛选）。
+        # 「先给车、再问尾巴」：用户明确要清单时（「有什么能选的」），
+        # 问卷**不该挡住结果**——真人销售先给人看，再问细节。
+        # （硬缺口只在画像不全时存在 ⇒ 正常路径下这里恒为 None，软追问行为不变。）
+        gap = next_clarification(profile)
+        followup = gap
+        if followup is None:
+            followup = soft_probe.probe_question(profile)
+            if followup is not None:
+                soft_probe.mark_probed(profile, soft_probe._pick_dims(profile))
 
         # 记下本轮推荐了哪些款型：用户看完卡片多半会追问「动力/空间怎么样」，
         # 那些消息里他从不会点名车系，靠 `locked_series_ids` 取不到这些车的参数，

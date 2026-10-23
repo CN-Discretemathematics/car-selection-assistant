@@ -220,8 +220,7 @@ python tools/import_data.py payload.json --dry-run
 
 ```powershell
 cd backend
-python -m pytest -q                   # 1660 用例（随迭代增长，以实际输出为准）
->>>>>>> 02f93fd (fix(vehicles+test): 「一家四口」也算人数——家庭规模的口语说法没被解析)
+python -m pytest -q                   # 1677 用例（随迭代增长，以实际输出为准）
 cd ..\web
 npx tsc --noEmit                      # 前端类型检查
 ```
