@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 from app.agent.engine import next_clarification
 from app.agent.routing import asks_for_candidates, decide_route, gives_up_on_profile
 from app.agent.schemas import Budget, UserProfile
-from tests.seed import make_brand, make_series, make_source, make_variant, make_year
+from tests.seed import make_brand, make_sales, make_series, make_source, make_variant, make_year
 
 
 def _seed_agent_data(db_session: Session) -> dict[str, int]:
@@ -262,3 +262,126 @@ def test_explain_prompt_marks_waived_dim_as_unlimited_not_missing():
     prompt = _explain_system_prompt(profile)
     assert "不限" in prompt, prompt
     assert "不要替他猜" in prompt, prompt
+
+
+# ── 5. 说不清需求 ⇒ 按销量排（用户建议：推荐销量高的车型）────────────────────
+
+
+def _seed_sales_pair(db_session: Session) -> dict[str, int]:
+    """两台车：**销量**与**软评分**故意相反——用来钉住排序口径。
+
+    - 「销量小车」：车短、功率低，但**卖得多**；
+    - 「参数大车」：车长、功率高，但**卖得少**。
+
+    ⇒ 按软评分排 → 参数大车在前；按销量排 → 销量小车在前。
+    """
+    source = make_source(db_session, name="官方测试来源")
+    brand = make_brand(db_session, name="测试品牌", source=source)
+    small = make_series(
+        db_session, brand, name="销量小车", body_type="sedan", energy_types=("BEV",), source=source
+    )
+    big = make_series(
+        db_session, brand, name="参数大车", body_type="suv", energy_types=("BEV",), source=source
+    )
+    year_small, year_big = make_year(db_session, small), make_year(db_session, big)
+    v_small = make_variant(
+        db_session, small, year_small, config_version="标准版", energy_type="BEV", price_cny="120000",
+        facts=[("尺寸", "length_mm", "4200", "mm", None), ("动力", "power_kw", "100", "kW", None)],
+        source=source,
+    )
+    v_big = make_variant(
+        db_session, big, year_big, config_version="标准版", energy_type="BEV", price_cny="140000",
+        facts=[("尺寸", "length_mm", "5000", "mm", None), ("动力", "power_kw", "300", "kW", None)],
+        source=source,
+    )
+    make_sales(db_session, small, "2026-09", 12000, source=source)
+    make_sales(db_session, big, "2026-09", 800, source=source)
+    db_session.commit()
+    return {"sales_car": v_small.id, "spec_car": v_big.id}
+
+
+def test_vague_user_gets_best_sellers_first(db_session: Session):
+    """用户**说不清需求**（只有预算）⇒ 按**销量**排。
+
+    2026-10-23 生产真实用户会话：用户问「15万预算有什么能选的」，
+    画像里只有预算 ⇒ 软评分 8 个维度几乎全是中性分 ⇒ 排序实际由
+    「车长/功率」决定 ⇒ 给用户的不是**热销的**车，而是**参数唬人的**车。
+    用户建议：「推荐销量高的车型」。
+    """
+    from app.agent.tools import recommendation_tool
+
+    ids = _seed_sales_pair(db_session)
+    profile = UserProfile()
+    profile.budget = Budget(max=150000)
+
+    result = recommendation_tool(db_session, profile)
+
+    got = [v["variant_id"] for v in result["variants"]]
+    assert got, result
+    assert got[0] == ids["sales_car"], got
+    # 销量数字随候选带上 ⇒ 解释里可以**引用**它（可溯源，不是模型编的）
+    assert result["variants"][0]["sales_count"] == 12000, result["variants"][0]
+
+
+def test_order_unchanged_when_user_has_soft_info(db_session: Session):
+    """画像里有软线索（用途=家庭）⇒ 仍按**软评分**排，**不带销量**。
+
+    ⇒ 既有推荐结果**逐位不变**（这是本次改动最该守住的一条）。
+    """
+    from app.agent.tools import recommendation_tool
+
+    ids = _seed_sales_pair(db_session)
+    profile = UserProfile()
+    profile.budget = Budget(max=150000)
+    profile.usage = ["家庭"]
+
+    result = recommendation_tool(db_session, profile)
+
+    got = [v["variant_id"] for v in result["variants"]]
+    assert got[0] == ids["spec_car"], got
+    assert "sales_count" not in result["variants"][0], result["variants"][0]
+
+
+def test_sales_order_falls_back_to_score_without_sales_data(db_session: Session):
+    """库里没有销量 ⇒ 仍按软评分排（**不能因为没数据就不给车**）。"""
+    from app.agent.tools import recommendation_tool
+    from tests.seed import make_brand, make_series, make_source, make_variant, make_year
+
+    source = make_source(db_session, name="官方测试来源")
+    brand = make_brand(db_session, name="无销量品牌", source=source)
+    series = make_series(
+        db_session, brand, name="无销量车系", body_type="sedan", energy_types=("BEV",), source=source
+    )
+    year = make_year(db_session, series)
+    make_variant(
+        db_session, series, year, config_version="标准版", energy_type="BEV", price_cny="120000",
+        facts=[("尺寸", "length_mm", "4200", "mm", None)], source=source,
+    )
+    db_session.commit()
+
+    profile = UserProfile()
+    profile.budget = Budget(max=150000)
+    result = recommendation_tool(db_session, profile)
+
+    assert result["variants"], result
+    assert "sales_count" not in result["variants"][0], result["variants"][0]
+
+
+def test_explain_prompt_says_batch_is_ordered_by_sales_for_vague_user():
+    """模型必须知道这批是**按销量**排的——否则它会写成「按你的需求匹配」（假的）。
+
+    断言用**整句**而不是「销量」两个字：基础提示里本来就有「禁止编造价格、销量…」
+    ⇒ 断言「销量」在提示里永远成立，等于没断言。
+    """
+    from app.agent.engine import _explain_system_prompt
+
+    profile = UserProfile()
+    profile.budget = Budget(max=150000)
+    prompt = _explain_system_prompt(profile)
+    assert "按最近一个月销量" in prompt, prompt
+
+    # 画像有软线索时不该出现这句（那批不是按销量排的）
+    with_info = UserProfile()
+    with_info.budget = Budget(max=150000)
+    with_info.usage = ["通勤"]
+    assert "按最近一个月销量" not in _explain_system_prompt(with_info)

@@ -150,6 +150,7 @@ from app.agent.turn import (
 )
 from app.agent.tools import (
     TOOL_SCHEMAS,
+    _profile_has_no_soft_info,
     comparison_tool,
     citation_verifier,
     recommendation_tool,
@@ -971,6 +972,11 @@ def _explain_system_prompt(profile: UserProfile) -> str:
         system += f"用户还没说的：{'、'.join(missing)}——**不要替他假设**，只按已知的条件说；"
     if waived:
         system += f"用户明确表示不限的：{'、'.join(waived)}——**不要替他猜一个具体的**；"
+    if _profile_has_no_soft_info(profile):
+        # 2026-10-23：画像**一个软线索都没有** ⇒ 这一批是**按销量**排的
+        # （用户说「15万预算有什么能选的」——他不知道要什么，热销的才是他需要的）。
+        # 不告诉模型，它就会写成「按你的需求匹配」——那是**假的**（他没说过需求）。
+        system += "用户还没说清需求 ⇒ 这一批是**按最近一个月销量**排的，照实说；"
     return system
 
 
