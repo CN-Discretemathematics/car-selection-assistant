@@ -345,3 +345,45 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
 三档的能力表（谁该按哪个能力判断）见
 [三档能力表](2026-10-21-mode-capabilities.md)；闸门语义只在
 `backend/app/agent/preferences.py::ModeCapabilities` 一处定义。
+
+## 10. 容器以非 root 运行（2026-10-22）
+
+容器加固此前做齐了两层（`cap_drop: ALL`、`no-new-privileges`、内存与进程数上限），
+**用户身份**那层却是空的——两个容器都以 root 跑。一旦发生容器逃逸，
+攻击者拿到的就是宿主上的 root。
+
+### 改了什么
+
+| 容器 | 运行身份 | uid | 需要写权限的地方 |
+| --- | --- | --- | --- |
+| `deploy-api-1` | `carsel` | 10001 | 宿主 `backend/.tmp`（管理审计日志 / dense 水位标记 / 销量 flag） |
+| `deploy-web-1` | `carsel` | 10002 | 镜像内 `.next/cache`（Next 图片优化缓存） |
+
+- `deploy/backend.Dockerfile` / `deploy/frontend.Dockerfile`：建用户 → `chown` → `USER`；
+- `deploy/carsel-deploy.sh`：切流**前**把宿主 `backend/.tmp` 授权给 10001
+  （本脚本以 root 运行），切流**后**当场断言容器不是 root，失败即回滚；
+- `deploy/tests/verify_non_root.sh`（新增）：断言脚本问的是**容器内当前进程的 uid**
+  （不是镜像里的声明）——「声明 + 运行时断言」两层都在才叫护栏；
+  只有声明那叫许愿（compose 里任何一处 `user:` 覆盖、构建漏了 USER 指令，声明都会失效）。
+
+### 为什么 uid 必须固定
+
+compose 把宿主 `backend/.tmp` bind-mount 进容器 ⇒ 容器内 uid 要与宿主授权对得上。
+随机 uid 就没法预先授权 ⇒ 只能用固定 uid。
+
+### 手工部署时的注意
+
+`deploy/carsel-deploy.sh` 会自动 chown。**手工**起容器时记得先执行：
+
+```bash
+chown -R 10001:10001 /srv/carsel/backend/.tmp
+```
+
+否则 api 起来写不进管理审计日志（管理入口的写审计会失败）。
+
+### 验证
+
+- 在**生产同款环境**用改后的 Dockerfile 真构建两个镜像：
+  `docker run --rm <image> id -u` ⇒ 分别 10001 / 10002；
+  再用宿主 `.tmp` 目录挂载实测容器内可写（审计日志与水位标记就落在这里）；
+- 部署脚本切流后自动跑 `verify_non_root.sh`，不通过即回滚（与健康检查同级）。

@@ -267,6 +267,16 @@ log "镜像构建完成（commit=${remote_sha}）"
 # **新镜像还没部署**（旧镜像里没有那个迁移文件，无从执行），不是流程缺陷。
 
 # 5) 切流
+#
+# 非 root 运行的前置（2026-10-22）：宿主侧 `backend/.tmp` 要归 api 容器的运行用户所有。
+# compose 把该目录 bind-mount 进容器，而管理审计日志（admin-audit.log）、
+# dense 水位标记、销量导入 flag 都落在这个目录 ⇒ 容器内 uid 10001 必须能写。
+# 本脚本以 root 运行 ⇒ 这里 chown 是安全的；目录本身不会被 rsync 覆盖
+# （RSYNC_ARGS 已排除 `backend/.tmp/`），但每次部署都重新授权一次，
+# 防止有人手工改过属主后被静默带进生产。
+mkdir -p "$APP_DIR/backend/.tmp"
+chown -R 10001:10001 "$APP_DIR/backend/.tmp"
+
 if ! docker compose up -d; then
   log "ERROR 容器启动失败，尝试回滚"
   docker tag deploy-api:rollback deploy-api:latest 2>/dev/null
@@ -286,6 +296,21 @@ done
 
 if [ "$healthy" != "1" ]; then
   log "ERROR 健康检查失败（ready=${api_code:-无响应} site=${site_code:-无响应}），回滚到上一版镜像"
+  docker tag deploy-api:rollback deploy-api:latest 2>/dev/null
+  docker tag deploy-web:rollback deploy-web:latest 2>/dev/null
+  docker compose up -d
+  sleep 20
+  log "已回滚；当前 ready=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$HEALTH_URL" || echo 无响应)"
+  exit 1
+fi
+
+# 6.5) 非 root 断言（2026-10-22）：容器必须**不是 root**，否则回滚。
+#
+# Dockerfile 里写 `USER carsel` 只是**声明**——真正要保证的是跑起来时确实是那个身份：
+# compose 里任何一处 `user:` 覆盖、镜像构建漏了 USER 指令，声明都会失效。
+# ⇒ 部署后当场断言，失败即回滚（与健康检查同级）。
+if ! bash "$APP_DIR/deploy/tests/verify_non_root.sh" deploy-api-1 deploy-web-1; then
+  log "ERROR 容器以 root 运行（见上），回滚到上一版镜像"
   docker tag deploy-api:rollback deploy-api:latest 2>/dev/null
   docker tag deploy-web:rollback deploy-web:latest 2>/dev/null
   docker compose up -d
