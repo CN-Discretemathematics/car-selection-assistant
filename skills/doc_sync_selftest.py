@@ -17,6 +17,7 @@ gitignore 的本地专属文件（reviewer/REVIEWER_AGENT.md / resume/ / docs-lo
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,15 @@ def run_checker(sandbox: Path, *args: str) -> tuple[int, str]:
     proc = subprocess.run(
         [sys.executable, str(sandbox / CHECK_REL), *args],
         cwd=sandbox, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        # ⚠️ 必须**强制**子进程用 UTF-8 输出（2026-10-24 实测修）：
+        #    本脚本按 UTF-8 解码子进程输出，但 Windows 上 Python 写管道时
+        #    用的是**本地代码页**（cp936/GBK）⇒ 解码出来全是乱码
+        #    ⇒ 断言「结论：一致」之类的中文串一律匹配不上
+        #    ⇒ **10 条里 9 条假红**（实测：CI 是 Ubuntu 故不复现，
+        #       但本地开发者看到的是一片红，与「本地绿、CI 红」事故同形）。
+        #    不设 `PYTHONIOENCODING` 时，父进程的 `encoding="utf-8"`
+        #    只能影响**读**的方向，管不到**写**的方向。
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
