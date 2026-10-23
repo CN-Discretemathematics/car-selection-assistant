@@ -28,7 +28,13 @@
 | --- | --- | --- |
 | **observe** | 解析匿名身份 + 落观察日志 | 路由层（解析身份）、`persist_hints`、`record_feedback` |
 | **write** | 写库（偏好记忆 / 拒绝反馈） | `remember`、`persist_hints`、`record_feedback` |
-| **refill** | 回填进画像——**会改变推荐结果** | `restore_into_profile`、`effective_brand_exclusions` |
+| **refill** | 回填进画像——**会改变推荐结果** | `restore_into_profile` |
+
+> ⚠️ 2026-10-22 更正：`effective_brand_exclusions` 原本被算作 `refill` 的使用者，
+> 那道门让**影子档看不见品牌排除项**（观察期少了一个键，判据是残的）。
+> 它做的是「**算出**排除项」——给日志看不需要回填 ⇒ 改用 `observe`。
+> 回填那道门仍在 `restore_into_profile` 自己身上 ⇒ `shadow` 的推荐结果逐位不变。
+> 详见 [影子档看不见品牌排除项](2026-10-22-shadow-brand-exclude-observation.md)。
 
 一张表说清每档能做什么：
 
