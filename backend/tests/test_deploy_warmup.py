@@ -107,7 +107,11 @@ def test_warmup_runs_after_health_check_and_before_success_record():
     text = _text()
     i_health = text.index("healthy=0")
     i_warm = text.index("if ! warmup_retrieval; then")
-    i_record = text.index("last-deploy.json")
+    # `last-deploy.json` 在脚本里出现多次：头部说明注释、write_blocked_deploy()
+    # 的"拒绝部署"记录（status=blocked）、以及最后的成功记录（status=ok）。
+    # 直接 index() 会命中前面的注释/blocked 记录 ⇒ 必须从预热调用点往后找
+    # **成功**记录，否则断言的是「脚本里第一个提及文件的位置」而不是真正写入顺序。
+    i_record = text.index("last-deploy.json", i_warm)
     assert i_health < i_warm < i_record, (
         f"顺序不对：health={i_health} warmup={i_warm} record={i_record}"
     )

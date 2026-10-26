@@ -24,10 +24,10 @@
 定时：`0 5 * * *`（每天早上 5 点扫一次 `main`）。
 
 ```bash
-carsel-deploy.sh             # 对比 main 最新提交，有更新则同步源码 → 重建镜像 → 切流 → 健康检查
-carsel-deploy.sh --check     # 只打印「远端 main SHA / 已部署 SHA / 是否有更新」
-carsel-deploy.sh --dry-run   # 走完下载、解包与 rsync 预览，不构建、不重启（核对删除清单用）
-carsel-deploy.sh --force     # 忽略 SHA 相同，强制重部署（手工回滚/重发布用）
+carsel-deploy.sh             # 对比 main 最新提交 → 校验必需 CI job 全绿 → 同步/重建/切流/健康检查
+carsel-deploy.sh --check     # 只打印「远端 main SHA / 已部署 SHA / 是否有更新」+ 4 个必需 CI job 状态（报告用，不拦截）
+carsel-deploy.sh --dry-run   # 走完下载、解包与 rsync 预览，不构建、不重启（不校验 CI，因不切流）
+carsel-deploy.sh --force     # 忽略 SHA 相同，强制重部署（**不会**绕过 CI 门禁，手工回滚/重发布用）
 ```
 
 流程与保障：
@@ -35,15 +35,18 @@ carsel-deploy.sh --force     # 忽略 SHA 相同，强制重部署（手工回�
 1. **只认 main**：通过 `api.github.com` 取 `main` 最新 SHA，与 `/var/lib/carsel/deployed-main.sha`
    比对；相同则直接退出（幂等，不产生任何变更）。
    ⚠️ **这一步的 SHA 必须交叉核对才可信**——见下面「2.1 静默失效事故与三重防护」。
-2. **源码包**：`codeload.github.com/.../tar.gz/refs/heads/main`（公开仓库，无需凭据；
+2. **部署前 CI 门禁**（2026-10-27 新增）：查目标 SHA 的 Check Runs，
+   `backend (pytest)` / `gates` / `web` / `migrations` 四个阻塞 job 必须全绿；
+   明确失败立即拒绝，pending 最多等 15 分钟，API 失败重试后拒绝（详见「2.2 部署前 CI 门禁」）。
+3. **源码包**：`codeload.github.com/.../tar.gz/refs/heads/main`（公开仓库，无需凭据；
    仓库内不含 `.env`）。
-3. **同步**：`rsync -a --delete` 镜像到 `/srv/carsel`，让「仓库里删掉的文件」也同步删除。
-4. **构建失败不影响线上**：`docker compose build` 失败时**不重启容器**，旧版本继续服务。
-5. **健康检查**：切流后轮询 `/api/v1/ready`（期望 200）与站点首页（期望 200），最多 2 分钟。
-6. **自动回滚**：切流前把当前镜像打上 `deploy-api:rollback` / `deploy-web:rollback`；
+4. **同步**：`rsync -a --delete` 镜像到 `/srv/carsel`，让「仓库里删掉的文件」也同步删除。
+5. **构建失败不影响线上**：`docker compose build` 失败时**不重启容器**，旧版本继续服务。
+6. **健康检查**：切流后轮询 `/api/v1/ready`（期望 200）与站点首页（期望 200），最多 2 分钟。
+7. **自动回滚**：切流前把当前镜像打上 `deploy-api:rollback` / `deploy-web:rollback`；
    健康检查失败即回滚这两个 tag 并 `up -d`，同时日志记录。
-7. **单实例**：`flock` 防重入，不会与手工部署或上一次未完成的部署叠加。
-8. **留痕**：`/var/lib/carsel/last-deploy.json`（sha / previous / 时间 / 状态 / 源码包提交时间）、
+8. **单实例**：`flock` 防重入，不会与手工部署或上一次未完成的部署叠加。
+9. **留痕**：`/var/lib/carsel/last-deploy.json`（sha / previous / 时间 / 状态 / 源码包提交时间）、
    `/var/log/carsel-deploy.log`（自动截断保留最近 2000 行）。
 
 ### 2.1 静默失效事故与三重防护（2026-10-21）
@@ -80,6 +83,50 @@ carsel-deploy.sh --force     # 忽略 SHA 相同，强制重部署（手工回�
 **验证**：`deploy/tests/verify_deploy_stale_sha.sh`（7 个场景，桩 curl/docker/rsync，不连真 GitHub）。
 同一套桩喂**旧脚本**时，事故场景会打印「已是最新」并 exit 0（还会把陈旧代码真的构建部署）——
 这就是 A/B 证据；喂新脚本则 7/7 拦住。
+
+### 2.2 部署前 CI 门禁（2026-10-27）
+
+**问题**：脚本原先只校验 SHA 与提交时间，不看 CI。2026-10-26 `main` 的 gates job 红着合入 #103，
+05:00 自动部署仍会把红代码推上生产——CI 绿若拦不住发布，就只是 PR 页面上的装饰。
+
+**规则**：查目标 SHA 的 Check Runs，以下 4 个**阻塞 job** 必须全部 `completed/success`：
+
+| 必需 job | 管什么 |
+|---|---|
+| `backend (pytest)` | 后端全量测试 |
+| `gates (secrets + ui-copy + doc-sync)` | 密钥/文案/文档一致性/门禁自测/commit-scope |
+| `web (lint + tsc + build)` | 前端 eslint + tsc + 构建 |
+| `migrations + 功能校验（postgres）` | Postgres 上迁移 up/down/up + 冒烟 |
+
+`metrics` 与 `lint` 只报告不拦（lint 是 report-only）；`autofix` 在 main push 上是 skipped，不拦发布。
+
+**失败语义**（宁可不部署，不猜）：
+
+- 任一必需 job 明确 `failure/cancelled/timed_out/action_required` ⇒ 立即拒绝；
+- `queued/in_progress` 或尚无 check-run ⇒ 最多等 900s（默认每 60s 轮询）；
+- GitHub API 不可达/限流/解析失败 ⇒ 重试 3 次后拒绝；
+- 拒绝时写 `/var/lib/carsel/last-deploy.json`（`status=blocked`，
+  `reason=ci_failed|ci_timeout|ci_api_unavailable`），**不改** `deployed-main.sha`；
+- `--check` 只打印 4 个 job 的 CI 状态，不拦截；`--dry-run` 不校验（不构建、不切流）。
+
+**逃生阀**：仅 `DEPLOY_SKIP_CI_GUARD=1` 跳过门禁（手工救火），`--force` **不会**自动绕过：
+
+```bash
+DEPLOY_SKIP_CI_GUARD=1 /usr/local/bin/carsel-deploy.sh --force
+```
+
+**上线注意**：脚本会自更新，但自更新发生在本次部署的 rsync 之后——合并本改动后的**第一次**
+05:00 部署仍由旧脚本执行（它自己不带门禁）。若要当天生效，先手工安装一次：
+
+```bash
+install -m 755 /srv/carsel/deploy/carsel-deploy.sh /usr/local/bin/carsel-deploy.sh
+```
+
+安装前先跑 `carsel-deploy.sh --check` 确认 main 的 4 个必需 job 全绿，否则当天会被门禁挡住。
+
+**验证**：`deploy/tests/verify_deploy_ci_guard.sh`（8 个场景，桩 `curl`/`docker`/`rsync`，
+不连真 GitHub）：全绿放行 / 明确失败拒绝 / pending 超时 / pending 转 success / API 失败 /
+必需 job 缺失 / 逃生阀 / `--check` 只报告。该测试也接入了 CI gates job。
 
 ### 服务器本地数据绝不被覆盖或删除（rsync 排除清单）
 
@@ -293,16 +340,16 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
   `/admin/rag/status` 在规模漂移时给出「车系 908→1078」式原因。旧标记（无 `db_counts`）
   退回只比月份，不误报。
 - **只部署 main 的代价**：未合并的改动不会上线（需要的验证放在 PR 阶段完成）。
-- **CI 门禁已接入（仍未设强制）**：`.github/workflows/ci.yml` 在 PR 与 main push 上跑四个 job——
-  backend（全量 pytest）、gates（`reviewer/scan_secrets.py` + `reviewer/scan_ui_copy.py`
-  + `skills/doc_sync_check.py`，退出码必须 0；文案门禁定位不到唯一 footer 时返回 **2**，
-  同样算失败；gates 装后端依赖，故 doc-sync 的用例数也真核对，依赖装不上才 WARN 跳过）、
-  autofix（gates 失败且是同仓库 PR 时，跑 doc-sync `--fix` 自愈确定性计数并把补丁推回 PR 分支，
-  提交正文列每条 FIX 明细；若仍有判读类 FAIL，PR 依旧红、由人/Agent 按 skills/doc-sync.md 对齐；
-  需在 Settings → Actions → General 开 Read and write 权限，fork PR 自动跳过）、
-  web（`tsc --noEmit` + `next build`）。要真正拦住合并，需在仓库 Settings → Branches →
-  main 分支保护里勾 Require status checks 并选中 backend / gates / web 三个 check；
-  部署不受影响（服务器仍定时拉 main）。
+- **CI 门禁与部署门禁（2026-10-27 更新）**：`.github/workflows/ci.yml` 共 7 个 job——
+  backend（全量 pytest）、gates（密钥/UI 文案/文档一致性/门禁自测/commit-scope/部署门禁自测）、
+  metrics（质量看板，只报告）、lint（ruff，只报告）、web（eslint + tsc + test + build）、
+  migrations（Postgres 上 alembic up/down/up + 冒烟）、autofix（doc-sync `--fix` 推补丁/评论；
+  需在 Settings → Actions → General 开 Read and write 权限，fork PR 自动跳过）。
+  **合并**侧仍建议在 Settings → Branches → main 分支保护里勾 Require status checks
+  （backend / gates / web / migrations）——分支保护未版本化，需页面操作；
+  **部署**侧已强制：`carsel-deploy.sh` 要求这 4 个 job 全绿才发布（见 §2.2），
+  main 红着合入也会被 05:00 的自动部署拦住。gates 文案门禁定位不到唯一 footer 时返回 **2**，
+  同样算失败；gates 装后端依赖，故 doc-sync 的用例数也真核对，依赖装不上才 WARN 跳过。
 - **通知**：脚本只写日志与状态文件；如需微信/邮件通知，可在脚本末尾追加钩子。
 
 ## 9. 智能导购的跨会话记忆闸门（DURABLE_PREFS_MODE）
