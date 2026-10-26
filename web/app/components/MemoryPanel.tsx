@@ -29,11 +29,17 @@ export default function MemoryPanel({ onBack }: { onBack: () => void }) {
   const [items, setItems] = useState<PreferenceMemory[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
+  // 身份是否还有效（2026-10-24）：后端对「没记住」和「身份已失效」都返回空列表，
+  // 分不清 ⇒ 空列表时探一次。false = 这个浏览器的身份服务端已经不认识了
+  // （服务端清过库 / 身份被删）⇒ 那不是「你什么也没被记住」，是**读不到**。
+  const [identityValid, setIdentityValid] = useState(true);
 
   const load = useCallback(async () => {
     try {
       setError(null);
-      setItems(await listPreferences(readIdentityToken()));
+      const { items: loaded, identityValid: valid } = await listPreferences(readIdentityToken());
+      setItems(loaded);
+      setIdentityValid(valid);
     } catch (err) {
       setItems(null);
       setError(err instanceof Error ? err.message : "读取失败，请稍后再试");
@@ -79,11 +85,25 @@ export default function MemoryPanel({ onBack }: { onBack: () => void }) {
         <p className="text-xs text-ash">正在读取…</p>
       )}
 
-      {!error && items !== null && items.length === 0 && (
+      {!error && items !== null && items.length === 0 && identityValid && (
         <div className="msg-pop rounded-[22px] border border-apple/12 bg-ice/70 p-3.5 text-[13px] leading-6 text-ink-soft">
           现在还没有记住任何偏好。
           <br />
           你在对话里说过的预算、用途、人数，或不想要的车型和品牌，会出现在这里。
+        </div>
+      )}
+
+      {/* ⚠️ 「读不到」**不等于**「没记住」（2026-10-24 生产实测）：
+          浏览器里存着一个已被服务端删除的身份 token ⇒ 后端返回空列表
+          ⇒ 若照旧显示「你什么也没被记住」，那是在**撒谎**——
+          真相是「读不到」。这里如实区分。 */}
+      {!error && items !== null && items.length === 0 && !identityValid && (
+        <div className="msg-pop rounded-[22px] border border-amber-200/60 bg-amber-50/90 p-3.5 text-[13px] leading-6 text-ink-soft">
+          暂时读不到你之前被记住的偏好。
+          <br />
+          这个浏览器里的匿名标识已经失效了（服务端不再认识它），所以取不到内容。
+          <br />
+          继续问车即可——下一次对话会重新建立标识，之后说过的条件就会开始被记住。
         </div>
       )}
 

@@ -71,13 +71,21 @@ afterEach(() => {
   delete (globalThis as unknown as { fetch?: unknown }).fetch;
 });
 
-test("ensureIdentityToken：已有 token 直接复用，不再发请求", async () => {
+test("ensureIdentityToken：已有 token 先**验证**再复用（2026-10-24 行为变更）", async () => {
+  // ⚠️ 这条用例的语义**变了**（2026-10-24）：初版断言「已有 token 就不再发请求」，
+  // 那正是本次要修的缺陷——本地存的 token 可能**已经被服务端删了**
+  // （服务端清库 / 用户注销），复用一个死 token 会让整套跨会话记忆**静默失效**
+  // （面板显示「你什么也没被记住」，且每一轮都不写记忆）。
+  //
+  // ⇒ 现在会**探一次**身份有效性：认 ⇒ 复用（不新建）；不认 ⇒ 换新的。
   stubStorage({ [IDENTITY_KEY]: "tok-existing" });
-  const calls = stubFetch(() => {
-    throw new Error("不该发请求");
-  });
+  const calls = stubFetch(() => ({
+    ok: true, status: 200, body: { identity_id: 3, token: "", created: false },
+  }));
   assert.equal(await ensureIdentityToken(), "tok-existing");
-  assert.equal(calls.length, 0);
+  assert.equal(calls.length, 1, "只探一次身份有效性（不新建身份）");
+  assert.equal(calls[0].url, "/api/v1/agent/identity");
+  assert.equal(readIdentityToken(), "tok-existing", "有效 token 不该被换掉");
 });
 
 test("ensureIdentityToken：新建身份后把 token 存进 localStorage", async () => {
@@ -146,7 +154,7 @@ test("writeIdentityToken(null)：清掉本地身份（登出/清数据后不该�
 
 test("listPreferences：带 token 时带 Authorization 头", async () => {
   const calls = stubFetch(() => ({ ok: true, status: 200, body: [{ id: 1, key: "budget" }] }));
-  const items = await listPreferences("tok-abc");
+  const { items } = await listPreferences("tok-abc");
   const headers = (calls[0].init?.headers ?? {}) as Record<string, string>;
   assert.equal(headers.Authorization, "Bearer tok-abc");
   assert.equal(calls[0].url, "/api/v1/agent/preferences");
@@ -155,10 +163,12 @@ test("listPreferences：带 token 时带 Authorization 头", async () => {
 
 test("listPreferences：没有 token 时不带 Authorization 头（缺身份也要能读）", async () => {
   const calls = stubFetch(() => ({ ok: true, status: 200, body: [] }));
-  const items = await listPreferences(null);
+  const { items, identityValid } = await listPreferences(null);
   const headers = (calls[0].init?.headers ?? {}) as Record<string, string>;
   assert.equal(headers.Authorization, undefined);
   assert.deepEqual(items, []);
+  // 没有 token ⇒ 没身份可探 ⇒ 默认「有效」（不该显示「读不到」）
+  assert.equal(identityValid, true);
 });
 
 test("listPreferences：读失败**抛错**而不是返回空列表", async () => {
@@ -169,7 +179,93 @@ test("listPreferences：读失败**抛错**而不是返回空列表", async () =
 
 test("listPreferences：响应不是数组时返回空数组（不把异常形状当列表用）", async () => {
   stubFetch(() => ({ ok: true, status: 200, body: { detail: "unexpected" } }));
-  assert.deepEqual(await listPreferences("tok-abc"), []);
+  const { items } = await listPreferences("tok-abc");
+  assert.deepEqual(items, []);
+});
+
+// ── 孤儿 token（2026-10-24 生产实测）────────────────────────────────────────
+//
+// 浏览器里存着一个**已被服务端删除**的身份 token ⇒ 后端查不到 ⇒ 身份为 None
+// ⇒ 记忆读写全部短路、**不报任何错** ⇒ 面板显示「你什么也没被记住」（谎）。
+//
+// 后端对「无 token」和「token 无效」**都**返回空列表 ⇒ 前端必须额外探一次。
+
+test("listPreferences：token 已失效时 identityValid=false（不谎称「没记住」）", async () => {
+  const calls = stubFetch((url) =>
+    url.includes("/agent/preferences")
+      ? { ok: true, status: 200, body: [] }
+      : // 服务端不认识这个 token ⇒ 给了新身份（新 token 非空）
+        { ok: true, status: 201, body: { identity_id: 9, token: "tok-fresh", created: true } },
+  );
+  stubStorage({ [IDENTITY_KEY]: "tok-dead" });
+  const { items, identityValid } = await listPreferences("tok-dead");
+  assert.deepEqual(items, []);
+  assert.equal(identityValid, false, "token 失效时必须报「读不到」而不是「没记住」");
+  // 顺带：本地那个死 token 必须被换成新的
+  assert.equal(readIdentityToken(), "tok-fresh");
+  assert.ok(calls.length >= 2, "应当先读列表、再探一次身份有效性");
+});
+
+test("listPreferences：token 有效时 identityValid=true（不误报「读不到」）", async () => {
+  stubFetch((url) =>
+    url.includes("/agent/preferences")
+      ? { ok: true, status: 200, body: [] }
+      : // 服务端认这个 token ⇒ created=false、token 为空串
+        { ok: true, status: 200, body: { identity_id: 3, token: "", created: false } },
+  );
+  stubStorage({ [IDENTITY_KEY]: "tok-good" });
+  const { identityValid } = await listPreferences("tok-good");
+  assert.equal(identityValid, true);
+  assert.equal(readIdentityToken(), "tok-good", "有效 token 不该被换掉");
+});
+
+test("listPreferences：有内容时不探身份（不必多发一次请求）", async () => {
+  const calls = stubFetch(() => ({ ok: true, status: 200, body: [{ id: 1, key: "budget" }] }));
+  const { identityValid } = await listPreferences("tok-abc");
+  assert.equal(identityValid, true);
+  assert.equal(calls.length, 1, "列表非空时不必再探身份有效性");
+});
+
+// ── ensureIdentityToken：本地 token 可能已失效（2026-10-24）──────────────────
+
+test("ensureIdentityToken：本地 token 已失效时**换新的**（不再复用死 token）", async () => {
+  const calls = stubFetch(() => ({ ok: true, status: 201, body: { identity_id: 9, token: "tok-fresh", created: true } }));
+  stubStorage({ [IDENTITY_KEY]: "tok-dead" });
+  const token = await ensureIdentityToken();
+  assert.equal(token, "tok-fresh", "死 token 必须被换成新身份");
+  assert.equal(readIdentityToken(), "tok-fresh");
+  assert.ok(calls.length >= 1);
+});
+
+test("ensureIdentityToken：本地 token 有效时直接复用（不额外发请求）", async () => {
+  stubStorage({ [IDENTITY_KEY]: "tok-good" });
+  const calls = stubFetch(() => ({ ok: true, status: 200, body: { identity_id: 3, token: "", created: false } }));
+  const token = await ensureIdentityToken();
+  assert.equal(token, "tok-good");
+  assert.equal(readIdentityToken(), "tok-good");
+  // 会探一次身份（这正是新增的验证），但**不会**新建身份
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/v1/agent/identity");
+});
+
+test("ensureIdentityToken：探活请求**抛异常**时保留原 token（不能因网络故障把好 token 丢掉）", async () => {
+  stubStorage({ [IDENTITY_KEY]: "tok-good" });
+  // 真正的网络故障：fetch 直接 reject（不是 HTTP 5xx —— 那是服务端明确说「不认」）
+  (globalThis as unknown as { fetch: unknown }).fetch = async () => {
+    throw new Error("network down");
+  };
+  const token = await ensureIdentityToken();
+  assert.equal(token, "tok-good", "网络故障不得判定 token 失效");
+  assert.equal(readIdentityToken(), "tok-good");
+});
+
+test("ensureIdentityToken：服务端明确报错（5xx）时**不**复用本地 token", async () => {
+  // 5xx = 服务端说「我处理不了」⇒ 保守起见当作不可用，但**不删**本地 token
+  // （下次还能重试；删了等于把唯一凭据丢在网络抖动上）。
+  stubStorage({ [IDENTITY_KEY]: "tok-good" });
+  stubFetch(() => ({ ok: false, status: 500, body: { detail: "boom" } }));
+  const token = await ensureIdentityToken();
+  assert.equal(token, null, "服务端 5xx 时不得当作「token 有效」");
 });
 
 test("deletePreference：发 DELETE 到那条记忆，且带 token", async () => {

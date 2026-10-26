@@ -35,7 +35,10 @@ const compat = new FlatCompat({
 
 const config = [
   {
-    ignores: [".next/**", "node_modules/**", "out/**", "next-env.d.ts"],
+    // `mutate_*.mjs`：**变异验证脚本**（本地工具，仓库里已有同类约定——
+    // 后端的 `tools/` 下多份 `eval_*`/`verify_*` 脚本都不参与产品 lint）。
+    // 它按设计要 `console.log` 报告每个变异点是否被抓到 ⇒ no-console 不适用。
+    ignores: [".next/**", "node_modules/**", "out/**", "next-env.d.ts", "**/mutate_*.mjs"],
   },
   // next/core-web-vitals 自带 @next/next/* 与 react-hooks 插件，
   // 正是仓库既有 6 处抑制注释所针对的规则集。
