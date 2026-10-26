@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """pre-push 提交批门禁 —— 防「并行会话提交串台」事故复发。
 
 背景（2026-09-16 实测事故）：两个会话并行开发不同功能，共用 .tools/commit-msg.txt 写
@@ -88,6 +88,16 @@ SCOPE_PATHS: dict[str, list[str]] = {
     "recommendation": [
         "backend/app/agent/tools.py",
         "backend/tests/test_recommendation",
+    ],
+    # 2026-10-27：评分 v2（七维、全部同价位锚点）是跨切面功能——内核在
+    # backend/app/agent/、API 在 backend/app/recommendation/、锚点生成器在
+    # backend/tools/。复用 agent/recommendation/tools 三个宽 scope 会顺带授权
+    # 大量无关改动，故单列**窄** scope；tests/docs/README 走中性路径。
+    "scoring-v2": [
+        "backend/app/agent/",
+        "backend/app/recommendation/",
+        "backend/tools/gen_scoring_anchors.py",
+        "backend/app/agent/scoring_anchors_v2.json",
     ],
     "search": ["web/app/components/", "web/app/page.tsx", "backend/app/retrieval/"],
     "home": ["web/app/page.tsx", "web/app/components/", "web/app/layout.tsx"],
