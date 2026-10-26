@@ -25,11 +25,20 @@ def recommend(
     payload: RecommendationIn,
     db: Session = Depends(get_session),
 ) -> RecommendationOut:
-    """确定性推荐（硬约束 + 8 维软评分）；weights 可覆盖默认权重（§17.2）。"""
+    """确定性推荐（硬约束 + 软评分）；weights 可覆盖默认权重（§17.2）。
+
+    v1 = 八维车系级/布尔口径；v2 = 七维、全部按**同价位锚点**比较（AGENT_SCORING_MODE）。
+    两种口径都返回同一套字段，额外字段（scoring_version/anchor_version/coverage）
+    用于调用方区分与复算，默认值保证旧客户端不受影响。
+    """
     result = recommendation_tool(db, payload, limit=payload.limit)
     return RecommendationOut(
         **payload.model_dump(),
         count=result["count"],
         weights_used=result["weights_used"],
         variants=[RecommendedVariant(**v) for v in result["variants"]],
+        scoring_version=result.get("scoring_version", "scoring-v1"),
+        anchor_version=result.get("anchor_version"),
+        diversity_relaxed=int(result.get("diversity_relaxed") or 0),
+        usage_active=bool(result.get("usage_active")),
     )

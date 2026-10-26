@@ -6,19 +6,24 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
+import time
 from collections.abc import Sequence
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.agent import scoring_v2
 from app.agent.schemas import UserProfile
 from app.agent.weights import (
     DEFAULT_WEIGHTS,
     DIM_LABELS,
+    DIM_LABELS_V2,
     TRADEOFF_GAP,
+    V2_WEIGHT_KEY_ALIASES,
     WEIGHT_CEILING,
 )
 from app.catalog import services as catalog
@@ -315,6 +320,34 @@ _POWER_FACT_KEYS = ("power_kw", "电动机总功率(kW)", "发动机最大功率
 _COMFORT_CATEGORIES = ("舒适性", "内部配置", "外部配置", "安全配置", "操控配置")
 _INTELLIGENCE_CATEGORIES = ("智能驾驶", "智能座舱", "智能/辅助驾驶")
 
+# ── 评分 v2 事实查询范围（AGENT_SCORING_MODE=new 时才用）────────────────────
+# 只取七维真正会读的键与类目，避免把全库 74 万条事实都拉进内存。
+_V2_PARAM_FACT_KEYS = (
+    "轴距(mm)",
+    "轴距",
+    "长*宽*高(mm)",
+    "长度(mm)",
+    "车长(mm)",
+    "宽度(mm)",
+    "后备厢容积(L)",
+    "后备厢容积",
+    "行李厢容积(L)",
+    "整备质量(kg)",
+    "整备质量",
+    "座位数(个)",
+    "座位数",
+    "座位数（个）",
+    "seats",
+)
+# 油耗/电耗/续航/功率在库内的 fact_key 带工况后缀（WLTC/NEDC/CLTC/最低荷电状态），
+# 无法穷举 ⇒ 用 LIKE 圈定后再交给 scoring_v2 的白名单/工况优先级解析。
+_V2_FACT_KEY_PATTERNS = ("%油耗%", "%耗电量%", "%续航%", "%功率%", "%马力%")
+_V2_CONFIG_CATEGORIES = (
+    scoring_v2.SAFETY_CATEGORY,
+    *scoring_v2.COMFORT_CATEGORIES_V2,
+    *scoring_v2.INTELLIGENCE_CATEGORIES_V2,
+)
+
 #: 配置表里表示「标配」的**标记字符**（汽车之家配置表的约定）。
 #:
 #: 2026-10-24 生产实测的取值分布（配置类事实共约 39 万条）：
@@ -396,6 +429,7 @@ def _tradeoff_gaps(
     dims: dict[str, float],
     measured: set[str],
     best_by_dim: dict[str, float],
+    labels: dict[str, str] | None = None,
 ) -> list[str]:
     """该候选相对**本批最优**让出了什么（纯计算，不调 LLM、不引入任何外部事实）。
 
@@ -404,7 +438,7 @@ def _tradeoff_gaps(
     - 落后不足 _TRADEOFF_GAP 的是噪声，报出来只会稀释真正的取舍。
     """
     gaps: list[str] = []
-    for dim, label in _DIM_LABELS.items():
+    for dim, label in (labels or _DIM_LABELS).items():
         if dim not in measured or dim not in best_by_dim:
             continue
         if best_by_dim[dim] - dims[dim] >= _TRADEOFF_GAP:
@@ -433,7 +467,71 @@ _CANDIDATE_SCAN_WARN = 500
 # 故不在 tools 侧做叠加。
 
 
-def recommendation_tool(
+def _hard_constraint_stmt(profile: UserProfile):
+    """v1/v2 共用的硬约束 SQL（候选集必须逐位等价）。
+
+    v2 只替换“怎么打分”，不改变“哪些款型能进候选集”。两版共用这一份 SQL，
+    并用候选集等价测试钉住；避免两套硬约束各改一半造成静默不一致。
+
+    约束顺序与来源：
+    - 在售 / 会话锁定车系 / 品牌白名单 / 品牌排除 / 车身 / 能源偏好与排除：
+      全部下推 SQL。能源泛化（new_energy/fuel）的唯一实现在 app/common/enums.py，
+      不在这里复制规则。
+    - 当前生效指导价（official_msrp + effective_to IS NULL）+ 预算区间；
+    - 用户明确拒绝过的款型（会话内，拒绝后不再推）；
+    - 座位数：⚠️ `IS NULL` 这一支不能省。缺座位数据的款型必须保留（缺数据 ≠
+      不满足）；写成 `seat_count >= N` 会在一次查询里丢掉 85% 未回填候选，
+      且没有任何报错。实测本地快照 6629 款型里只有 1007 个有座位事实。
+    """
+    stmt = select(VehicleVariant).where(VehicleVariant.status == "on_sale")
+    # 会话锁定的车系（用户点名过、尚未解锁）
+    if profile.locked_series_ids:
+        stmt = stmt.where(VehicleVariant.series_id.in_(profile.locked_series_ids))
+    if profile.brand_ids:
+        stmt = stmt.where(
+            VehicleVariant.series_id.in_(
+                select(VehicleSeries.id).where(VehicleSeries.brand_id.in_(profile.brand_ids))
+            )
+        )
+    if profile.brand_exclude_ids:
+        stmt = stmt.where(
+            ~VehicleVariant.series_id.in_(
+                select(VehicleSeries.id).where(VehicleSeries.brand_id.in_(profile.brand_exclude_ids))
+            )
+        )
+    if profile.body_type:
+        stmt = stmt.where(VehicleVariant.body_type.in_(profile.body_type))
+    allowed = expand_energy_prefs(profile.energy_preference)
+    if allowed:
+        stmt = stmt.where(VehicleVariant.energy_type.in_(sorted(allowed)))
+    energy_avoid, body_avoid = expand_avoid(profile.avoid)
+    if energy_avoid:
+        stmt = stmt.where(~VehicleVariant.energy_type.in_(sorted(energy_avoid)))
+    if body_avoid:
+        stmt = stmt.where(~VehicleVariant.body_type.in_(sorted(body_avoid)))
+    price_cond = [
+        OfficialPrice.effective_to.is_(None),
+        OfficialPrice.price_type == "official_msrp",
+    ]
+    if profile.budget.min is not None:
+        price_cond.append(OfficialPrice.price_cny >= profile.budget.min)
+    if profile.budget.max is not None:
+        price_cond.append(OfficialPrice.price_cny <= profile.budget.max)
+    stmt = stmt.where(VehicleVariant.id.in_(select(OfficialPrice.variant_id).where(*price_cond)))
+    if profile.rejected_variant_ids:
+        stmt = stmt.where(~VehicleVariant.id.in_(profile.rejected_variant_ids))
+    # 缺座位数的款型保留（缺数据 ≠ 不满足）。
+    if profile.passengers is not None:
+        stmt = stmt.where(
+            or_(
+                VehicleVariant.seat_count.is_(None),
+                VehicleVariant.seat_count >= profile.passengers,
+            )
+        )
+    return stmt
+
+
+def _recommendation_v1(
     db: Session,
     profile: UserProfile,
     limit: int = 5,
@@ -441,7 +539,7 @@ def recommendation_tool(
     include_dims: bool = False,
     exclude_series_ids: Sequence[int] = (),
 ) -> dict:
-    """确定性推荐：PostgreSQL 硬条件筛选 + 软评分。
+    """确定性推荐（v1 八维内核）：PostgreSQL 硬条件筛选 + 软评分。
 
     事实全部来自数据库；评分维度无数据时不计分，禁止猜测。
     硬约束（在售/锁定车系/车身/能源/价格区间）全部下推 SQL（评审 P1：
@@ -465,76 +563,9 @@ def recommendation_tool(
     weights = {**DEFAULT_WEIGHTS, **{k: float(v) for k, v in (profile.weights or {}).items() if v is not None}}
 
     # ── 第一层：硬约束下推 SQL ────────────────────────────────────────────
-    stmt = select(VehicleVariant).where(VehicleVariant.status == "on_sale")
-    # 会话锁定的车系（用户点名过、尚未解锁）
-    if profile.locked_series_ids:
-        stmt = stmt.where(VehicleVariant.series_id.in_(profile.locked_series_ids))
-    # 品牌硬约束（「只要奔驰」）：必须下推 SQL——此前画像没有品牌字段，用户声明的品牌
-    # 在推荐里完全失效，会推出其他品牌（2026-09 用户实测缺陷）
-    if profile.brand_ids:
-        stmt = stmt.where(
-            VehicleVariant.series_id.in_(
-                select(VehicleSeries.id).where(VehicleSeries.brand_id.in_(profile.brand_ids))
-            )
-        )
-    if profile.brand_exclude_ids:
-        stmt = stmt.where(
-            ~VehicleVariant.series_id.in_(
-                select(VehicleSeries.id).where(VehicleSeries.brand_id.in_(profile.brand_exclude_ids))
-            )
-        )
-    # 车身类型偏好
-    if profile.body_type:
-        stmt = stmt.where(VehicleVariant.body_type.in_(profile.body_type))
-    # 能源偏好（new_energy/fuel 泛化）与排除偏好：泛化规则唯一实现在
-    # app/common/enums.py（2026-10-02 从本文件与 engine.py 收敛而来）。
-    # 此前此处逐字复制了一份——而这是**推荐口径**，两份实现长期可能漂移。
-    allowed = expand_energy_prefs(profile.energy_preference)
-    if allowed:
-        stmt = stmt.where(VehicleVariant.energy_type.in_(sorted(allowed)))
-    energy_avoid, body_avoid = expand_avoid(profile.avoid)
-    if energy_avoid:
-        stmt = stmt.where(~VehicleVariant.energy_type.in_(sorted(energy_avoid)))
-    if body_avoid:
-        stmt = stmt.where(~VehicleVariant.body_type.in_(sorted(body_avoid)))
-    # 当前生效指导价存在 + 预算区间
-    price_cond = [
-        OfficialPrice.effective_to.is_(None),
-        OfficialPrice.price_type == "official_msrp",
-    ]
-    if profile.budget.min is not None:
-        price_cond.append(OfficialPrice.price_cny >= profile.budget.min)
-    if profile.budget.max is not None:
-        price_cond.append(OfficialPrice.price_cny <= profile.budget.max)
-    stmt = stmt.where(VehicleVariant.id.in_(select(OfficialPrice.variant_id).where(*price_cond)))
-
-    # 用户**明确拒绝过**的款型（会话内，2026-10-21）：硬过滤下推——
-    # 「不喜欢这台」之后这台不该再出现在候选里（计划「拒绝后不再推」）。
-    # 只在**会话内**生效；跨会话要靠反馈表 + 影子调参（Phase 2 的另一半）。
-    if profile.rejected_variant_ids:
-        stmt = stmt.where(~VehicleVariant.id.in_(profile.rejected_variant_ids))
-
-    # ── 座位数下推（H2-A，2026-10-03）────────────────────────────────────
-    # 此前「≥N 座」只能在 Python 侧判：读 spec_facts 里的座位数事实，而事实必须
-    # 先把款型物化出来才读得到——**结构性的循环依赖**，所以 `candidates_scanned`
-    # 收不下来（实测与 `count` 的差 p50 = 0，即全表早已物化完）。
-    #
-    # 现在座位数已物化成 `vehicle_variants.seat_count`（回填见 tools/backfill_seat_count.py），
-    # 可以像 brand/body/energy/price 一样下推。
-    #
-    # ⚠️ **`IS NULL` 这一支不能省**。物化前的判定是
-    #     `seats is not None and seats < profile.passengers` 才过滤，
-    #     即**库里没有座位数事实的款型是被保留的**（缺数据 ≠ 不满足）。
-    # 写成 `seat_count >= N` 会把所有未回填的款型悄悄丢掉——推荐结果静默改变，
-    # 且没有任何东西会报错。实测本地快照库 6629 款型里只有 1007 个有座位事实
-    # （15%），漏掉 IS NULL 就会一次丢掉 85% 的候选。
-    if profile.passengers is not None:
-        stmt = stmt.where(
-            or_(
-                VehicleVariant.seat_count.is_(None),
-                VehicleVariant.seat_count >= profile.passengers,
-            )
-        )
+    # v1/v2 共用同一份实现（2026-10-27）：候选集只由硬约束决定，评分内核不能改变
+    # “哪些款型能进候选集”。各条约束的取舍理由见 _hard_constraint_stmt 的注释。
+    stmt = _hard_constraint_stmt(profile)
 
     # ── 候选集规模（2026-10-02 P5.1）────────────────────────────────────
     # 这条 stmt **故意不加 LIMIT**：排名由下方 8 维软评分决定，而评分需要全量事实，
@@ -949,6 +980,345 @@ def recommendation_tool(
         "weights_used": weights,
         "seat_check": seat_check,
     }
+
+
+# ── 评分 v2（AGENT_SCORING_MODE=new）────────────────────────────────────────
+def _v2_user_dims(profile: UserProfile) -> set[str]:
+    """用户明确提过、且 v2 真的会测量的维度（兼容 v1 的 energy 键）。"""
+    dims: set[str] = set()
+    for key in (profile.weights or {}):
+        mapped = V2_WEIGHT_KEY_ALIASES.get(str(key), str(key))
+        if mapped in DIM_LABELS_V2:
+            dims.add(mapped)
+    return dims
+
+
+def _v2_matched(
+    profile: UserProfile,
+    result: dict,
+    seats: float | None,
+    weights: dict[str, float],
+) -> list[str]:
+    """v2 的“这台自身达标项”。只写有库内数据、且明显优于同价位中位的维度。"""
+    utilities = result.get("utilities") or {}
+    measured = result.get("measured") or {}
+    candidates = (
+        ("safety", "安全配置优于同价位中位"),
+        ("running_cost", "用车成本低于同价位中位（按官方参数估算）"),
+        ("space", "空间优于同价位中位"),
+        ("power", "动力优于同价位中位"),
+        ("usage", "用途匹配"),
+        ("comfort", "舒适配置优于同价位中位"),
+        ("intelligence", "智能配置优于同价位中位"),
+    )
+    hits: list[tuple[float, str]] = [
+        (float(weights.get(dim, 0.0)), label)
+        for dim, label in candidates
+        if measured.get(dim) and float(utilities.get(dim, 0.0)) >= 0.6
+    ]
+    hits.sort(key=lambda pair: (-pair[0], pair[1]))
+    matched = [label for _weight, label in hits[:4]]
+    if profile.passengers is not None and seats is not None and seats >= profile.passengers:
+        matched.append(f"座位满足（≥{profile.passengers} 座）")
+    return matched
+
+
+def _recommendation_v2(
+    db: Session,
+    profile: UserProfile,
+    limit: int = 5,
+    *,
+    include_dims: bool = False,
+    exclude_series_ids: Sequence[int] = (),
+) -> dict:
+    """确定性推荐（v2 七维内核，全部维度按同价位锚点比较）。
+
+    与 v1 的差异只在“怎么打分”：
+    - 候选集 SQL 与 v1 共用 _hard_constraint_stmt，逐位等价；
+    - 七维：safety/running_cost/space/power/comfort/intelligence/usage；
+    - 锚点来自 scoring_anchors_v2.json 的价格带分位，与候选池无关；
+    - 缺数据给 0.5 中性并算 coverage，不把“没数据”当“更差”；
+    - 排序 U→coverage→销量→variant_id，再按同车系≤2 做多样性收敛。
+    """
+    anchors = scoring_v2.load_anchors()
+    usage_active = scoring_v2.usage_active_for(profile)
+    weights = scoring_v2.effective_weights(profile.weights, usage_active=usage_active)
+
+    stmt = _hard_constraint_stmt(profile)
+    candidates_scanned = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    if candidates_scanned > _CANDIDATE_SCAN_WARN:
+        logging.getLogger("app.agent.recommendation").info(
+            json.dumps(
+                {
+                    "scoring_version": "scoring-v2",
+                    "candidates_scanned": candidates_scanned,
+                    "limit": limit,
+                    "note": "无预算/品牌/锁定约束时退化为全库扫描；加 LIMIT 会改变推荐结果",
+                },
+                ensure_ascii=False,
+            )
+        )
+    if exclude_series_ids:
+        stmt = stmt.where(~VehicleVariant.series_id.in_(list(exclude_series_ids)))
+    variants = db.scalars(stmt).all()
+    variant_ids = [v.id for v in variants]
+
+    prices = {
+        p.variant_id: float(p.price_cny)
+        for p in db.scalars(
+            select(OfficialPrice).where(
+                OfficialPrice.variant_id.in_(variant_ids),
+                OfficialPrice.effective_to.is_(None),
+                OfficialPrice.price_type == "official_msrp",
+            )
+        ).all()
+    } if variant_ids else {}
+
+    fact_rows = (
+        db.scalars(
+            select(SpecFact).where(
+                SpecFact.variant_id.in_(variant_ids),
+                or_(
+                    SpecFact.fact_key.in_(list(_V2_PARAM_FACT_KEYS)),
+                    *[SpecFact.fact_key.like(pattern) for pattern in _V2_FACT_KEY_PATTERNS],
+                    SpecFact.category.in_(list(_V2_CONFIG_CATEGORIES)),
+                ),
+            )
+        ).all()
+        if variant_ids
+        else []
+    )
+    facts_by_variant: dict[int, list[dict]] = {}
+    for f in fact_rows:
+        facts_by_variant.setdefault(f.variant_id, []).append(
+            {"category": f.category, "fact_key": f.fact_key, "value": f.fact_value,
+             "unit": f.unit, "cycle": f.cycle, "source_id": f.source_id}
+        )
+
+    series_map = {
+        s.id: s
+        for s in db.scalars(
+            select(VehicleSeries).where(VehicleSeries.id.in_({v.series_id for v in variants}))
+        ).all()
+    }
+    brand_map = {
+        b.id: b
+        for b in db.scalars(
+            select(Brand).where(Brand.id.in_({s.brand_id for s in series_map.values()}))
+        ).all()
+    }
+    _, sales_by_series = _latest_sales_by_series(db, {int(v.series_id) for v in variants})
+
+    scored: list[tuple[float, dict]] = []
+    for variant in variants:
+        series = series_map.get(variant.series_id)
+        if series is None:
+            continue
+        brand = brand_map.get(series.brand_id)
+        fact_list = facts_by_variant.get(variant.id, [])
+        facts = {(f["category"], f["fact_key"]): f for f in fact_list}
+
+        price = prices.get(variant.id)
+        if price is None:
+            continue
+        if profile.locked_series_ids and variant.series_id not in profile.locked_series_ids:
+            continue
+        if profile.budget.min is not None and price < profile.budget.min:
+            continue
+        if profile.budget.max is not None and price > profile.budget.max:
+            continue
+        if profile.body_type and variant.body_type not in profile.body_type:
+            continue
+        if profile.energy_preference:
+            allowed = expand_energy_prefs(profile.energy_preference)
+            if allowed and variant.energy_type not in allowed:
+                continue
+        if profile.avoid:
+            energy_avoid, body_avoid = expand_avoid(profile.avoid)
+            if variant.energy_type in energy_avoid:
+                continue
+            if variant.body_type and variant.body_type in body_avoid:
+                continue
+        if profile.rejected_variant_ids and variant.id in profile.rejected_variant_ids:
+            continue
+        if exclude_series_ids and variant.series_id in exclude_series_ids:
+            continue
+        seats = _extract_seats(facts)
+        if profile.passengers is not None and seats is not None and seats < profile.passengers:
+            continue
+
+        features = scoring_v2.extract_features(variant, fact_list, price)
+        result = scoring_v2.evaluate(features, profile, anchors)
+        score = round(float(result["score"]), 4)
+        item = {
+            "variant_id": variant.id,
+            "series_id": variant.series_id,
+            "series_name": series.name,
+            "brand_name": brand.name if brand else None,
+            "display_name": variant.display_name,
+            "energy_type": variant.energy_type,
+            "price_cny": price,
+            "score": score,
+            "matched": _v2_matched(profile, result, seats, weights),
+            "tradeoffs": [],
+            "seat_verified": profile.passengers is None or seats is not None,
+            "coverage": round(float(result["coverage"]), 4),
+            "low_evidence": bool(result["low_evidence"]),
+            "source_id": variant.source_id,
+            "_dims": dict(result["utilities"]),
+            "_measured": set(result["measured"]),
+            "_parts": dict(result["parts"]),
+        }
+        scored.append((score, item))
+
+    if _profile_has_no_soft_info(profile):
+        for _score, item in scored:
+            count = sales_by_series.get(int(item["series_id"]))
+            if count is not None:
+                item["sales_count"] = count
+        scored.sort(
+            key=lambda row: (
+                -int(row[1].get("sales_count") or 0),
+                -round(float(row[0]), 6),
+                -float(row[1].get("coverage") or 0.0),
+                int(row[1]["variant_id"]),
+            )
+        )
+    else:
+        scored = scoring_v2.sort_rows(scored, sales_by_series)
+
+    user_dims = _v2_user_dims(profile) & set(weights)
+    best_by_dim: dict[str, float] = {}
+    if user_dims:
+        for _score, item in scored:
+            for dim in item["_measured"]:
+                if dim in user_dims:
+                    best_by_dim[dim] = max(best_by_dim.get(dim, 0.0), item["_dims"][dim])
+    for _score, item in scored:
+        item["tradeoffs"] = _tradeoff_gaps(
+            item["_dims"], item["_measured"], best_by_dim, DIM_LABELS_V2
+        )
+
+    selected, diversity_relaxed = scoring_v2.diversify(scored, limit)
+    top = selected
+
+    for _score, item in scored:
+        if include_dims:
+            item["score_parts"] = item.pop("_parts")
+        else:
+            item.pop("_dims", None)
+            item.pop("_measured", None)
+            item.pop("_parts", None)
+
+    seat_check = None
+    if profile.passengers is not None:
+        unverified = sum(1 for _score, item in top if not item["seat_verified"])
+        if unverified > 0:
+            seat_check = {
+                "required": profile.passengers,
+                "verified": len(top) - unverified,
+                "unverified": unverified,
+                "total": len(top),
+            }
+
+    return {
+        "count": len(scored),
+        "candidates_scanned": candidates_scanned,
+        "variants": [item for _score, item in top],
+        "weights_used": weights,
+        "seat_check": seat_check,
+        "scoring_version": "scoring-v2",
+        "anchor_version": scoring_v2.anchor_version(anchors),
+        "diversity_relaxed": diversity_relaxed,
+        "usage_active": usage_active,
+    }
+
+
+def _log_scoring_shadow(
+    v1: dict,
+    v2: dict,
+    profile: UserProfile,
+    elapsed_ms: float,
+) -> None:
+    """shadow 档：只记录 v1/v2 的差异，不改变返回给用户的 v1 结果。"""
+    try:
+        v1_variants = {int(v["variant_id"]): v for v in v1.get("variants") or []}
+        v2_variants = {int(v["variant_id"]): v for v in v2.get("variants") or []}
+        common = set(v1_variants) & set(v2_variants)
+        top_overlap = len(common) / max(len(v1_variants), len(v2_variants), 1)
+        deltas = [
+            abs(float(v1_variants[vid]["score"]) - float(v2_variants[vid]["score"]))
+            for vid in common
+        ]
+        payload = {
+            "scoring_version": "scoring-v2",
+            "profile_hash": hashlib.sha256(
+                profile.model_dump_json().encode("utf-8")
+            ).hexdigest()[:12],
+            "v1_top5": list(v1_variants),
+            "v2_top5": list(v2_variants),
+            "overlap": round(top_overlap, 3),
+            "mean_abs_score_delta": round(sum(deltas) / len(deltas), 4) if deltas else None,
+            "v1_count": v1.get("count"),
+            "v2_count": v2.get("count"),
+            "v2_mean_coverage": (
+                round(
+                    sum(float(item.get("coverage") or 0.0) for item in v2.get("variants") or [])
+                    / max(len(v2.get("variants") or []), 1),
+                    4,
+                )
+            ),
+            "v2_low_evidence_rate": (
+                round(
+                    sum(1 for item in v2.get("variants") or [] if item.get("low_evidence"))
+                    / max(len(v2.get("variants") or []), 1),
+                    4,
+                )
+            ),
+            "latency_ms": round(elapsed_ms, 1),
+        }
+        logging.getLogger("app.agent.recommendation").info(
+            "scoring_shadow " + json.dumps(payload, ensure_ascii=False)
+        )
+    except Exception:  # noqa: BLE001 - 影子日志绝不能影响主链
+        logging.getLogger("app.agent.recommendation").warning(
+            "scoring shadow log failed", exc_info=True
+        )
+
+
+def recommendation_tool(
+    db: Session,
+    profile: UserProfile,
+    limit: int = 5,
+    *,
+    include_dims: bool = False,
+    exclude_series_ids: Sequence[int] = (),
+) -> dict:
+    """推荐入口：按 AGENT_SCORING_MODE 分派 v1 / v2。
+
+    - off（默认）：逐位沿用 v1 八维内核；
+    - new：返回 v2 七维结果；
+    - shadow：先算 v1、再算 v2 并记录差异日志，返回 v1。
+    开关只影响“怎么打分”，硬约束候选集两版共用同一份 SQL。
+    """
+    mode = scoring_v2.scoring_mode()
+    if mode == "new":
+        return _recommendation_v2(
+            db, profile, limit, include_dims=include_dims, exclude_series_ids=exclude_series_ids
+        )
+    if mode == "shadow":
+        started = time.perf_counter()
+        v1 = _recommendation_v1(
+            db, profile, limit, include_dims=include_dims, exclude_series_ids=exclude_series_ids
+        )
+        v2 = _recommendation_v2(
+            db, profile, limit, include_dims=include_dims, exclude_series_ids=exclude_series_ids
+        )
+        _log_scoring_shadow(v1, v2, profile, (time.perf_counter() - started) * 1000.0)
+        return v1
+    return _recommendation_v1(
+        db, profile, limit, include_dims=include_dims, exclude_series_ids=exclude_series_ids
+    )
 
 
 # ── 工具 7：citation_verifier ─────────────────────────────────────────────────

@@ -93,11 +93,22 @@ def test_sanitize_rejects_value_outside_enum():
     assert out == {}, f"越界值不该被采纳，实际：{out}"
 
 
-def test_sanitize_drops_fields_the_kernel_cannot_compute():
-    """safety/操控 不在 DEFAULT_WEIGHTS 里 → 拒绝。安全不是能变成排序依据的东西。"""
+def test_sanitize_safety_is_rejected_in_v1_and_accepted_in_v2(monkeypatch):
+    """v1 没有能计算 safety 的维度 → 拒绝；v2 有安全的配置维 → 采纳。
+
+    同一条模型输出在两种口径下语义不同，所以测试必须显式切换模式，
+    不能把「v1 拒绝」写成永远成立的契约。
+    """
     msg = "我最看重安全"
-    out = sp.sanitize({"priority_order": [{"value": "safety", "evidence": "我最看重安全"}]}, msg)
-    assert out == {}
+    payload = {"priority_order": [{"value": "safety", "evidence": "我最看重安全"}]}
+
+    monkeypatch.delenv("AGENT_SCORING_MODE", raising=False)
+    assert sp.sanitize(payload, msg) == {}, "v1 八维没有 safety 维，必须拒绝"
+
+    monkeypatch.setenv("AGENT_SCORING_MODE", "new")
+    out = sp.sanitize(payload, msg)
+    assert out.get("priority_order"), f"v2 应采纳 safety，实际：{out}"
+    assert out["priority_order"] == ["safety"]
 
 
 # ── 防线 2：evidence 必须是用户原话的逐字子串 ────────────────────────────────

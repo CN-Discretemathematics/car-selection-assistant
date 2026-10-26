@@ -55,7 +55,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from app.agent import soft_prefs, soft_probe
+from app.agent import scoring_v2, soft_prefs, soft_probe
 from app.agent.feedback import load_rejected_variant_ids
 from app.agent.preferences import (
     effective_brand_exclusions,
@@ -75,8 +75,10 @@ from app.agent.series_qa import NEGATION_RE, negates_series
 from app.agent.session import SessionStore
 from app.agent.weights import (
     DEFAULT_WEIGHTS,
+    DEFAULT_WEIGHTS_V2,
     USAGE_HINTS,
     WEIGHT_DIM_KEYWORDS,
+    WEIGHT_DIM_KEYWORDS_V2,
     WEIGHT_RAISE,
 )
 from app.catalog.brands import resolve_brand_mentions
@@ -317,10 +319,19 @@ def extract_hints(message: str) -> dict:
     # 例：「空间优先，动力也要强」→ weights={space:0.30, power:0.30}
     # （默认值 0.10 + 增量 0.2；发绝对值的原因见 WEIGHT_RAISE 处的注释）
     if _EMPHASIS_RE.search(message):
-        dims = sorted({dim for kw, dim in WEIGHT_DIM_KEYWORDS if kw in message})
+        # 评分为 v2 时换用 v2 词表与 v2 基础权重：safety/running_cost 在 v1 里没有
+        # 维度可映射（安全是刻意不映射的），如果仍用 v1 表，「最看重安全」会被静默丢弃。
+        # shadow 档返回给用户的仍是 v1，所以只有 new 档才切词表。
+        if scoring_v2.uses_v2():
+            keyword_pairs = WEIGHT_DIM_KEYWORDS_V2
+            base_weights = DEFAULT_WEIGHTS_V2
+        else:
+            keyword_pairs = WEIGHT_DIM_KEYWORDS
+            base_weights = DEFAULT_WEIGHTS
+        dims = sorted({dim for kw, dim in keyword_pairs if kw in message})
         if dims:
             hints["weights"] = {
-                dim: round(DEFAULT_WEIGHTS.get(dim, 0.0) + WEIGHT_RAISE, 3) for dim in dims
+                dim: round(base_weights.get(dim, 0.0) + WEIGHT_RAISE, 3) for dim in dims
             }
 
     return hints

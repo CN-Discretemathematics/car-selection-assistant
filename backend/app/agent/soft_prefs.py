@@ -180,8 +180,15 @@ import os
 import re
 from typing import Any
 
+from app.agent import scoring_v2
 from app.agent.profile import merge_profile
-from app.agent.weights import DEFAULT_WEIGHTS, USAGE_HINTS, WEIGHT_RAISE
+from app.agent.weights import (
+    DEFAULT_WEIGHTS,
+    DEFAULT_WEIGHTS_V2,
+    SCORING_V2_DIM_KEYS,
+    USAGE_HINTS,
+    WEIGHT_RAISE,
+)
 
 _logger = logging.getLogger("app.agent.soft_prefs")
 
@@ -193,7 +200,10 @@ _logger = logging.getLogger("app.agent.soft_prefs")
 # 不递增的话，新旧记录**同版本号却缺字段**，`soft_prefs_report` 的跨版本切分形同虚设，
 # 旧记录会以「`illegal` 为空 = 没越界」的身份混进分母——那正是本仓反复强调要避免的
 # 「构造性的 0」。
-SOFT_PREF_VERSION = "soft-pref-v2"
+# v2 → v3（2026-10-27）：AGENT_SCORING_MODE=new 时 priority_order 的封闭词表从 v1
+# 八维换成 v2 七维（新增 safety/running_cost，去掉 budget/maintenance），
+# 同一版本号下混存两种词表会让跨版本切分失效，必须递增。
+SOFT_PREF_VERSION = "soft-pref-v3"
 
 MODE_ENV = "AGENT_SOFT_PREF_MODE"
 TIMEOUT_ENV = "AGENT_SOFT_PREF_TIMEOUT_MS"
@@ -269,7 +279,14 @@ def pain_point_values() -> list[str]:
 
 
 def dimension_keys() -> list[str]:
-    """8 个**真被测量**的评分维度（= DEFAULT_WEIGHTS 的键）。"""
+    """当前评分口径下**真被测量**的维度键。
+
+    v1（默认）：DEFAULT_WEIGHTS 的 8 个键；
+    v2（AGENT_SCORING_MODE=new）：七维，safety/running_cost 是新增的可测量维度。
+    shadow 档仍返回 v1——它对外仍是 v1 结果，提示词不能先切成 v2 口径。
+    """
+    if scoring_v2.uses_v2():
+        return list(SCORING_V2_DIM_KEYS)
     return sorted(DEFAULT_WEIGHTS)
 
 
@@ -302,6 +319,18 @@ def get_timeout_ms() -> int:
 
 # ── 提示词：词表全部从上面几个函数动态生成，不写死第二份 ─────────────────────
 def _system_prompt() -> str:
+    if scoring_v2.uses_v2():
+        priority_hint = (
+            "  （这些是系统**真正能量化打分**的维度。safety 只表示「安全配置水平」："
+            "按同价位标配安全配置计数，**不承诺碰撞星级**；running_cost 是按官方油耗/电耗"
+            "估算的用车成本。操控、保值率、口碑等我们算不了，不要写进 priority_order）\n\n"
+        )
+    else:
+        priority_hint = (
+            "  （这些是系统**真正能量化打分**的维度。安全、操控、保值率等我们算不了，"
+            "不要写进 priority_order——「我最看重安全」无法变成排序依据，"
+            "写上去只会让用户以为系统听懂了他最在意的东西）\n\n"
+        )
     return (
         "你从购车者的自然语言里抽取「软偏好」，输出严格的 JSON。\n\n"
         "## 可用取值（只能逐字取这些，别的一律输出 null）\n"
@@ -309,9 +338,7 @@ def _system_prompt() -> str:
         f"household_size：{' / '.join(household_labels())}\n"
         f"pain_points：{' / '.join(pain_point_values())}\n"
         f"priority_order 的 value：{', '.join(dimension_keys())}\n"
-        "  （这些是系统**真正能量化打分**的维度。安全、操控、保值率等我们算不了，"
-        "不要写进 priority_order——「我最看重安全」无法变成排序依据，"
-        "写上去只会让用户以为系统听懂了他最在意的东西）\n\n"
+        f"{priority_hint}"
         "## 每个值都必须带 evidence\n"
         "evidence 必须是用户原话里**逐字出现**的片段（不能改写、不能翻译、不能编）。\n"
         "找不到逐字依据就填 null。**不要为了凑满字段而编造。**\n\n"
@@ -742,10 +769,13 @@ def to_hints(prefs: dict[str, Any] | None) -> dict[str, Any]:
     order = prefs.get("priority_order") or []
     if order:
         # 增量取自 weights.WEIGHT_RAISE（唯一一处）：正则路径调它、L1 也调它，
-        # 改一处即可，不会出现「同一句『空间优先』两条路径算出两个数」
+        # 改一处即可，不会出现「同一句『空间优先』两条路径算出两个数」。
+        # 基础权重按当前返回口径取：v2 的 safety/running_cost 在 v1 表里不存在，
+        # 若仍用 v1 表，L1 抽到的「最看重安全」会变成 0 + 0.2 的错值。
+        base_weights = DEFAULT_WEIGHTS_V2 if scoring_v2.uses_v2() else DEFAULT_WEIGHTS
         hints["weights"] = {
             dim: round(
-                DEFAULT_WEIGHTS.get(dim, 0.0)
+                base_weights.get(dim, 0.0)
                 + (WEIGHT_RAISE if rank == 0 else WEIGHT_RAISE / 2),
                 3,
             )

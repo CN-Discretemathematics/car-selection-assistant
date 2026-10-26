@@ -1,6 +1,7 @@
 """Agent 接口与推荐管线集成测试。"""
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -397,21 +398,28 @@ def test_usage_weight_keywords_are_measurable():
     assert hints["weights"] == {"usage": 0.35}  # 默认 0.15 + 增量 0.2（绝对权重语义）
 
 
-def test_safety_emphasis_is_deliberately_unmapped():
-    """「最看重安全」**不得**映射到任何维度——这是刻意的不作为，不是遗漏。
+def test_safety_emphasis_is_unmapped_in_v1_and_mapped_in_v2(monkeypatch):
+    """「最看重安全」：v1 不能映射（没有维度测安全），v2 必须映射到 safety。
 
-    8 个维度的公式里没有任何一个读安全类 fact_key，把安全映射到其中任何一个
-    都不会让排序更安全，只会让用户以为系统听懂了他最在意的东西。这条测试的
-    作用是拦下未来那个「顺手加个映射」的好意：那时它会变绿，从而把一次
-    **用行为冒充理解**的变更伪装成小修小补。
+    v1 的 8 个维度公式里没有任何一个读安全类 fact_key，把安全映射到其中任何一个
+    都不会让排序更安全，只会让用户以为系统听懂了他最在意的东西。v2 新增了真正
+    读安全配置事实的 safety 维（仅配置代理，不承诺碰撞星级），所以 v2 必须能
+    接住这句话——两种口径分别断言，避免把历史红线当成永久契约。
     """
     from app.agent.engine import extract_hints
 
+    monkeypatch.delenv("AGENT_SCORING_MODE", raising=False)
     for phrase in ("我最看重安全", "安全最重要", "碰撞成绩优先", "气囊越多越好"):
         hints = extract_hints(phrase)
-        assert "weights" not in hints, f"「{phrase}」不应产生任何权重线索（无维度测安全）"
+        assert "weights" not in hints, f"v1「{phrase}」不应产生权重线索（无维度测安全）"
         # 也不能被偷偷塞进硬约束或排除项——那同样是编造语义
         assert "avoid" not in hints
+
+    monkeypatch.setenv("AGENT_SCORING_MODE", "new")
+    hints = extract_hints("我最看重安全")
+    assert hints.get("weights", {}).get("safety") == pytest.approx(0.42), (
+        "v2 必须把安全强调映射到 safety（默认 0.22 + 强调增量 0.20）"
+    )
 
 
 def test_merge_profile_accumulates_weights():

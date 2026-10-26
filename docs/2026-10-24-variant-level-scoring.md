@@ -1,5 +1,9 @@
 # 同一车系的不同款型推荐分**逐位相同**：打分维度全是车系级或布尔的（2026-10-24）
 
+> **已被取代（2026-10-27）**：本文的批内归一化与 comfort 混入安全等做法已由
+> [评分 v2](2026-10-27-scoring-v2-design.md) / [ADR-0008](adr/0008-scoring-v2-seven-dimensions.md)
+> 取代；本文保留为历史根因记录。
+
 > 来源：生产**真实用户会话**（`agent_turn_logs`，2026-10-24 22:54，session `63301638…`）。
 > 分支：`fix/recommend-variant-level-scoring`
 

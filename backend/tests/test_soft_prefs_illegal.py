@@ -505,9 +505,9 @@ def test_shadow_record_carries_version_and_new_observability_fields(caplog):
         [r for r in caplog.records if sp.SHADOW_LOGGER in r.getMessage()][0].getMessage()
     )
     assert data["version"] == sp.SOFT_PREF_VERSION
-    assert sp.SOFT_PREF_VERSION == "soft-pref-v2", (
-        f"新增 illegal / status 字段后必须递增版本号，当前仍是 "
-        f"{sp.SOFT_PREF_VERSION}——旧记录会混进分母"
+    assert sp.SOFT_PREF_VERSION == "soft-pref-v3", (
+        f"priority_order 词表随评分 v2 切换（新增 safety/running_cost）后必须递增版本号，"
+        f"当前仍是 {sp.SOFT_PREF_VERSION}——旧记录会混进分母"
     )
     assert "illegal" in data and "status" in data
 

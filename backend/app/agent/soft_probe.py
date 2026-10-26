@@ -26,10 +26,17 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from app.agent import scoring_v2
 from app.agent.profile import merge_profile
 from app.agent.schemas import Clarification
-from app.agent.weights import DEFAULT_WEIGHTS, WEIGHT_RAISE
-from app.agent.weights import DIM_LABELS as _DIM_LABELS
+from app.agent.weights import (
+    DEFAULT_WEIGHTS,
+    DEFAULT_WEIGHTS_V2,
+    SCORING_VERSION_V1,
+    SCORING_VERSION_V2,
+    WEIGHT_RAISE,
+    dim_labels_for_mode,
+)
 
 # 追问顺序：按画像挑出**最可能有决定性**的维度。
 # 判定谓词只读已有画像字段，不新增信息源。
@@ -44,11 +51,29 @@ _PROBE_ORDER: tuple[tuple[str, Callable[[Any], bool]], ...] = (
 _PROBE_SIZE = 2
 
 
+def _dim_labels() -> dict[str, str]:
+    """当前返回给用户的评分口径对应的维度标签（shadow 档仍按 v1）。"""
+    mode = SCORING_VERSION_V2 if scoring_v2.uses_v2() else SCORING_VERSION_V1
+    return dim_labels_for_mode(mode)
+
+
+def _probe_order() -> tuple[tuple[str, Callable[[Any], bool]], ...]:
+    """v1 追问 space/energy/power；v2 的 energy 维不存在，对应追问用车成本。"""
+    if not scoring_v2.uses_v2():
+        return _PROBE_ORDER
+    return (
+        ("space", lambda p: (p.passengers or 0) >= 3 or "家庭" in (p.usage or [])),
+        ("running_cost", lambda p: "通勤" in (p.usage or []) or bool(p.energy_preference)),
+        ("power", lambda p: True),
+    )
+
+
 def _pick_dims(profile: Any) -> list[str]:
-    """按画像挑两个维度。只在**真被测量**的维度里选（`_DIM_LABELS` 的键）。"""
+    """按画像挑两个维度。只在**真被测量**的维度里选。"""
+    labels = _dim_labels()
     picked: list[str] = []
-    for dim, when in _PROBE_ORDER:
-        if dim in _DIM_LABELS and when(profile) and dim not in picked:
+    for dim, when in _probe_order():
+        if dim in labels and when(profile) and dim not in picked:
             picked.append(dim)
         if len(picked) >= _PROBE_SIZE:
             break
@@ -76,9 +101,10 @@ def probe_question(profile: Any) -> Clarification | None:
     dims = _pick_dims(profile)
     if len(dims) < _PROBE_SIZE:
         return None
+    labels = _dim_labels()
     return Clarification(
         question="你更看重哪一点？我按这个来排。",
-        options=[_DIM_LABELS[d] for d in dims],
+        options=[labels[d] for d in dims],
         missing=["emphasis"],
     )
 
@@ -97,13 +123,15 @@ def apply_probe_answer(profile: Any, message: str) -> bool:
     probed = list(getattr(profile, "probed_dims", None) or [])
     if not probed:
         return False
+    labels = _dim_labels()
+    base_weights = DEFAULT_WEIGHTS_V2 if scoring_v2.uses_v2() else DEFAULT_WEIGHTS
     low = (message or "").lower()
     for dim in probed:
-        label = _DIM_LABELS.get(dim, "")
+        label = labels.get(dim, "")
         if not label or label not in low:
             continue
         merge_profile(profile, {
-            "weights": {dim: round(float(DEFAULT_WEIGHTS.get(dim, 0.0)) + WEIGHT_RAISE, 3)}
+            "weights": {dim: round(float(base_weights.get(dim, 0.0)) + WEIGHT_RAISE, 3)}
         })
         return True
     return False

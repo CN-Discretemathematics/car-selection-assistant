@@ -231,6 +231,9 @@ D1.1 款型名上下文消歧 · D1.2 真缺口回补（口径修正）· D1.3 �
 1. **不引入 agentic RAG / HyDE**（ADR-0002，有实测数据反对）
 2. **不接第二个数据源**（ADR-0003，规模已对齐）
 3. **不改 `recommendation_tool` 的硬约束下推与 8 维打分**（方案 Out of Scope 2）
+   - **2026-10-27 用户决策豁免**：硬约束下推仍不改；8 维打分已由评分 v2（七维、全部同价位）
+     取代，见 [评分 v2 设计稿](2026-10-27-scoring-v2-design.md) 与
+     [ADR-0008](adr/0008-scoring-v2-seven-dimensions.md)。
 4. **不重构 `series_constraints.py` / `rag/service.py` / `answer_contract.py`**（已够深）
 5. **不把「全部款型停售」当缺口回补**（§3.1 修正一）
 6. **不承诺款型级实时**（ADR-0004，只承诺车系级天级）
