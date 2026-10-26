@@ -298,8 +298,57 @@ def _parse_number(value: str | None) -> float | None:
 _SEAT_FACT_KEYS = ("seats", "座位数", "座位数(个)", "座位数（个）")
 _LENGTH_FACT_KEYS = ("length_mm", "长*宽*高(mm)", "长度(mm)", "车长(mm)")
 _POWER_FACT_KEYS = ("power_kw", "电动机总功率(kW)", "发动机最大功率(kW)", "系统综合功率(kW)", "最大功率(kW)")
-_COMFORT_CATEGORIES = ("舒适性", "内部配置", "外部配置")
+# ── 配置类事实的类别归属（2026-10-24 生产实测后修正）────────────────────────
+#
+# ⚠️ 此前 `_COMFORT_CATEGORIES` = ("舒适性", "内部配置", "外部配置")，
+# **漏掉了「安全配置」**——而它是生产库里**第二大**的配置类事实
+# （10.5 万条，其中 8.7 万条是「●」标配），量级与「内部配置」（11.8 万）相当。
+#
+# ⇒ 漏掉它的直接后果：**安全配置差异完全不影响打分**。
+# 生产实测（逸动三个款型，同车系）：
+#   劲享型 8.79万：安全配置 ● 8 项
+#   悦享型 9.39万：安全配置 ● 10 项
+#   智享型 9.99万：安全配置 ● 13 项   ← 配置明显更多，却**分数完全相同**
+#
+# 「舒适性」这个键在生产数据里**根本不存在**（真实类别是「内部配置/外部配置/
+# 安全配置/智能辅助驾驶/操控配置/个性化」）⇒ 保留它只是为了兼容旧数据。
+_COMFORT_CATEGORIES = ("舒适性", "内部配置", "外部配置", "安全配置", "操控配置")
 _INTELLIGENCE_CATEGORIES = ("智能驾驶", "智能座舱", "智能/辅助驾驶")
+
+#: 配置表里表示「标配」的**标记字符**（汽车之家配置表的约定）。
+#:
+#: 2026-10-24 生产实测的取值分布（配置类事实共约 39 万条）：
+#:   '●' 34.3 万 · '前● / 后●' 2.1 万 · '主● / 副●' 1.1 万 · '前● / 后-' 0.7 万 …
+#:   '○' 1.2 万（选装）· '-' / '—'（没有）
+#:
+#: ⇒ 标配标记是**字符 '●'**，且常**嵌在复合取值里**（'前● / 后●'）⇒
+#:   不能用「值 == '●'」这种等值判断（那会漏掉 4 万多条标配项）。
+#:
+#: 判定：**值里含 '●' 即算有该标配**；含 '○'（选装）**不算**；
+#: 复合取值里 '●' 与 '-'/'○' 混排时（如 '前● / 后-'）**算有**——
+#: 至少有一部分是标配，比完全没有强。
+#:
+#: ⚠️ 选装（'○'）**不计入**：把选装算成标配等于谎称这台配置更好。
+_STANDARD_MARK = "●"
+
+
+def _count_standard_items(fact_list: list[dict], categories: tuple[str, ...]) -> int:
+    """该款型在给定类别下的**标配项数**。
+
+    判定「含标配标记 '●'」——见 `_STANDARD_MARK` 的说明（取值有多种形态，
+    含复合形态 '前● / 后●'，不能用等值判断）。
+
+    ⚠️ 这是**相对**指标：不同车系之间不可比（紧凑级天然配置项少），
+    所以只在**同批次内**做归一化，不做跨车系比较。
+    """
+    n = 0
+    for f in fact_list:
+        if f.get("category") not in categories:
+            continue
+        value = str(f.get("value") or "")
+        if _STANDARD_MARK in value:
+            n += 1
+    return n
 
 # 取舍叙事的维度名（与 matched 的中文风格一致，面向用户）
 #
@@ -702,14 +751,26 @@ def recommendation_tool(
             dims["power"] = min(max((power - 80) / (300 - 80), 0.0), 1.0)
             measured.add("power")
 
-        # 舒适性 / 智能化（存在对应类别事实即得分）
-        dims["comfort"] = 1.0 if any(k[0] in _COMFORT_CATEGORIES for k in facts) else 0.0
-        if dims["comfort"] == 1.0:
+        # 舒适性 / 智能化（**标配项数**，不是「有/无」）
+        #
+        # 2026-10-24 生产实测缺陷：此前是**布尔**（有该类事实即 1.0）⇒
+        # 同一车系的不同款型（配置不同）得分**逐位相同**：
+        #   逸动 劲享型 8.79万 / 悦享型 9.39万 / 智享型 9.99万
+        #   三款 score 全是 0.8816，8 个维度逐位一致 ⇒ 用户看到三张一样的分。
+        # 根因：功率/车长/能源是**车系级**的，comfort/intelligence 是**布尔**的
+        # ⇒ 同车系款型之间**没有任何一个维度能区分它们**。
+        #
+        # ⇒ 改为按**标配（●）项数**计分。绝对数跨车系不可比（紧凑级天然配置少），
+        # 所以先记**原始项数**，再在**同批次内**归一化（见下方 second pass）：
+        # 同一批里最多的那个 = 1.0，其余按比例。跨车系之间不因此可比——
+        # 那由「本批最优」口径的取舍叙事负责表达，不混进这个维度。
+        comfort_items = _count_standard_items(fact_list, _COMFORT_CATEGORIES)
+        intelligence_items = _count_standard_items(fact_list, _INTELLIGENCE_CATEGORIES)
+        dims["comfort"] = 0.0  # 占位，下面 second pass 归一化
+        dims["intelligence"] = 0.0  # 占位，下面 second pass 归一化
+        if comfort_items > 0:
             measured.add("comfort")
-        dims["intelligence"] = (
-            1.0 if any(k[0] in _INTELLIGENCE_CATEGORIES for k in facts) else 0.0
-        )
-        if dims["intelligence"] == 1.0:
+        if intelligence_items > 0:
             measured.add("intelligence")
 
         # 维护便利性（统一数据源代理：品牌规模 + 销量活跃度）。
@@ -760,9 +821,39 @@ def recommendation_tool(
                     # 私有：第二遍算取舍用，算完剥离
                     "_dims": dims,
                     "_measured": measured,
+                    # 私有：comfort/intelligence 的**原始标配项数**（第二遍归一化用）
+                    "_comfort_items": comfort_items,
+                    "_intelligence_items": intelligence_items,
                 },
             )
         )
+
+    # ── comfort / intelligence 归一化（2026-10-24）──────────────────────────
+    #
+    # 循环内只能拿到**原始标配项数**，不能直接当分数用：绝对数跨车系不可比
+    # （紧凑级天然配置项少）。⇒ 在**本批候选内**归一化：本批最多的 = 1.0，
+    # 其余按比例；本批全是 0 ⇒ 该维度对所有候选都是 0（不是「缺数据」）。
+    #
+    # ⚠️ 归一化后**必须重算 score**——score 在循环内已算过一次（那时这两个维度
+    # 是占位 0.0）。不重算 ⇒ 新维度对分数毫无影响 ⇒ 修复无效。
+    _max_comfort = max((int(item[1].get("_comfort_items") or 0) for item in scored), default=0)
+    _max_intelligence = max((int(item[1].get("_intelligence_items") or 0) for item in scored), default=0)
+    if scored:
+        for idx, (_score, item) in enumerate(scored):
+            dims = item["_dims"]
+            if _max_comfort > 0:
+                dims["comfort"] = int(item.get("_comfort_items") or 0) / _max_comfort
+            if _max_intelligence > 0:
+                dims["intelligence"] = int(item.get("_intelligence_items") or 0) / _max_intelligence
+            # 重算总分：权重表里各维度的权重不变，只是两维的取值变了
+            total_weight = sum(weights[d] for d in dims)
+            new_score = round(
+                sum(weights[d] * dims[d] for d in dims) / total_weight if total_weight else 0.0, 4
+            )
+            item["score"] = new_score
+            # ⚠️ **必须同步 tuple 里的分数**——排序用的是 `item[0]`（tuple 第一项），
+            #    只改 dict 里的 score ⇒ 排序仍按旧分数 ⇒ 修复无效（且会让人以为改了）。
+            scored[idx] = (new_score, item)
 
     # 排序口径（2026-10-23）：用户**说不清需求**时按**销量**排。
     #
@@ -825,6 +916,10 @@ def recommendation_tool(
             # 私有字段不进生产响应体；include_dims=True 时保留给评测复核
             item.pop("_dims", None)
             item.pop("_measured", None)
+            # 2026-10-24 新增的两个私有字段（comfort/intelligence 的原始项数）
+            # 同样不能进生产响应体 ⇒ 与上面两个一起剥离。
+            item.pop("_comfort_items", None)
+            item.pop("_intelligence_items", None)
 
     top = scored[:limit]
     # 座位约束的**校验覆盖率**：分母是**本次展示的候选数**（top），不是全部候选。
