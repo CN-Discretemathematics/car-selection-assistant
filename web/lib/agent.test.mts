@@ -189,20 +189,23 @@ test("listPreferences：响应不是数组时返回空数组（不把异常形�
 // ⇒ 记忆读写全部短路、**不报任何错** ⇒ 面板显示「你什么也没被记住」（谎）。
 //
 // 后端对「无 token」和「token 无效」**都**返回空列表 ⇒ 前端必须额外探一次。
+//
+// 测试桩 token 值用 `dummy-` 前缀：reviewer/scan_secrets.py 只豁免占位符前缀，
+// 否则 `token: "..."` 字面量会被 generic-secret-assignment 判为 MEDIUM（#103 曾因此让 CI 变红）。
 
 test("listPreferences：token 已失效时 identityValid=false（不谎称「没记住」）", async () => {
   const calls = stubFetch((url) =>
     url.includes("/agent/preferences")
       ? { ok: true, status: 200, body: [] }
       : // 服务端不认识这个 token ⇒ 给了新身份（新 token 非空）
-        { ok: true, status: 201, body: { identity_id: 9, token: "tok-fresh", created: true } },
+        { ok: true, status: 201, body: { identity_id: 9, token: "dummy-token-fresh", created: true } },
   );
-  stubStorage({ [IDENTITY_KEY]: "tok-dead" });
-  const { items, identityValid } = await listPreferences("tok-dead");
+  stubStorage({ [IDENTITY_KEY]: "dummy-token-dead" });
+  const { items, identityValid } = await listPreferences("dummy-token-dead");
   assert.deepEqual(items, []);
   assert.equal(identityValid, false, "token 失效时必须报「读不到」而不是「没记住」");
   // 顺带：本地那个死 token 必须被换成新的
-  assert.equal(readIdentityToken(), "tok-fresh");
+  assert.equal(readIdentityToken(), "dummy-token-fresh");
   assert.ok(calls.length >= 2, "应当先读列表、再探一次身份有效性");
 });
 
@@ -229,11 +232,11 @@ test("listPreferences：有内容时不探身份（不必多发一次请求）",
 // ── ensureIdentityToken：本地 token 可能已失效（2026-10-24）──────────────────
 
 test("ensureIdentityToken：本地 token 已失效时**换新的**（不再复用死 token）", async () => {
-  const calls = stubFetch(() => ({ ok: true, status: 201, body: { identity_id: 9, token: "tok-fresh", created: true } }));
-  stubStorage({ [IDENTITY_KEY]: "tok-dead" });
+  const calls = stubFetch(() => ({ ok: true, status: 201, body: { identity_id: 9, token: "dummy-token-fresh", created: true } }));
+  stubStorage({ [IDENTITY_KEY]: "dummy-token-dead" });
   const token = await ensureIdentityToken();
-  assert.equal(token, "tok-fresh", "死 token 必须被换成新身份");
-  assert.equal(readIdentityToken(), "tok-fresh");
+  assert.equal(token, "dummy-token-fresh", "死 token 必须被换成新身份");
+  assert.equal(readIdentityToken(), "dummy-token-fresh");
   assert.ok(calls.length >= 1);
 });
 
