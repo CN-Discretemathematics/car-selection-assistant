@@ -179,6 +179,14 @@ class RecommendedVariant(BaseModel):
     # 让用户知道自己看到的不是一条已验证的座位结论。默认 True：不点名人数时
     # 本就无座位约束，不该显示任何未核实提示。
     seat_verified: bool = True
+    # 评分 v2（AGENT_SCORING_MODE=new）才返回的透明化字段：
+    # coverage = 这台车**真的测到**的维度权重 / 激活维度总权重。低 coverage 表示
+    # 它的分数里有一半以上是「缺数据 → 0.5 中性」撑起来的，不是「这台车更差」。
+    # v1 下为 None/false，前端不展示（Phase 2 才接）。
+    coverage: float | None = None
+    low_evidence: bool = False
+    # include_dims=True（评测/调试）时返回逐维贡献：parts[dim] = 归一权重 × 该维效用。
+    score_parts: dict[str, float] | None = None
     # 不再有 official_page_url：官方车型页链接无法从现有来源获得（docs/deployment.md §8），
     # Agent 侧不提供任何官方/来源跳转（口径：以汽车之家与已入库数据为准）
 

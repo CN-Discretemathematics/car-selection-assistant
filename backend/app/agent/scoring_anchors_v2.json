@@ -1,0 +1,1344 @@
+{
+  "anchor_version": "scoring-v2-2026-10-03",
+  "generated_at": "2026-10-26T17:25:48+00:00",
+  "source": "eval-local.db (2026-10-03 production snapshot)",
+  "catalog_date": "2026-10-03",
+  "price_bands_wan": [
+    [
+      0.0,
+      8.0
+    ],
+    [
+      8.0,
+      10.0
+    ],
+    [
+      10.0,
+      12.0
+    ],
+    [
+      12.0,
+      15.0
+    ],
+    [
+      15.0,
+      18.0
+    ],
+    [
+      18.0,
+      22.0
+    ],
+    [
+      22.0,
+      28.0
+    ],
+    [
+      28.0,
+      35.0
+    ],
+    [
+      35.0,
+      50.0
+    ],
+    [
+      50.0,
+      null
+    ]
+  ],
+  "min_band_samples": 30,
+  "method": "p10/p50/p90 linear-interpolated quantiles over on-sale variants with current official price",
+  "variant_count": 5132,
+  "skipped_no_price": 0,
+  "global": {
+    "space": {
+      "wheelbase": {
+        "p10": 2700.0,
+        "p50": 2900.0,
+        "p90": 3350.0,
+        "n": 5120
+      },
+      "length": {
+        "p10": 4530.0,
+        "p50": 4890.0,
+        "p90": 5490.0,
+        "n": 5130
+      },
+      "width": {
+        "p10": 1796.0,
+        "p50": 1895.0,
+        "p90": 2000.0,
+        "n": 5130
+      },
+      "trunk": {
+        "p10": 326.0,
+        "p50": 496.0,
+        "p90": 835.0,
+        "n": 2809
+      }
+    },
+    "power": {
+      "kw_per_t": {
+        "p10": 56.7153,
+        "p50": 87.963,
+        "p90": 144.9981,
+        "n": 4656
+      }
+    },
+    "running_cost": {
+      "cny_per_100km": {
+        "p10": 6.975,
+        "p50": 41.3625,
+        "p90": 66.75,
+        "n": 4232
+      }
+    },
+    "safety": {
+      "count": {
+        "p10": 3.0,
+        "p50": 8.0,
+        "p90": 9.0,
+        "n": 4615
+      }
+    },
+    "comfort": {
+      "count": {
+        "p10": 8.0,
+        "p50": 31.0,
+        "p90": 50.0,
+        "n": 5105
+      }
+    },
+    "intelligence": {
+      "count": {
+        "p10": 1.0,
+        "p50": 6.0,
+        "p90": 16.0,
+        "n": 4934
+      }
+    },
+    "usage": {
+      "length": {
+        "p10": 4530.0,
+        "p50": 4890.0,
+        "p90": 5490.0,
+        "n": 5130
+      },
+      "trunk": {
+        "p10": 326.0,
+        "p50": 496.0,
+        "p90": 835.0,
+        "n": 2809
+      },
+      "range": {
+        "p10": 180.0,
+        "p50": 550.0,
+        "p90": 1345.0,
+        "n": 2429
+      },
+      "intelligence": {
+        "p10": 1.0,
+        "p50": 6.0,
+        "p90": 16.0,
+        "n": 4934
+      }
+    }
+  },
+  "global_n_by_subkey": {
+    "space.wheelbase": 5120,
+    "space.length": 5130,
+    "space.width": 5130,
+    "space.trunk": 2809,
+    "power.kw_per_t": 4656,
+    "running_cost.cny_per_100km": 4232,
+    "safety.count": 4615,
+    "comfort.count": 5105,
+    "intelligence.count": 4934,
+    "usage.length": 5130,
+    "usage.trunk": 2809,
+    "usage.range": 2429,
+    "usage.intelligence": 4934
+  },
+  "global_fallback_subkeys": {},
+  "by_price_band": {
+    "0": {
+      "price_band_wan": [
+        0.0,
+        8.0
+      ],
+      "n_total": 324,
+      "fallback": false,
+      "anchors": {
+        "space": {
+          "wheelbase": {
+            "p10": 2162.0,
+            "p50": 2720.0,
+            "p90": 3350.0,
+            "n": 324
+          },
+          "length": {
+            "p10": 3259.6,
+            "p50": 4501.0,
+            "p90": 5402.1,
+            "n": 324
+          },
+          "width": {
+            "p10": 1510.0,
+            "p50": 1737.5,
+            "p90": 1855.0,
+            "n": 324
+          },
+          "trunk": {
+            "p10": 81.0,
+            "p50": 395.0,
+            "p90": 1008.0,
+            "n": 129
+          }
+        },
+        "power": {
+          "kw_per_t": {
+            "p10": 38.4615,
+            "p50": 57.4803,
+            "p90": 76.3251,
+            "n": 286
+          }
+        },
+        "running_cost": {
+          "cny_per_100km": {
+            "p10": 5.628,
+            "p50": 48.0,
+            "p90": 62.25,
+            "n": 279
+          }
+        },
+        "safety": {
+          "count": {
+            "p10": 2.0,
+            "p50": 3.0,
+            "p90": 4.2,
+            "n": 159
+          }
+        },
+        "comfort": {
+          "count": {
+            "p10": 1.0,
+            "p50": 8.0,
+            "p90": 23.0,
+            "n": 319
+          }
+        },
+        "intelligence": {
+          "count": {
+            "p10": 0.0,
+            "p50": 1.0,
+            "p90": 3.0,
+            "n": 221
+          }
+        },
+        "usage": {
+          "length": {
+            "p10": 3259.6,
+            "p50": 4501.0,
+            "p90": 5402.1,
+            "n": 324
+          },
+          "trunk": {
+            "p10": 81.0,
+            "p50": 395.0,
+            "p90": 1008.0,
+            "n": 129
+          },
+          "range": {
+            "p10": 136.8,
+            "p50": 301.0,
+            "p90": 408.0,
+            "n": 115
+          },
+          "intelligence": {
+            "p10": 0.0,
+            "p50": 1.0,
+            "p90": 3.0,
+            "n": 221
+          }
+        }
+      },
+      "n_by_subkey": {
+        "space.wheelbase": 324,
+        "space.length": 324,
+        "space.width": 324,
+        "space.trunk": 129,
+        "power.kw_per_t": 286,
+        "running_cost.cny_per_100km": 279,
+        "safety.count": 159,
+        "comfort.count": 319,
+        "intelligence.count": 221,
+        "usage.length": 324,
+        "usage.trunk": 129,
+        "usage.range": 115,
+        "usage.intelligence": 221
+      },
+      "fallback_subkeys": {}
+    },
+    "1": {
+      "price_band_wan": [
+        8.0,
+        10.0
+      ],
+      "n_total": 379,
+      "fallback": false,
+      "anchors": {
+        "space": {
+          "wheelbase": {
+            "p10": 2630.0,
+            "p50": 2772.0,
+            "p90": 3350.0,
+            "n": 379
+          },
+          "length": {
+            "p10": 4306.0,
+            "p50": 4780.0,
+            "p90": 5425.0,
+            "n": 379
+          },
+          "width": {
+            "p10": 1765.0,
+            "p50": 1840.0,
+            "p90": 1900.0,
+            "n": 379
+          },
+          "trunk": {
+            "p10": 348.5,
+            "p50": 481.0,
+            "p90": 654.0,
+            "n": 166
+          }
+        },
+        "power": {
+          "kw_per_t": {
+            "p10": 55.1855,
+            "p50": 75.3968,
+            "p90": 98.5185,
+            "n": 320
+          }
+        },
+        "running_cost": {
+          "cny_per_100km": {
+            "p10": 6.84,
+            "p50": 47.85,
+            "p90": 66.75,
+            "n": 308
+          }
+        },
+        "safety": {
+          "count": {
+            "p10": 3.0,
+            "p50": 4.0,
+            "p90": 8.0,
+            "n": 263
+          }
+        },
+        "comfort": {
+          "count": {
+            "p10": 4.0,
+            "p50": 17.0,
+            "p90": 29.0,
+            "n": 372
+          }
+        },
+        "intelligence": {
+          "count": {
+            "p10": 1.0,
+            "p50": 3.0,
+            "p90": 7.0,
+            "n": 351
+          }
+        },
+        "usage": {
+          "length": {
+            "p10": 4306.0,
+            "p50": 4780.0,
+            "p90": 5425.0,
+            "n": 379
+          },
+          "trunk": {
+            "p10": 348.5,
+            "p50": 481.0,
+            "p90": 654.0,
+            "n": 166
+          },
+          "range": {
+            "p10": 150.0,
+            "p50": 401.0,
+            "p90": 542.0,
+            "n": 130
+          },
+          "intelligence": {
+            "p10": 1.0,
+            "p50": 3.0,
+            "p90": 7.0,
+            "n": 351
+          }
+        }
+      },
+      "n_by_subkey": {
+        "space.wheelbase": 379,
+        "space.length": 379,
+        "space.width": 379,
+        "space.trunk": 166,
+        "power.kw_per_t": 320,
+        "running_cost.cny_per_100km": 308,
+        "safety.count": 263,
+        "comfort.count": 372,
+        "intelligence.count": 351,
+        "usage.length": 379,
+        "usage.trunk": 166,
+        "usage.range": 130,
+        "usage.intelligence": 351
+      },
+      "fallback_subkeys": {}
+    },
+    "2": {
+      "price_band_wan": [
+        10.0,
+        12.0
+      ],
+      "n_total": 505,
+      "fallback": false,
+      "anchors": {
+        "space": {
+          "wheelbase": {
+            "p10": 2700.0,
+            "p50": 2800.0,
+            "p90": 3410.0,
+            "n": 505
+          },
+          "length": {
+            "p10": 4515.0,
+            "p50": 4800.0,
+            "p90": 5635.0,
+            "n": 505
+          },
+          "width": {
+            "p10": 1800.4,
+            "p50": 1870.0,
+            "p90": 1920.0,
+            "n": 505
+          },
+          "trunk": {
+            "p10": 377.0,
+            "p50": 506.0,
+            "p90": 656.0,
+            "n": 244
+          }
+        },
+        "power": {
+          "kw_per_t": {
+            "p10": 57.0079,
+            "p50": 81.7439,
+            "p90": 99.6466,
+            "n": 448
+          }
+        },
+        "running_cost": {
+          "cny_per_100km": {
+            "p10": 7.02,
+            "p50": 46.05,
+            "p90": 63.0,
+            "n": 395
+          }
+        },
+        "safety": {
+          "count": {
+            "p10": 3.0,
+            "p50": 5.0,
+            "p90": 8.0,
+            "n": 420
+          }
+        },
+        "comfort": {
+          "count": {
+            "p10": 6.0,
+            "p50": 23.0,
+            "p90": 35.5,
+            "n": 496
+          }
+        },
+        "intelligence": {
+          "count": {
+            "p10": 1.0,
+            "p50": 3.0,
+            "p90": 11.0,
+            "n": 489
+          }
+        },
+        "usage": {
+          "length": {
+            "p10": 4515.0,
+            "p50": 4800.0,
+            "p90": 5635.0,
+            "n": 505
+          },
+          "trunk": {
+            "p10": 377.0,
+            "p50": 506.0,
+            "p90": 656.0,
+            "n": 244
+          },
+          "range": {
+            "p10": 137.6,
+            "p50": 480.0,
+            "p90": 1240.0,
+            "n": 195
+          },
+          "intelligence": {
+            "p10": 1.0,
+            "p50": 3.0,
+            "p90": 11.0,
+            "n": 489
+          }
+        }
+      },
+      "n_by_subkey": {
+        "space.wheelbase": 505,
+        "space.length": 505,
+        "space.width": 505,
+        "space.trunk": 244,
+        "power.kw_per_t": 448,
+        "running_cost.cny_per_100km": 395,
+        "safety.count": 420,
+        "comfort.count": 496,
+        "intelligence.count": 489,
+        "usage.length": 505,
+        "usage.trunk": 244,
+        "usage.range": 195,
+        "usage.intelligence": 489
+      },
+      "fallback_subkeys": {}
+    },
+    "3": {
+      "price_band_wan": [
+        12.0,
+        15.0
+      ],
+      "n_total": 900,
+      "fallback": false,
+      "anchors": {
+        "space": {
+          "wheelbase": {
+            "p10": 2701.0,
+            "p50": 2810.0,
+            "p90": 3400.0,
+            "n": 896
+          },
+          "length": {
+            "p10": 4540.4,
+            "p50": 4780.0,
+            "p90": 5537.0,
+            "n": 899
+          },
+          "width": {
+            "p10": 1786.0,
+            "p50": 1880.0,
+            "p90": 1930.0,
+            "n": 899
+          },
+          "trunk": {
+            "p10": 380.0,
+            "p50": 497.5,
+            "p90": 720.5,
+            "n": 450
+          }
+        },
+        "power": {
+          "kw_per_t": {
+            "p10": 55.102,
+            "p50": 85.2273,
+            "p90": 109.1599,
+            "n": 826
+          }
+        },
+        "running_cost": {
+          "cny_per_100km": {
+            "p10": 7.14,
+            "p50": 41.175,
+            "p90": 61.125,
+            "n": 713
+          }
+        },
+        "safety": {
+          "count": {
+            "p10": 2.0,
+            "p50": 6.0,
+            "p90": 8.0,
+            "n": 811
+          }
+        },
+        "comfort": {
+          "count": {
+            "p10": 8.0,
+            "p50": 26.0,
+            "p90": 40.0,
+            "n": 900
+          }
+        },
+        "intelligence": {
+          "count": {
+            "p10": 1.0,
+            "p50": 4.0,
+            "p90": 14.0,
+            "n": 883
+          }
+        },
+        "usage": {
+          "length": {
+            "p10": 4540.4,
+            "p50": 4780.0,
+            "p90": 5537.0,
+            "n": 899
+          },
+          "trunk": {
+            "p10": 380.0,
+            "p50": 497.5,
+            "p90": 720.5,
+            "n": 450
+          },
+          "range": {
+            "p10": 135.0,
+            "p50": 500.0,
+            "p90": 1300.0,
+            "n": 439
+          },
+          "intelligence": {
+            "p10": 1.0,
+            "p50": 4.0,
+            "p90": 14.0,
+            "n": 883
+          }
+        }
+      },
+      "n_by_subkey": {
+        "space.wheelbase": 896,
+        "space.length": 899,
+        "space.width": 899,
+        "space.trunk": 450,
+        "power.kw_per_t": 826,
+        "running_cost.cny_per_100km": 713,
+        "safety.count": 811,
+        "comfort.count": 900,
+        "intelligence.count": 883,
+        "usage.length": 899,
+        "usage.trunk": 450,
+        "usage.range": 439,
+        "usage.intelligence": 883
+      },
+      "fallback_subkeys": {}
+    },
+    "4": {
+      "price_band_wan": [
+        15.0,
+        18.0
+      ],
+      "n_total": 717,
+      "fallback": false,
+      "anchors": {
+        "space": {
+          "wheelbase": {
+            "p10": 2710.0,
+            "p50": 2850.0,
+            "p90": 3246.0,
+            "n": 717
+          },
+          "length": {
+            "p10": 4615.0,
+            "p50": 4853.0,
+            "p90": 5378.8,
+            "n": 717
+          },
+          "width": {
+            "p10": 1820.0,
+            "p50": 1900.0,
+            "p90": 1972.0,
+            "n": 717
+          },
+          "trunk": {
+            "p10": 376.0,
+            "p50": 485.0,
+            "p90": 753.4,
+            "n": 395
+          }
+        },
+        "power": {
+          "kw_per_t": {
+            "p10": 59.3736,
+            "p50": 88.064,
+            "p90": 130.3789,
+            "n": 656
+          }
+        },
+        "running_cost": {
+          "cny_per_100km": {
+            "p10": 7.188,
+            "p50": 12.375,
+            "p90": 63.87,
+            "n": 569
+          }
+        },
+        "safety": {
+          "count": {
+            "p10": 3.0,
+            "p50": 7.0,
+            "p90": 8.0,
+            "n": 684
+          }
+        },
+        "comfort": {
+          "count": {
+            "p10": 10.0,
+            "p50": 29.0,
+            "p90": 45.0,
+            "n": 717
+          }
+        },
+        "intelligence": {
+          "count": {
+            "p10": 1.0,
+            "p50": 4.0,
+            "p90": 16.0,
+            "n": 708
+          }
+        },
+        "usage": {
+          "length": {
+            "p10": 4615.0,
+            "p50": 4853.0,
+            "p90": 5378.8,
+            "n": 717
+          },
+          "trunk": {
+            "p10": 376.0,
+            "p50": 485.0,
+            "p90": 753.4,
+            "n": 395
+          },
+          "range": {
+            "p10": 131.0,
+            "p50": 520.0,
+            "p90": 1313.5,
+            "n": 404
+          },
+          "intelligence": {
+            "p10": 1.0,
+            "p50": 4.0,
+            "p90": 16.0,
+            "n": 708
+          }
+        }
+      },
+      "n_by_subkey": {
+        "space.wheelbase": 717,
+        "space.length": 717,
+        "space.width": 717,
+        "space.trunk": 395,
+        "power.kw_per_t": 656,
+        "running_cost.cny_per_100km": 569,
+        "safety.count": 684,
+        "comfort.count": 717,
+        "intelligence.count": 708,
+        "usage.length": 717,
+        "usage.trunk": 395,
+        "usage.range": 404,
+        "usage.intelligence": 708
+      },
+      "fallback_subkeys": {}
+    },
+    "5": {
+      "price_band_wan": [
+        18.0,
+        22.0
+      ],
+      "n_total": 552,
+      "fallback": false,
+      "anchors": {
+        "space": {
+          "wheelbase": {
+            "p10": 2729.6,
+            "p50": 2920.0,
+            "p90": 3300.0,
+            "n": 550
+          },
+          "length": {
+            "p10": 4670.0,
+            "p50": 4974.0,
+            "p90": 5430.0,
+            "n": 552
+          },
+          "width": {
+            "p10": 1840.0,
+            "p50": 1915.0,
+            "p90": 2006.0,
+            "n": 552
+          },
+          "trunk": {
+            "p10": 345.0,
+            "p50": 509.5,
+            "p90": 778.4,
+            "n": 272
+          }
+        },
+        "power": {
+          "kw_per_t": {
+            "p10": 58.2524,
+            "p50": 89.1332,
+            "p90": 137.8409,
+            "n": 516
+          }
+        },
+        "running_cost": {
+          "cny_per_100km": {
+            "p10": 7.035,
+            "p50": 11.2125,
+            "p90": 66.1125,
+            "n": 456
+          }
+        },
+        "safety": {
+          "count": {
+            "p10": 3.0,
+            "p50": 8.0,
+            "p90": 9.0,
+            "n": 539
+          }
+        },
+        "comfort": {
+          "count": {
+            "p10": 13.0,
+            "p50": 34.0,
+            "p90": 48.0,
+            "n": 551
+          }
+        },
+        "intelligence": {
+          "count": {
+            "p10": 1.0,
+            "p50": 7.0,
+            "p90": 17.0,
+            "n": 548
+          }
+        },
+        "usage": {
+          "length": {
+            "p10": 4670.0,
+            "p50": 4974.0,
+            "p90": 5430.0,
+            "n": 552
+          },
+          "trunk": {
+            "p10": 345.0,
+            "p50": 509.5,
+            "p90": 778.4,
+            "n": 272
+          },
+          "range": {
+            "p10": 178.0,
+            "p50": 605.0,
+            "p90": 1400.0,
+            "n": 326
+          },
+          "intelligence": {
+            "p10": 1.0,
+            "p50": 7.0,
+            "p90": 17.0,
+            "n": 548
+          }
+        }
+      },
+      "n_by_subkey": {
+        "space.wheelbase": 550,
+        "space.length": 552,
+        "space.width": 552,
+        "space.trunk": 272,
+        "power.kw_per_t": 516,
+        "running_cost.cny_per_100km": 456,
+        "safety.count": 539,
+        "comfort.count": 551,
+        "intelligence.count": 548,
+        "usage.length": 552,
+        "usage.trunk": 272,
+        "usage.range": 326,
+        "usage.intelligence": 548
+      },
+      "fallback_subkeys": {}
+    },
+    "6": {
+      "price_band_wan": [
+        22.0,
+        28.0
+      ],
+      "n_total": 545,
+      "fallback": false,
+      "anchors": {
+        "space": {
+          "wheelbase": {
+            "p10": 2708.0,
+            "p50": 2950.0,
+            "p90": 3366.0,
+            "n": 545
+          },
+          "length": {
+            "p10": 4622.0,
+            "p50": 4982.0,
+            "p90": 5498.0,
+            "n": 545
+          },
+          "width": {
+            "p10": 1848.0,
+            "p50": 1950.0,
+            "p90": 2068.0,
+            "n": 545
+          },
+          "trunk": {
+            "p10": 309.0,
+            "p50": 506.0,
+            "p90": 1115.0,
+            "n": 336
+          }
+        },
+        "power": {
+          "kw_per_t": {
+            "p10": 65.5738,
+            "p50": 95.5224,
+            "p90": 163.4413,
+            "n": 477
+          }
+        },
+        "running_cost": {
+          "cny_per_100km": {
+            "p10": 7.32,
+            "p50": 22.38,
+            "p90": 67.0125,
+            "n": 446
+          }
+        },
+        "safety": {
+          "count": {
+            "p10": 2.0,
+            "p50": 8.0,
+            "p90": 9.0,
+            "n": 542
+          }
+        },
+        "comfort": {
+          "count": {
+            "p10": 10.0,
+            "p50": 37.0,
+            "p90": 54.0,
+            "n": 545
+          }
+        },
+        "intelligence": {
+          "count": {
+            "p10": 1.0,
+            "p50": 8.0,
+            "p90": 17.0,
+            "n": 543
+          }
+        },
+        "usage": {
+          "length": {
+            "p10": 4622.0,
+            "p50": 4982.0,
+            "p90": 5498.0,
+            "n": 545
+          },
+          "trunk": {
+            "p10": 309.0,
+            "p50": 506.0,
+            "p90": 1115.0,
+            "n": 336
+          },
+          "range": {
+            "p10": 259.0,
+            "p50": 701.0,
+            "p90": 1353.0,
+            "n": 296
+          },
+          "intelligence": {
+            "p10": 1.0,
+            "p50": 8.0,
+            "p90": 17.0,
+            "n": 543
+          }
+        }
+      },
+      "n_by_subkey": {
+        "space.wheelbase": 545,
+        "space.length": 545,
+        "space.width": 545,
+        "space.trunk": 336,
+        "power.kw_per_t": 477,
+        "running_cost.cny_per_100km": 446,
+        "safety.count": 542,
+        "comfort.count": 545,
+        "intelligence.count": 543,
+        "usage.length": 545,
+        "usage.trunk": 336,
+        "usage.range": 296,
+        "usage.intelligence": 543
+      },
+      "fallback_subkeys": {}
+    },
+    "7": {
+      "price_band_wan": [
+        28.0,
+        35.0
+      ],
+      "n_total": 430,
+      "fallback": false,
+      "anchors": {
+        "space": {
+          "wheelbase": {
+            "p10": 2718.2,
+            "p50": 2980.0,
+            "p90": 3350.0,
+            "n": 429
+          },
+          "length": {
+            "p10": 4588.0,
+            "p50": 5017.0,
+            "p90": 5498.0,
+            "n": 429
+          },
+          "width": {
+            "p10": 1830.0,
+            "p50": 1960.0,
+            "p90": 2062.0,
+            "n": 429
+          },
+          "trunk": {
+            "p10": 237.0,
+            "p50": 455.0,
+            "p90": 957.0,
+            "n": 290
+          }
+        },
+        "power": {
+          "kw_per_t": {
+            "p10": 70.1533,
+            "p50": 100.4016,
+            "p90": 170.5757,
+            "n": 395
+          }
+        },
+        "running_cost": {
+          "cny_per_100km": {
+            "p10": 7.32,
+            "p50": 31.005,
+            "p90": 65.1,
+            "n": 369
+          }
+        },
+        "safety": {
+          "count": {
+            "p10": 3.0,
+            "p50": 8.0,
+            "p90": 9.0,
+            "n": 428
+          }
+        },
+        "comfort": {
+          "count": {
+            "p10": 20.0,
+            "p50": 39.0,
+            "p90": 61.0,
+            "n": 429
+          }
+        },
+        "intelligence": {
+          "count": {
+            "p10": 3.0,
+            "p50": 8.0,
+            "p90": 17.0,
+            "n": 428
+          }
+        },
+        "usage": {
+          "length": {
+            "p10": 4588.0,
+            "p50": 5017.0,
+            "p90": 5498.0,
+            "n": 429
+          },
+          "trunk": {
+            "p10": 237.0,
+            "p50": 455.0,
+            "p90": 957.0,
+            "n": 290
+          },
+          "range": {
+            "p10": 401.6,
+            "p50": 735.0,
+            "p90": 1421.0,
+            "n": 217
+          },
+          "intelligence": {
+            "p10": 3.0,
+            "p50": 8.0,
+            "p90": 17.0,
+            "n": 428
+          }
+        }
+      },
+      "n_by_subkey": {
+        "space.wheelbase": 429,
+        "space.length": 429,
+        "space.width": 429,
+        "space.trunk": 290,
+        "power.kw_per_t": 395,
+        "running_cost.cny_per_100km": 369,
+        "safety.count": 428,
+        "comfort.count": 429,
+        "intelligence.count": 428,
+        "usage.length": 429,
+        "usage.trunk": 290,
+        "usage.range": 217,
+        "usage.intelligence": 428
+      },
+      "fallback_subkeys": {}
+    },
+    "8": {
+      "price_band_wan": [
+        35.0,
+        50.0
+      ],
+      "n_total": 416,
+      "fallback": false,
+      "anchors": {
+        "space": {
+          "wheelbase": {
+            "p10": 2841.0,
+            "p50": 3060.0,
+            "p90": 3236.5,
+            "n": 414
+          },
+          "length": {
+            "p10": 4717.5,
+            "p50": 5102.0,
+            "p90": 5359.0,
+            "n": 416
+          },
+          "width": {
+            "p10": 1860.0,
+            "p50": 1964.5,
+            "p90": 2036.0,
+            "n": 416
+          },
+          "trunk": {
+            "p10": 348.0,
+            "p50": 508.0,
+            "p90": 1086.0,
+            "n": 301
+          }
+        },
+        "power": {
+          "kw_per_t": {
+            "p10": 76.9862,
+            "p50": 105.0885,
+            "p90": 196.9303,
+            "n": 398
+          }
+        },
+        "running_cost": {
+          "cny_per_100km": {
+            "p10": 7.317,
+            "p50": 33.5625,
+            "p90": 66.54,
+            "n": 370
+          }
+        },
+        "safety": {
+          "count": {
+            "p10": 5.0,
+            "p50": 8.0,
+            "p90": 9.0,
+            "n": 416
+          }
+        },
+        "comfort": {
+          "count": {
+            "p10": 26.0,
+            "p50": 42.0,
+            "p90": 66.0,
+            "n": 416
+          }
+        },
+        "intelligence": {
+          "count": {
+            "p10": 3.0,
+            "p50": 10.0,
+            "p90": 17.0,
+            "n": 412
+          }
+        },
+        "usage": {
+          "length": {
+            "p10": 4717.5,
+            "p50": 5102.0,
+            "p90": 5359.0,
+            "n": 416
+          },
+          "trunk": {
+            "p10": 348.0,
+            "p50": 508.0,
+            "p90": 1086.0,
+            "n": 301
+          },
+          "range": {
+            "p10": 519.2,
+            "p50": 707.5,
+            "p90": 1520.0,
+            "n": 200
+          },
+          "intelligence": {
+            "p10": 3.0,
+            "p50": 10.0,
+            "p90": 17.0,
+            "n": 412
+          }
+        }
+      },
+      "n_by_subkey": {
+        "space.wheelbase": 414,
+        "space.length": 416,
+        "space.width": 416,
+        "space.trunk": 301,
+        "power.kw_per_t": 398,
+        "running_cost.cny_per_100km": 370,
+        "safety.count": 416,
+        "comfort.count": 416,
+        "intelligence.count": 412,
+        "usage.length": 416,
+        "usage.trunk": 301,
+        "usage.range": 200,
+        "usage.intelligence": 412
+      },
+      "fallback_subkeys": {}
+    },
+    "9": {
+      "price_band_wan": [
+        50.0,
+        null
+      ],
+      "n_total": 364,
+      "fallback": false,
+      "anchors": {
+        "space": {
+          "wheelbase": {
+            "p10": 2850.0,
+            "p50": 3024.0,
+            "p90": 3370.0,
+            "n": 361
+          },
+          "length": {
+            "p10": 4774.2,
+            "p50": 5080.0,
+            "p90": 5480.0,
+            "n": 364
+          },
+          "width": {
+            "p10": 1880.0,
+            "p50": 1977.5,
+            "p90": 2093.5,
+            "n": 364
+          },
+          "trunk": {
+            "p10": 346.0,
+            "p50": 505.0,
+            "p90": 825.0,
+            "n": 226
+          }
+        },
+        "power": {
+          "kw_per_t": {
+            "p10": 80.4091,
+            "p50": 123.2704,
+            "p90": 195.8698,
+            "n": 334
+          }
+        },
+        "running_cost": {
+          "cny_per_100km": {
+            "p10": 10.2,
+            "p50": 66.0,
+            "p90": 90.66,
+            "n": 327
+          }
+        },
+        "safety": {
+          "count": {
+            "p10": 6.0,
+            "p50": 8.0,
+            "p90": 9.0,
+            "n": 353
+          }
+        },
+        "comfort": {
+          "count": {
+            "p10": 30.0,
+            "p50": 43.0,
+            "p90": 63.0,
+            "n": 360
+          }
+        },
+        "intelligence": {
+          "count": {
+            "p10": 5.0,
+            "p50": 9.0,
+            "p90": 15.0,
+            "n": 351
+          }
+        },
+        "usage": {
+          "length": {
+            "p10": 4774.2,
+            "p50": 5080.0,
+            "p90": 5480.0,
+            "n": 364
+          },
+          "trunk": {
+            "p10": 346.0,
+            "p50": 505.0,
+            "p90": 825.0,
+            "n": 226
+          },
+          "range": {
+            "p10": 89.6,
+            "p50": 690.0,
+            "p90": 1333.0,
+            "n": 107
+          },
+          "intelligence": {
+            "p10": 5.0,
+            "p50": 9.0,
+            "p90": 15.0,
+            "n": 351
+          }
+        }
+      },
+      "n_by_subkey": {
+        "space.wheelbase": 361,
+        "space.length": 364,
+        "space.width": 364,
+        "space.trunk": 226,
+        "power.kw_per_t": 334,
+        "running_cost.cny_per_100km": 327,
+        "safety.count": 353,
+        "comfort.count": 360,
+        "intelligence.count": 351,
+        "usage.length": 364,
+        "usage.trunk": 226,
+        "usage.range": 107,
+        "usage.intelligence": 351
+      },
+      "fallback_subkeys": {}
+    }
+  }
+}

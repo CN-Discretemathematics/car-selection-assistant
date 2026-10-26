@@ -20,3 +20,8 @@ class RecommendationOut(UserProfile):
     count: int
     weights_used: dict[str, float] = Field(default_factory=dict)
     variants: list[RecommendedVariant] = Field(default_factory=list)
+    # 评分口径透明化：v1 八维 / v2 七维（同价位锚点）。默认值保证旧调用方不受影响。
+    scoring_version: str = "scoring-v1"
+    anchor_version: str | None = None
+    diversity_relaxed: int = 0
+    usage_active: bool = False

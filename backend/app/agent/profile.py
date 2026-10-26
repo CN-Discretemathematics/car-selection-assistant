@@ -33,7 +33,7 @@ import 写进函数体。那处延迟 import 是**疤痕**，不是设计。
 from __future__ import annotations
 
 from app.agent.schemas import Budget, UserProfile
-from app.agent.weights import DEFAULT_WEIGHTS, WEIGHT_CEILING
+from app.agent.weights import WEIGHT_CEILING, default_weight_for_dim
 
 
 def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
@@ -101,10 +101,14 @@ def merge_profile(profile: UserProfile, hints: dict) -> UserProfile:
         #
         # ⚠️ **只影响文案组织，不动打分与排序**（计划原文的硬约束）：
         # 这里只写画像的一个字段，排序仍由 8 维软评分决定。
+        # v2（2026-10-27）：基础权重按「v1/v2 两套默认值里该维更高的一档」取。
+        # 两套默认权重对不同维度的最高档不同（safety 只在 v2、budget 只在 v1），
+        # 用单套表会把 v2 的「最看重安全」误判成没抬高。取 max 让两种模式都能触发，
+        # 且不会把「等于默认值」误判成抬高。
         raised = [
             dim
             for dim, w in hints["weights"].items()
-            if float(w) > DEFAULT_WEIGHTS.get(dim, 0.0) + 1e-9
+            if float(w) > default_weight_for_dim(dim) + 1e-9
         ]
         if raised:
             profile.top_dim = max(raised, key=lambda d: float(hints["weights"][d]))

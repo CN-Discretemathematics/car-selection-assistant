@@ -4068,3 +4068,46 @@ short_names_still_work` 立刻变红。已收紧。
   其余 3 个是存量问题，本笔不动，留给单独的清理。
 - README 用例数 1290 → 1299（`doc_sync_check --fix` 自愈）。
 - 测试文件里两处小节号重复（都写成 F5），以及文件头写「四项」却只列三个，一并改正。
+
+---
+
+## 六十八、评分 v2：七维 + 全部同价位固定锚点（2026-10-27）
+
+> 分支 `feat/scoring-v2`（工作树 `.worktrees/scoring-v2`），默认 `AGENT_SCORING_MODE=off`。
+> 设计、决策与红线豁免见 [评分 v2 设计稿](2026-10-27-scoring-v2-design.md)、
+> [ADR-0008](adr/0008-scoring-v2-seven-dimensions.md)。
+
+### 为什么
+
+- 生产逸动三个款型同分 0.8816（2026-10-24）；budget 在「只给上限」时恒 1.0、
+  energy 维不读油耗/电耗、maintenance 无数据、safety 刻意不可映射。
+- 批内归一化让分数依赖候选池，与「确定性、可复算」冲突；缺数据语义 space=0.5、
+  comfort/intel=0.0 且仍占权重，也不一致。
+
+### 改了什么
+
+- 新增 `backend/app/agent/scoring_v2.py` 纯函数模块：七维效用、固定锚点、缺数据中性、
+  coverage/score_range、确定性排序与多样性。
+- 新增 `backend/tools/gen_scoring_anchors.py` 与 `backend/app/agent/scoring_anchors_v2.json`：
+  按 10 个万元价格带生成 p10/p50/p90，**七维全部同价位**（用户 2026-10-27 01:19 确认）；
+  初始锚点用 2026-10-03 生产快照（5,132 在售款型）生成。
+- `tools.py::recommendation_tool` 按开关分派 v1/v2；`AGENT_SCORING_MODE=off|shadow|new`，
+  默认 off；shadow 只记录差异不影响用户结果。
+- API 新增 `scoring_version` / `anchor_version` / `diversity_relaxed` / `usage_active`，
+  每个款型新增 `coverage` / `low_evidence` / `score_parts`。
+- soft_prefs 词表新增 safety/running_cost（SOFT_PREF_VERSION → soft-pref-v3），
+  engine 文案标签、soft_probe 追问顺序、turn 强调权重均按当前口径切换。
+
+### 当前状态
+
+- 默认 off 的旧八维回归全绿（188 passed）；v2 纯函数/契约测试见
+  `backend/tests/test_scoring_v2.py`。
+- 未切生产：需先生成生产库锚点、跑离线评测与 shadow 观察，再切 new。
+
+### 文档
+
+- 新增 [ADR-0008](adr/0008-scoring-v2-seven-dimensions.md)；
+- [2026-10-24 款型级文档](2026-10-24-variant-level-scoring.md) 顶部标 superseded；
+- 2026-10-20 计划 §六 第 3 条与 2026-10-21 待立项文档的「8 维打分红线」追加豁免记录；
+- README 功能清单改为七维描述。
+

@@ -62,6 +62,10 @@ for _router_env in (
     # 跨会话偏好记忆（preferences）：同一道理——本机 .env 可能写了 on 调试值，
     # 漏清会让「默认 off、行为与接入前逐位相同」的用例在有 .env 的机器上偏移。
     "DURABLE_PREFS_MODE",
+    # 评分 v2（2026-10-27）：默认 off 必须逐位回到 v1 八维内核。本机 .env 若写了
+    # new/shadow，所有旧打分用例都会在有 .env 的机器上偏移——显式清场。
+    "AGENT_SCORING_MODE",
+    "SCORING_V2_ANCHORS_PATH",
 ):
     os.environ.pop(_router_env, None)
 

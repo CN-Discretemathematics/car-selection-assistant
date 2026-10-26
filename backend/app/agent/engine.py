@@ -67,7 +67,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from app.agent import conversation_log, known_facts, soft_probe
+from app.agent import conversation_log, known_facts, scoring_v2, soft_probe
 from app.agent.answer_contract import (
     answer_numbers_allowed,
     check_catalog_overview_text,
@@ -134,10 +134,12 @@ from app.agent.series_qa import (
 )
 from app.agent.session import SessionStore, get_session_store
 from app.agent.weights import (
-    DIM_LABELS as _DIM_LABELS,
+    SCORING_VERSION_V1,
+    SCORING_VERSION_V2,
     USAGE_HINTS as _USAGE_HINTS,
     WEIGHT_DIM_KEYWORDS as _WEIGHT_DIM_KEYWORDS,
     WEIGHT_RAISE as _WEIGHT_RAISE,
+    dim_labels_for_mode,
 )
 from app.agent.turn import (
     _BODY_HINTS,
@@ -176,6 +178,18 @@ from app.common.models import (
     VehicleVariant,
 )
 from app.comparison.analysis import analyze_comparison, render_analysis_text
+
+
+def _scoring_dim_labels() -> dict[str, str]:
+    """当前**返回给用户**的评分口径对应的维度标签。
+
+    注意用 scoring_v2.uses_v2()（只有 new 档为真），不是 is_v2_mode()：
+    shadow 档会算 v2 但返回 v1，此时文案/提示词必须继续按 v1 八维口径，
+    否则会出现「解释里说有安全维，分数其实是 v1」。
+    """
+    mode = SCORING_VERSION_V2 if scoring_v2.uses_v2() else SCORING_VERSION_V1
+    return dim_labels_for_mode(mode)
+
 
 # 预算正则唯一定义在 series_constraints（评审 C2：流水线约束解析复用同一实现），
 # 此处按原内部名导入，行为不变。
@@ -695,7 +709,8 @@ def _priority_phrase(profile: UserProfile) -> str:
     + 能源全部进这一句。仍然只用**用户已经说过的**（画像里有值才写），不猜不补。
     """
     parts: list[str] = []
-    labels = [_DIM_LABELS[d] for d in (profile.weights or {}) if d in _DIM_LABELS]
+    dim_labels = _scoring_dim_labels()
+    labels = [dim_labels[d] for d in (profile.weights or {}) if d in dim_labels]
     if labels:
         parts.append(("、".join(labels) if len(labels) > 1 else labels[0]) + "优先")
     if profile.brand_labels:
@@ -954,9 +969,10 @@ def _explain_system_prompt(profile: UserProfile) -> str:
         "禁止编造价格、销量、优惠、库存或任何数据中没有的内容；缺失信息如实说明；"
         "不使用表格，不超过 200 字。"
     )
-    if profile.top_dim and profile.top_dim in _DIM_LABELS:
+    top_dim_labels = _scoring_dim_labels()
+    if profile.top_dim and profile.top_dim in top_dim_labels:
         system += (
-            f"用户最在意的是「{_DIM_LABELS[profile.top_dim]}」——"
+            f"用户最在意的是「{top_dim_labels[profile.top_dim]}」——"
             f"**先讲这个维度**，再讲取舍与妥协；"
         )
     # 画像缺项 ⇒ 明说「没说什么」，免得模型替用户编（2026-10-23）。
@@ -2869,7 +2885,7 @@ class AgentEngine:
             # （预算/用途/能源/座位），而首要维度只是**用户在意**的方向——库里可能压根
             # 没有这个维度的数据（`dims` 0.5 中性 = 无此数据，不是「弱」）。硬塞进去等于
             # 替这台车认领一个没核实过的达标项＝编造（设计原则第 1 条）。
-            top_label = _DIM_LABELS.get(profile.top_dim or "")
+            top_label = _scoring_dim_labels().get(profile.top_dim or "")
             priority_desc = f"按你最看重的{top_label}排的，" if top_label else ""
             return (
                 f"为你推荐 {names} 等 {len(top)} 款在售款型{budget_desc}。"
