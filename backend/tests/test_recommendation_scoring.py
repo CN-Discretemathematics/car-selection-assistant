@@ -187,18 +187,28 @@ def test_energy_preference_lifts_dim_to_one(db_session: Session):
     )
 
 
-# ── comfort / intelligence 维度（类目事实存在性）─────────────────────────────
+# ── comfort / intelligence 维度（标配项数归一化）─────────────────────────────
 
 def test_comfort_and_intelligence_fact_presence(db_session: Session):
-    """有「舒适性」/「智能驾驶」类目事实 → 该维 1.0；无事实 → 0.0。"""
+    """有该类别的**标配事实** → 该维度按标配项数计分；无 → 0。
+
+    ⚠️ 语义变更（2026-10-24）：此前是**布尔**（有该类事实即 1.0）⇒ 同一车系的
+    不同款型得分**逐位相同**（生产实测：逸动三款全 0.8816）。
+    现在按**标配项数**在本批内归一化 ⇒ 同车系款型能区分。
+
+    「事实值」的写法也随生产口径对齐：生产配置表的标配标记是 **'●'**
+    （实测 34.3 万条，另有 '前● / 后●' 等复合形态），此前这里写的是 '有'
+    ——生产数据里**不存在** '有' 这个取值。
+    """
     ids = _seed(db_session, [
-        {"facts": [("舒适性", "真皮座椅", "有", None, None)]},
+        {"facts": [("内部配置", "真皮座椅", "●", None, None)]},
         {},
-        {"facts": [("智能驾驶", "高速领航辅助", "有", None, None)]},
+        {"facts": [("智能/辅助驾驶", "高速领航辅助", "●", None, None)]},
     ])
     result = _run(db_session)
     w = result["weights_used"]
     comfort, plain, intel = (_score_of(result, i) for i in ids)
+    # 本批里 comfort 的标配项数：舒适款 1 项、intel 款 0 项 ⇒ 归一化后 1.0 vs 0.0
     assert comfort - plain == pytest.approx(_delta(w, "comfort", 1.0, 0.0), abs=3e-4)
     assert intel - plain == pytest.approx(_delta(w, "intelligence", 1.0, 0.0), abs=3e-4)
 
@@ -257,14 +267,26 @@ def test_seat_matched_string(db_session: Session):
 
 
 def test_weight_override_flips_ranking(db_session: Session):
-    """权重覆盖改排序：默认权重下「舒适性 1.0」与「功率 1.0」打平（0.05 vs 0.10×0.5）；
-    把 comfort 权重抬到 1.0 → 舒适车胜；把 power 抬到 1.0 → 功率车胜。"""
+    """权重覆盖改排序：默认权重下「舒适性」与「功率」**恰为平分**
+    （comfort 0.05×1.0 == power 0.10×0.5，两边贡献都是 0.05）；
+    把 comfort 权重抬到 1.0 → 舒适车胜；把 power 抬到 1.0 → 功率车胜。
+
+    ⚠️ 语义变更（2026-10-24）：comfort 从**布尔**改为**标配项数**，
+    且「事实值」写法随生产口径对齐（标配标记是 **'●'**，生产数据里不存在 '有'）。
+
+    ⚠️ 但**平分关系仍然成立**：comfort 归一化后是 1.0（它有 1 项标配、本批最多），
+    power 仍是 0.5（无功率事实 ⇒ 中性）⇒ 0.05×1.0 == 0.10×0.5。
+    这条用例因此**继续守着同一个关系**，没有被语义变更冲掉。
+    """
     ids = _seed(db_session, [
-        {"facts": [("舒适性", "真皮座椅", "有", None, None)]},
+        {"facts": [("内部配置", "真皮座椅", "●", None, None)]},
         {"facts": [("动力", "电动机总功率(kW)", "300", "kW", None)]},
     ])
     default = _run(db_session)
-    assert _score_of(default, ids[0]) == _score_of(default, ids[1]), "默认权重下恰为平分"
+    assert _score_of(default, ids[0]) == _score_of(default, ids[1]), (
+        f"默认权重下恰为平分：comfort={_score_of(default, ids[0])} "
+        f"power={_score_of(default, ids[1])}"
+    )
 
     comfort_first = UserProfile()
     comfort_first.weights = {"comfort": 1.0}
