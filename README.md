@@ -301,9 +301,10 @@ nginx -t && systemctl reload nginx
 ```
 
 **自动更新（只部署 main）**：`deploy/carsel-deploy.sh` 每天 05:00 由 cron 触发——
-对比 GitHub 上 `main` 的最新提交，有更新才同步源码、重建镜像、切流，并在健康检查失败时
+对比 GitHub 上 `main` 的最新提交，**先校验该提交的 4 个必需 CI job 全绿**（backend / gates /
+web / migrations；不绿或查询失败都不部署），再同步源码、重建镜像、切流，并在健康检查失败时
 自动回滚到上一版镜像。手工执行 `carsel-deploy.sh --check / --dry-run / --force` 可查状态、
-预演与强制重部署。
+预演与强制重部署（`--force` 也绕不过 CI 门禁，救火用 `DEPLOY_SKIP_CI_GUARD=1`）。
 
 部署要点（均为线上实证）：
 
@@ -313,7 +314,8 @@ nginx -t && systemctl reload nginx
   内固化为 `/root/.npmrc`），运行时直接调用镜像内 `next` 二进制，无运行期联网依赖
 - **数据库**：容器化部署与 RDS 不同 VPC 时须使用**外网 endpoint**，并把出口 IP 加入白名单
 - **定时任务**：看门狗（每 5 分钟自愈）+ 夜间 02:30 销量导入 → 条件触发稠密重建
-  + 早上 05:00 自动部署 `main`
+  + 早上 05:00 自动部署 `main`（部署前校验该 SHA 的 CI 必需 job 全绿，见
+  [deployment.md §2.2](docs/deployment.md)）
 - **备案**：中国内地节点须完成 ICP 备案；页脚备案号由环境变量 `ICP_NUMBER` 注入并链接工信部。
   **ICP 备案已于 2026-09 通过**，当前以域名 + HTTPS 对外服务（`https://hp-car-selection-assistant.cn`，
   HTTP 301 → HTTPS，nginx 实态见 `deploy/nginx-https.conf`）；此前备案审查期间曾以 IP 过渡访问

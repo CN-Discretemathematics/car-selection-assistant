@@ -12,6 +12,8 @@
 #   - 先构建后切换：构建失败保持旧版本继续服务
 #   - 切换后做健康检查（/api/v1/ready 就绪 + 首页 200），失败自动回滚到上一版镜像
 #   - flock 单实例：不会与手工部署或上一次未完成的部署叠加
+#   - **部署前校验 CI 必需 job 全绿**（2026-10-27 新增）：不绿/查询失败不部署；
+#     放行只认 DEPLOY_SKIP_CI_GUARD=1，--force 不自动绕过
 #   - **远端 SHA 必须两处交叉核对才可信**（2026-10-21 事故后加，见下）
 set -uo pipefail
 
@@ -31,6 +33,21 @@ LOCK_FILE="${STATE_DIR}/deploy.lock"
 DEPLOY_LOG="${CARSEL_DEPLOY_LOG:-/var/log/carsel-deploy.log}"
 HEALTH_URL="http://127.0.0.1:8000/api/v1/ready"
 SITE_URL="http://127.0.0.1/"
+
+# 部署前 CI 门禁（2026-10-27 新增）：必需 job 名单与等待/重试参数。
+# 环境变量只用于测试与极端手工场景；生产默认值见下。
+CI_REQUIRED_CHECKS=(
+  "backend (pytest)"
+  "gates (secrets + ui-copy + doc-sync)"
+  "web (lint + tsc + build)"
+  "migrations + 功能校验（postgres）"
+)
+CI_GUARD_WAIT_SECONDS="${CARSEL_CI_GUARD_WAIT_SECONDS:-900}"
+CI_GUARD_POLL_SECONDS="${CARSEL_CI_GUARD_POLL_SECONDS:-60}"
+CI_API_RETRIES="${CARSEL_CI_API_RETRIES:-3}"
+CI_API_RETRY_SLEEP="${CARSEL_CI_API_RETRY_SLEEP:-10}"
+CI_BLOCK_REASON=""
+CI_BLOCK_DETAIL=""
 
 # ── 预热（2026-10-23 新增）────────────────────────────────────────────────
 #
@@ -59,6 +76,171 @@ esac
 FORCE="${FORCE:-0}"
 
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
+
+# ── 部署前 CI 门禁（2026-10-27 新增）────────────────────────────────────
+#
+# 为什么必须有：2026-10-26 main 的 gates 红着合入 #103，而本脚本在此之前
+# 只校验 SHA、不校验 CI ⇒ 05:00 自动部署照样会把红代码推上生产。
+# CI 绿若不能拦住发布，它就只是 PR 页面上的装饰。
+#
+# 只要求 4 个**阻塞 job**（与 .github/workflows/ci.yml 的分工一致）：
+#   backend (pytest)、gates、web、migrations
+# metrics / lint 只报告（lint 是 report-only），autofix 在 main push 上是
+# skipped，它们失败不应拦住发布。
+#
+# 失败语义：宁可不部署，不猜。
+#   - 任一必需 job 明确 failure/cancelled/timed_out/action_required ⇒ 立即拒绝；
+#   - pending/in_progress/尚无 check-run ⇒ 最多等 CARSEL_CI_GUARD_WAIT_SECONDS；
+#   - GitHub API 不可达/限流/解析失败 ⇒ 重试后拒绝；
+#   - 拒绝时写 last-deploy.json（status=blocked），**不动** deployed-main.sha；
+#   - 逃生阀 DEPLOY_SKIP_CI_GUARD=1 只给手工救火；--force 不会自动绕过。
+#
+# 取该 SHA 的 check-runs JSON。用 curl + grep 校验，不依赖 jq/python3。
+ci_fetch_check_runs() {
+  local sha="$1" retries="${2:-$CI_API_RETRIES}" attempt=1 out
+  while [ "$attempt" -le "$retries" ]; do
+    if out=$(curl -fsSL -m 30 \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'Cache-Control: no-cache' \
+      "https://api.github.com/repos/${REPO}/commits/${sha}/check-runs?filter=latest&per_page=100&_=$(date +%s)" 2>/dev/null) \
+      && printf '%s' "$out" | grep -q '"total_count"'; then
+      printf '%s' "$out"
+      return 0
+    fi
+    if [ "$attempt" -lt "$retries" ]; then
+      log "WARN CI 状态查询失败（第 ${attempt}/${retries} 次），${CI_API_RETRY_SLEEP}s 后重试"
+      sleep "$CI_API_RETRY_SLEEP"
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+# 从紧凑 JSON 里取一个 job 的 "status|conclusion"。
+# 不用 jq / python3：生产主机不保证有；也不依赖 JSON 是否美化。
+# 从 "name":"<job>" 之后找第一个 "status":" 与第一个 "conclusion"；
+# 这段区间里只有字符串字段，没有嵌套对象，故不会被 app/output 干扰。
+ci_parse_check_run() {
+  local want="$1"
+  awk -v name="$want" '
+    { buf = buf $0 "\n" }
+    END {
+      key = "\"name\":\"" name "\""
+      i = index(buf, key)
+      if (i == 0) { print "missing|null"; exit }
+      rest = substr(buf, i + length(key))
+      j = index(rest, "\"status\":\"")
+      if (j == 0) { print "noparse|null"; exit }
+      s = substr(rest, j + 10)
+      k = index(s, "\"")
+      status = (k > 0) ? substr(s, 1, k - 1) : "noparse"
+      l = index(rest, "\"conclusion\":")
+      if (l == 0) { print status "|noparse"; exit }
+      c = substr(rest, l + 13)
+      if (substr(c, 1, 1) == "\"") {
+        m = index(substr(c, 2), "\"")
+        concl = (m > 0) ? substr(c, 2, m - 1) : "noparse"
+      } else if (substr(c, 1, 4) == "null") {
+        concl = "null"
+      } else {
+        concl = "noparse"
+      }
+      print status "|" concl
+    }'
+}
+
+# 评估一份 check-runs JSON：
+#   返回 0 = 4 个必需 job 全部 completed/success；
+#   返回 1 = 至少一个明确非 success（立即拒绝，不再等）；
+#   返回 2 = 仍 pending/缺失（调用方决定继续等还是超时）。
+ci_evaluate() {
+  local json="$1" name line status concl failed=0 waiting=0 detail=""
+  for name in "${CI_REQUIRED_CHECKS[@]}"; do
+    line=$(printf '%s' "$json" | ci_parse_check_run "$name")
+    status="${line%%|*}"
+    concl="${line##*|}"
+    if [ "$status" = "completed" ] && [ "$concl" = "success" ]; then
+      log "CI ✅ ${name}"
+    elif [ "$status" = "completed" ]; then
+      failed=1
+      detail="${detail}${name}=${concl}; "
+      log "CI ❌ ${name}: ${concl}"
+    elif [ "$status" = "missing" ] || [ "$status" = "noparse" ]; then
+      waiting=1
+      log "CI … ${name}: 尚无 check-run/无法解析（可能还没开始）"
+    else
+      waiting=1
+      log "CI … ${name}: ${status}/${concl}"
+    fi
+  done
+  CI_BLOCK_DETAIL="$detail"
+  [ "$failed" = "1" ] && return 1
+  [ "$waiting" = "1" ] && return 2
+  return 0
+}
+
+ci_gate_wait() {
+  local sha="$1" json rc deadline
+  CI_BLOCK_REASON=""
+  CI_BLOCK_DETAIL=""
+  deadline=$(( $(date +%s) + CI_GUARD_WAIT_SECONDS ))
+  log "CI 门禁：检查 ${sha} 的 ${#CI_REQUIRED_CHECKS[@]} 个必需 job（最长等待 ${CI_GUARD_WAIT_SECONDS}s）"
+  while :; do
+    if ! json=$(ci_fetch_check_runs "$sha"); then
+      CI_BLOCK_REASON="ci_api_unavailable"
+      CI_BLOCK_DETAIL="GitHub check-runs API 查询失败（网络/限流/解析）"
+      log "ERROR CI 状态查询失败，按“不猜”原则拒绝部署"
+      return 1
+    fi
+    ci_evaluate "$json"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      log "CI 门禁通过：必需 job 全部 success"
+      return 0
+    fi
+    if [ "$rc" -eq 1 ]; then
+      CI_BLOCK_REASON="ci_failed"
+      log "ERROR CI 门禁未通过：至少一个必需 job 不是 success"
+      return 1
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      CI_BLOCK_REASON="ci_timeout"
+      CI_BLOCK_DETAIL="等待 ${CI_GUARD_WAIT_SECONDS}s 后仍有必需 job 未完成"
+      log "ERROR CI 门禁等待超时（${CI_GUARD_WAIT_SECONDS}s）"
+      return 1
+    fi
+    log "CI 尚未就绪，${CI_GUARD_POLL_SECONDS}s 后重试"
+    sleep "$CI_GUARD_POLL_SECONDS"
+  done
+}
+
+# --check 用：只打印，不拦截（查询失败也不影响 SHA 判断）。
+ci_print_status() {
+  local sha="$1" json name line status concl
+  if ! json=$(ci_fetch_check_runs "$sha" 1); then
+    log "CI 状态：查询失败（网络/限流；不影响上面的 SHA 判断）"
+    return 1
+  fi
+  for name in "${CI_REQUIRED_CHECKS[@]}"; do
+    line=$(printf '%s' "$json" | ci_parse_check_run "$name")
+    status="${line%%|*}"
+    concl="${line##*|}"
+    if [ "$status" = "completed" ] && [ "$concl" = "success" ]; then
+      log "CI ✅ ${name}"
+    else
+      log "CI ❌ ${name}: ${status}/${concl}"
+    fi
+  done
+}
+
+# 拒绝部署时落状态文件；不覆盖已部署版本（deployed-main.sha 不动）。
+write_blocked_deploy() {
+  local reason="$1" detail="$2" safe_detail
+  safe_detail=$(printf '%s' "$detail" | tr -d '"' | tr -d '\\' | tr '\n' ' ')
+  printf '{"sha":"%s","previous":"%s","at":"%s","status":"blocked","reason":"%s","detail":"%s","host":"%s"}\n' \
+    "${remote_sha:-}" "${current_sha:-}" "$(date -Is)" "$reason" "$safe_detail" "$(hostname)" \
+    > "${STATE_DIR}/last-deploy.json"
+}
 
 # 预热稀疏索引：让**新进程**先建好 BM25，用户的第一笔请求不必付那 5.4 秒。
 # 返回 0 = 成功；1 = 失败（调用方据此回滚）。
@@ -158,6 +340,8 @@ if [ "$MODE" = "check" ]; then
     | sed -n 's/.*"commit_sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
   log "运行中=${running_sha:-<未注入/未知>}"
   [ "$remote_sha" = "$current_sha" ] && log "状态：已是最新" || log "状态：有更新待部署"
+  # CI 状态只打印、不拦截（--check 的职责是报告，不是发布）
+  ci_print_status "$remote_sha" || true
   # 三者不一致时**明确指出**：状态文件说最新、但跑的容器不是那个提交，
   # 说明有人绕过脚本部署过（2026-10-05 #65 带着 CI 红灯被合并即属此类）。
   if [ -n "$running_sha" ] && [ "$running_sha" != "$remote_sha" ]; then
@@ -200,6 +384,19 @@ fi
 if ! flock -n 9; then
   log "已有部署在运行（锁 ${LOCK_FILE} 被占用），本次跳过"
   exit 0
+fi
+
+# ── 部署前 CI 门禁（2026-10-27 新增）────────────────────────────────────
+# 只挡「真要部署」的路径：--check 已在上面打印、--dry-run 不构建不切流。
+if [ "$MODE" = "deploy" ]; then
+  if [ "${DEPLOY_SKIP_CI_GUARD:-0}" = "1" ]; then
+    log "WARN 已设置 DEPLOY_SKIP_CI_GUARD=1 ⇒ 跳过部署前 CI 门禁（仅限手工救火）"
+  elif ! ci_gate_wait "$remote_sha"; then
+    write_blocked_deploy "${CI_BLOCK_REASON:-ci_failed}" "${CI_BLOCK_DETAIL:-}"
+    log "ERROR 本次**不部署**；已写 ${STATE_DIR}/last-deploy.json（status=blocked, reason=${CI_BLOCK_REASON:-ci_failed}）"
+    log "      确认是误报后手工放行：DEPLOY_SKIP_CI_GUARD=1 $0 --force"
+    exit 1
+  fi
 fi
 
 log "开始部署：${current_sha:-<未知>} -> ${remote_sha}$([ "$FORCE" = "1" ] && echo '（--force）')"

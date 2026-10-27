@@ -127,6 +127,11 @@ jobs:
         run: |
           set -o pipefail
           python tools/pre-push-guard.py origin/main..HEAD 2>&1 | tee /tmp/guard.log
+      # 2026-10-27 补：部署门禁自测。deploy/tests 的三个自测此前都不在 CI 里，
+      # 改坏「部署前校验 CI」只能靠人肉发现。本测试桩掉 curl/docker/rsync，
+      # 不连真 GitHub、不写 /var，跑 8 个场景（约 30s）。
+      - name: 部署 CI 门禁自测（退出码必须 0）
+        run: bash deploy/tests/verify_deploy_ci_guard.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

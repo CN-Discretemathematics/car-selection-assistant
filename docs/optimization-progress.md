@@ -4111,3 +4111,31 @@ short_names_still_work` 立刻变红。已收紧。
 - 2026-10-20 计划 §六 第 3 条与 2026-10-21 待立项文档的「8 维打分红线」追加豁免记录；
 - README 功能清单改为七维描述。
 
+---
+
+## 六十九、部署前 CI 门禁（2026-10-27）
+
+**问题**：2026-10-26 `main` 的 gates job 红着合入 #103，而 `deploy/carsel-deploy.sh` 只校验 SHA
+与提交时间，05:00 自动部署仍会把红代码推上生产。CI 绿若拦不住发布，就只是 PR 页面上的装饰。
+
+**改了什么**：
+
+- `deploy/carsel-deploy.sh`：部署前用 GitHub Check Runs API 查目标 SHA 的 4 个阻塞 job
+  （`backend (pytest)` / `gates (secrets + ui-copy + doc-sync)` / `web (lint + tsc + build)` /
+  `migrations + 功能校验（postgres）`），全绿才继续。明确失败立即拒绝；pending 最多等 900s
+  （默认 60s 轮询）；API 失败重试 3 次后拒绝。拒绝时写 `last-deploy.json`
+  （`status=blocked` + `reason`），**不动** `deployed-main.sha`。逃生阀只有
+  `DEPLOY_SKIP_CI_GUARD=1`，`--force` 不绕过；`--check` 只打印 CI 状态、不拦截；
+  `--dry-run` 不校验（不构建不切流）。
+- `deploy/tests/verify_deploy_ci_guard.sh`（新增）：8 个场景，桩 `curl`/`docker`/`rsync`，
+  不连真 GitHub：全绿放行 / 明确失败拒绝 / pending 超时 / pending 转 success / API 失败 /
+  必需 job 缺失 / 逃生阀 / `--check` 只报告。
+- `.github/workflows/ci.yml`：gates job 增加该自测，防「门禁本身被改坏」无人发现。
+- 文档：`docs/deployment.md` §2 流程与命令、新增 §2.2、§8 CI 门禁条目；README 自动更新段。
+
+**验证**：`bash deploy/tests/verify_deploy_ci_guard.sh` ⇒ `全部用例通过`（8/8）；
+`bash -n deploy/carsel-deploy.sh` 与测试脚本均 exit 0。
+
+**上线注意**：脚本自更新发生在本次部署的 rsync 之后 ⇒ 合并后**第一次** 05:00 部署仍由旧脚本
+（不带门禁）执行。要当天生效，先手工 `install -m 755 /srv/carsel/deploy/carsel-deploy.sh
+/usr/local/bin/carsel-deploy.sh`；安装前先 `--check` 确认 4 个必需 job 全绿。
