@@ -60,7 +60,7 @@ CI_BLOCK_DETAIL=""
 #
 # 为什么不用 Milvus 原生 hybrid（那样就不必重建）：那是架构级决策，
 # 代价是失去「按查询类型动态切权重」与「向量库挂了还有 BM25 兜底」，
-# 详见 docs/2026-10-23-rag-retrieval-architecture-decision.md。
+# 详见 docs/rag-retrieval-architecture.md。
 WARMUP_URL="http://127.0.0.1:8000/api/v1/admin/rag/query"
 WARMUP_QUERY="预算15万 家用SUV"   # 只为触发检索，不看内容
 WARMUP_TIMEOUT=90

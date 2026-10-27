@@ -62,8 +62,9 @@ PR 的 base 可以是 `main`，**不要**为了「避开同文件冲突」把 ba
 - web：`pnpm --dir web exec tsc --noEmit`；改 UI 后按需 `next build`（先停 `next dev`，
   两者共用 `.next` 会互相破坏）
 - **eslint（2026-10-03 起已装且阻塞）**：`cd web` 后 `pnpm exec eslint . --max-warnings 0`。
-  基线 0。注意本机 pnpm 与 CI 的 pnpm major 不同（见 docs/refactoring-roadmap.md 的
-  「pnpm 版本三处不一致」），`web/pnpm-workspace.yaml` 已被 gitignore——**不要提交它**，
+  基线 0。注意本机 pnpm 与 CI 的 pnpm major 不同（三处版本不一致：
+  CI 固定 pnpm 9；生产 Dockerfile 用 corepack 且**未钉版本**；本机 pnpm 11.9.0），
+  `web/pnpm-workspace.yaml` 已被 gitignore——**不要提交它**，
   提交会让 CI 的 `pnpm install --frozen-lockfile` 直接失败。
 - 文案/密钥/文档门禁：`reviewer/scan_ui_copy.py`、`reviewer/scan_secrets.py`、
   `skills/doc_sync_check.py`（计数/悬空引用/配置表/编码；退出码必须 0，CI gates job 已接线。

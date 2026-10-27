@@ -165,9 +165,10 @@ SCOPE_PATHS: dict[str, list[str]] = {
     # 改门禁现在必须用 chore / hygiene / skills（见 R10.2）。
     # 2026-10-20：GLOSSARY.md（领域词表）进 docs scope。此前它不在任何 scope 的
     # 允许路径里，导致「新增词表」这类纯文档提交只能靠 PUSH_GUARD_ALLOW 放行。
-    # 它与 AGENTS.md / README / RAG.md 同属根级规范文档，性质一致。
+    # 2026-10-27：GLOSSARY.md 已从仓库移除，但路径**保留在登记里**——
+    # 删掉它的那笔提交本身要落在 docs scope 内，否则删除动作自己就越界（R2）。
     "docs": ["docs/", "AGENTS.md", "README", "RAG.md", "LICENSE", "GLOSSARY.md"],
-    # 2026-10-02：docs/engineering-standards.md 等规范性文档成批落地，需要一个只覆盖
+    # 2026-10-02：docs/ 下的规范性文档成批落地，需要一个只覆盖
     # docs/ 的窄 scope——复用 "docs" 会顺带授权 tools/ 与 .githooks/（即门禁自身）。
     "standards": ["docs/"],
     # 2026-10-02：工程化基线（ruff / eslint / 覆盖率 / 质量看板 / CI 接线）天然跨切面——

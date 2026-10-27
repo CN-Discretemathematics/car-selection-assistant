@@ -9,12 +9,12 @@
 # ⚠️ 2026-10-03：backend/pyproject.toml 里的 ruff 规则集此前**从未被执行过**——
 #   没有 lint job，且配置里 `pylint.ignore-variadic-names` 已被新版 ruff 移除，
 #   导致 `ruff check` 直接以 exit 2 死在读配置阶段。本 job 存在的意义就是把
-#   「声明」变成「每提交都跑一次的真实数据」。详见 docs/refactoring-roadmap.md。
+#   「声明」变成「每提交都跑一次的真实数据」。
 #
 # 启用强制门禁：仓库 Settings → Branches → main 分支保护 →
 #   勾选 Require status checks → 选中 backend / gates / web 三个 check。
 # ⚠️ 2026-10-02：新增的 **metrics** 需手动勾选才会成为 required check，
-#    未勾选时它只产出 artifact，不阻止合入（见 docs/engineering-standards.md R10.5）。
+#    未勾选时它只产出 artifact，不阻止合入。
 # ⚠️ 2026-10-03：新增的 **lint** 同样需手动勾选，且**在基线降到 0 之前不应勾选**
 #    （基线 130 条，ruff 0.16.10 / Windows 本地实测；勾了会把每个 PR 都打红）。
 # autofix 需要写权限：Settings → Actions → General → Workflow permissions 勾
@@ -140,7 +140,7 @@ jobs:
           retention-days: 30
 
   # 8 维代码质量看板（2026-10-02 接入）：只报不拦，产出 artifact。
-  # 定位见 docs/engineering-standards.md §4.2 / §4.5——坏味道泳道（P6）**全表最低优先级**，
+  # 定位见 tools/quality_metrics.py——坏味道泳道**全表最低优先级**，
   # 不排期、不阻塞，但**必须持续可见**；本 job 就是那个「可见」的技术实现。
   # 一旦本 job 不再产出 artifact，P6 即视为失访。
   metrics:
@@ -176,7 +176,7 @@ jobs:
   # 为什么只报不拦：存量 130 条里 85 条集中在 F401/I001，且**自动修复有真实风险**
   #   - I001 会把 app.* 排到 load_dotenv() 之前，直接搞坏环境加载顺序；
   #   - F401 会删掉 __init__.py 里的 re-export，让外部 import 崩掉。
-  # 这两类留给人工逐处判断（见 docs/refactoring-roadmap.md P6）。
+  # 这两类留给人工逐处判断（存量只报不拦，棘轮计数见 tools/quality_metrics.py）。
   #
   # 版本必须钉住：ruff 跨版本会改规则集与判定，计数不可比，棘轮才有意义。
   lint:
