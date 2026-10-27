@@ -234,6 +234,14 @@ def _looks_like_identifier_or_path(value: str) -> bool:
         return True  # snake_case 标识符（全小写 + 下划线，含 `_` 前导的私有名）
     if re.fullmatch(r"[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+", candidate):
         return True  # kebab-case / dotted 名称
+    # 2026-10-28：自包含交互产物（archify 生成的 docs/diagrams/*.html）里
+    # 的 JS 标识符是 camelCase，如 `relationshipTokenGeometry`（25 字符、
+    # 含 token 子串）——它只是函数名，却被 high-entropy-secret 判成疑似密钥
+    # （三张图共 9 处，gates job 变红）。camelCase/PascalCase 与 snake_case
+    # 一样是「代码标识符」而不是密钥字面量；至少两段大写开头的仍按标识符放过，
+    # 纯随机串（含 + / = 或大小写数字混排但无词形）不受影响。
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*(?:[A-Z][A-Za-z0-9]*){2,}", candidate):
+        return True  # CamelCase / PascalCase 标识符
     return False
 
 
