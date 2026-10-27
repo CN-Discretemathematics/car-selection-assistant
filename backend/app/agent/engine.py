@@ -2743,7 +2743,7 @@ class AgentEngine:
         返回 `(文本, 是否回退)`——回退时调用方要在 filters 上打标
         （`contract_fallback`），否则「降级了」这件事对调用方不可见。
 
-        ## ⚠️ 数字守卫（ADR-0005，2026-10-21）
+        ## ⚠️ 数字守卫（2026-10-21 决策）
 
         解释路径此前**没有任何数字校验** ⇒ 模型编的数字（如「续航 802 公里」）
         直接进用户屏幕。工具循环有守卫、解释路径没有 ⇒ 同一个承诺（每句数字可溯源）
@@ -2751,7 +2751,7 @@ class AgentEngine:
 
         ⇒ 现在照抄工具循环的三级处理：**违规 → 回灌重写一次 → 再校验 → 仍不合格
         → 回退确定性模板**（宁可话糙，不编数据）。
-        判据只守**数字**不守**名字**（名字容差匹配误杀面更大，见 ADR-0005）。
+        判据只守**数字**不守**名字**（名字容差匹配误杀面更大）。
         """
         template = self._template_explanation(profile, result, source_names, evidence or [])
         if not self._llm.available:
@@ -2825,7 +2825,7 @@ class AgentEngine:
     def _explain_allowed_numbers(
         profile: UserProfile, result: dict, evidence: list[dict] | None
     ) -> set[float]:
-        """解释路径的**数字允许集**（与工具循环同口径，见 ADR-0005）。
+        """解释路径的**数字允许集**（与工具循环同口径）。
 
         = 候选款型（result）+ 检索证据（evidence）+ 画像（profile）里的数字。
 

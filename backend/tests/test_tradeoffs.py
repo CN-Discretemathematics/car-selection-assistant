@@ -10,8 +10,7 @@
 
 于是「最多 4 条」实际上限是 `4 + (候选车系数 - 1)`：每多一个车系就可能多塞一条。
 
-该 bug 此前不可达——`recommendation_tool` 从不往 `tradeoffs` 里 append
-（见 docs/refactoring-roadmap.md P4.6）。但取舍叙事是 sales-agent 提案里
+该 bug 此前不可达——`recommendation_tool` 从不往 `tradeoffs` 里 append。但取舍叙事是 sales-agent 提案里
 投入产出比最高的一步（L3 修活 tradeoffs 链），一旦启用就会立刻显形，
 故先修正并抽成可测函数。
 

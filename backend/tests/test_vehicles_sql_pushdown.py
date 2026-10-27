@@ -1,6 +1,6 @@
 """`/vehicles` 的 SQL 下推：与旧实现**逐条等价**（2026-10-21）。
 
-R7.2（engineering-standards）禁止「全表载入后在 Python 里过滤分页」。
+工程红线禁止「全表载入后在 Python 里过滤分页」。
 本笔把过滤 / 聚合 / 排序 / 分页下推到 SQL（`app/vehicles/listing.py`），
 于是必须证明**口径没变**——否则列表页会静默换一批车。
 

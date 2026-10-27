@@ -16,7 +16,7 @@
 
 ## 跳页表单为什么**不动**
 
-`docs/refactoring-roadmap.md` 把 `<form method="get">` 与裸 `<a>` 并列记为
+曾把 `<form method="get">` 与裸 `<a>` 并列记为
 「每次翻页整页重载」，但两者风险并不对等：原生 GET 表单不依赖 JS 即可工作
 （渐进增强），且隐藏域已把除 `page` 外的筛选参数原样带过去；改成 `router.push`
 只能省一次整页加载，代价是必须加 `"use client"` 客户端边界、并**亲手重建 query

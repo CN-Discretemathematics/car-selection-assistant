@@ -8,7 +8,7 @@
 锚点 = 全局分位（全库在售款型）+ 每个价格带的带内分位；带内样本 < --min-band-samples
 时该带/该指标回退全局。输出 p10/p50/p90 与样本数，文件提交 git，目录刷新后重跑。
 
-设计：docs/2026-10-27-scoring-v2-design.md §6；本脚本只读数据库。
+设计：docs/scoring-v2-design.md §6；本脚本只读数据库。
 """
 from __future__ import annotations
 
