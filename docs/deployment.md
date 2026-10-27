@@ -4,11 +4,15 @@
 阿里云侧（控制台运维：续费/防火墙/快照/RDS 账号与备份/OSS/RAM/域名备案）见
 [aliyun-ops.md](aliyun-ops.md)。
 
+> **脱敏说明**：本仓库是公开仓库，生产公网 IP 与账号名一律以 `<…>` 占位。
+> 实际值见云控制台与运维私库（本地 `backend/.env` / `.deploy/server.env`，均已 gitignore）。
+> 部署流程本身与真实值无关。
+
 ## 1. 生产服务器实际形态
 
 | 项 | 现状 |
 |---|---|
-| 主机 | 阿里云轻量应用服务器（2C2G，Alinux 3），公网 `121.41.4.12` |
+| 主机 | 阿里云轻量应用服务器（2C2G，Alinux 3），公网 `<生产机公网 IP>` |
 | 目录 | `/srv/carsel`（**文件同步式**，服务器上**没有 git**） |
 | 运行 | Docker Compose 三服务：`deploy-api` / `deploy-web` / `deploy-redis`，端口只绑 `127.0.0.1` |
 | 入口 | 宿主 nginx（`:80` + `:443`）→ `/` 与 `/api` 反代到容器；HTTPS 已上线（ACME 证书，HTTP 301 → HTTPS，2026-09，实态见 `deploy/nginx-https.conf`） |
@@ -146,20 +150,20 @@ install -m 755 /srv/carsel/deploy/carsel-deploy.sh /usr/local/bin/carsel-deploy.
 
 ```bash
 # 手工部署（例如刚合并、不想等到 5 点）
-ssh root@121.41.4.12 '/usr/local/bin/carsel-deploy.sh --force'
+ssh root@<生产机公网 IP> '/usr/local/bin/carsel-deploy.sh --force'
 
 # 只看状态
-ssh root@121.41.4.12 '/usr/local/bin/carsel-deploy.sh --check'
+ssh root@<生产机公网 IP> '/usr/local/bin/carsel-deploy.sh --check'
 
 # 回滚到上一版镜像（脚本自动回滚用同一机制）
-ssh root@121.41.4.12 'cd /srv/carsel/deploy && \
+ssh root@<生产机公网 IP> 'cd /srv/carsel/deploy && \
   docker tag deploy-api:rollback deploy-api:latest && \
   docker tag deploy-web:rollback deploy-web:latest && docker compose up -d'
 
 # 从本机手工推源码（自动化不可用时的兜底；服务器无 git，用仓库源码包）
 git archive --format=tar.gz -o /tmp/src.tar.gz <commit>
-scp -i .deploy/ecs_key /tmp/src.tar.gz root@121.41.4.12:/tmp/
-ssh -i .deploy/ecs_key root@121.41.4.12 'cd /srv/carsel && tar -xzf /tmp/src.tar.gz && \
+scp -i .deploy/ecs_key /tmp/src.tar.gz root@<生产机公网 IP>:/tmp/
+ssh -i .deploy/ecs_key root@<生产机公网 IP> 'cd /srv/carsel && tar -xzf /tmp/src.tar.gz && \
   rm -f /tmp/src.tar.gz && cd deploy && docker compose build api web && docker compose up -d'
 ```
 
@@ -218,13 +222,13 @@ carsel-nightly.sh --no-rebuild    # 只导入不重建（排障用）
 
 ```powershell
 # 一条命令开隧道，然后浏览器访问 http://127.0.0.1:8080/ops/rag
-ssh -i .deploy\ecs_key -L 8080:127.0.0.1:3000 root@121.41.4.12
+ssh -i .deploy\ecs_key -L 8080:127.0.0.1:3000 root@<生产机公网 IP>
 ```
 
 页面右上角填 **Bearer token**（保存在浏览器 localStorage），取值：
 
 ```powershell
-ssh -i .deploy\ecs_key root@121.41.4.12 "cat /root/carsel-admin-token.txt"   # 人工使用
+ssh -i .deploy\ecs_key root@<生产机公网 IP> "cat /root/carsel-admin-token.txt"   # 人工使用
 ```
 
 **多标签凭据（可单独吊销、可在审计里区分谁在操作）**：
@@ -380,7 +384,7 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
 
 ⚠️ **2026-10-22 观察缺口**：`shadow` 档的影子日志此前**结构性地没有**
 `brand_exclude`（7 个被跟踪键里少 1 个）⇒ 攒够样本也不等于看全了。
-修复见 [影子档看不见品牌排除项](2026-10-22-shadow-brand-exclude-observation.md)；
+修复见 commit `e62d604`（影子档补上品牌排除项的观察）；
 ⇒ **观察期要在该修复部署上线之后重新攒**，上一轮的样本是残的。
 
 📌 **怎么算「攒够」**：影子日志里应覆盖**全部 7 个被跟踪键**
@@ -390,7 +394,7 @@ curl -X POST -H "Authorization: Bearer $(cat /root/carsel-nightly-token.txt)" \
 但会让影子日志看起来「更空」。
 
 三档的能力表（谁该按哪个能力判断）见
-[三档能力表](2026-10-21-mode-capabilities.md)；闸门语义只在
+`backend/app/agent/preferences.py::ModeCapabilities`；闸门语义只在
 `backend/app/agent/preferences.py::ModeCapabilities` 一处定义。
 
 ## 10. 容器以非 root 运行（2026-10-22）

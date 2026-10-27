@@ -3,6 +3,10 @@
 面向本项目在阿里云上的实际资源，说明**哪些运维在控制台做、哪些必须 SSH**、操作顺序与已知坑。
 配套文档：[deployment.md](deployment.md)（部署与自动更新、管理入口）、[credential-rotation.md](credential-rotation.md)（凭据轮换）。
 
+> **脱敏说明**：本仓库是公开仓库，本文中的生产公网 IP、RDS 实例 ID、RAM 用户名与
+> OSS 桶名一律以 `<…>` 占位。实际值见云控制台与运维私库（本地 `backend/.env` /
+> `.deploy/server.env`，两者均已 gitignore）。操作步骤本身与真实值无关。
+
 ---
 
 ## 0. 先看结论：控制台 vs SSH
@@ -29,16 +33,16 @@
 
 | 资源 | 标识 | 规格/状态 | 用途 | 控制台入口 |
 |---|---|---|---|---|
-| 轻量应用服务器 | `121.41.4.12` | 2C2G，Alinux 3，Docker 26.1.3 | 跑 api / web / redis + 宿主 nginx | 轻量应用服务器 |
-| RDS PostgreSQL | `pgm-bp1awp4nb8p7is1b` | PG 18.0，`pg.n1e.1c.1m`（1C1G 基础版）+ 20GB，**包年包月，2026-10-06 到期** | 唯一事实源（车系/款型/参数/销量/来源） | 云数据库 RDS |
+| 轻量应用服务器 | `<生产机公网 IP>` | 2C2G，Alinux 3，Docker 26.1.3 | 跑 api / web / redis + 宿主 nginx | 轻量应用服务器 |
+| RDS PostgreSQL | `<RDS 实例 ID>` | PG 18.0，`pg.n1e.1c.1m`（1C1G 基础版）+ 20GB，**包年包月，2026-10-06 到期** | 唯一事实源（车系/款型/参数/销量/来源） | 云数据库 RDS |
 | OSS | bucket `car-selection` | 杭州，**ColdArchive**，无生命周期规则，对象仅数月度榜单 HTML（各 ~330KB） | 抓取快照归档（应用只写不读） | 对象存储 OSS |
 | RAM 用户 | `cloud_ali` | 只读策略（ReadOnlyAccess 等） | 运维巡检 CLI（**不能改资源**） | 访问控制 RAM |
-| RAM 用户 | `car-oss-worker` | 自定义单桶策略 `carselection-oss-bucket`，1 把 AK | 生产 OSS 上传凭据（最小权限） | 访问控制 RAM |
+| RAM 用户 | `<OSS RAM 用户>` | 自定义单桶策略 `<OSS 桶名>`，1 把 AK | 生产 OSS 上传凭据（最小权限） | 访问控制 RAM |
 | 域名 | `hp-car-selection-assistant.cn` | 万网注册，NS `dns23/24.hichina.com`；**ICP 已备案（2026-09）**，域名解析与 443 已上线 | 对外域名 | 域名 / 备案控制台 |
 | Zilliz Cloud | collection `car_docs` | Serverless，12418 切片 | 稠密向量检索（**非阿里云**） | Zilliz Cloud 控制台 |
 | DeepSeek / 模型服务 | — | API Key | LLM 与 embedding/rerank（**非阿里云**） | 各自平台控制台 |
 | 邮箱 SMTP | smtp.163.com | 授权码 | 验证码邮件（**非阿里云**） | 163 邮箱 |
-| 旧 ECS | `47.99.140.110` | **已释放** | 历史环境 | — |
+| 旧 ECS | `<旧 ECS 公网 IP>` | **已释放** | 历史环境 | — |
 
 ---
 
@@ -61,7 +65,7 @@
 |---|---|---|
 | **续费** | RDS 控制台 → 实例 → 续费 | ⚠️ **当前到期日 2026-10-06**，过期会锁库（LockMode 变 Locked → 应用整体不可用，`/api/v1/ready` 会红） |
 | 重置账号口令 / 新建账号 | 账号管理 | ⚠️ **顺序**：重置 → **立即**同步服务器 `/srv/carsel/backend/.env` 的 `DATABASE_URL` → `docker compose up -d --force-recreate api` → 跑 §5 验收。旧连接池会让 `/ready` 短暂仍绿（详见 §4） |
-| 白名单 | 数据安全性 → 白名单 | 当前 8 条（生产 `121.41.4.12` + 若干办公/家庭 IP + `172.16.0.0/12`）。本机调试连不上时先看这里是否加了你的出口 IP |
+| 白名单 | 数据安全性 → 白名单 | 当前 8 条（生产 `<生产机公网 IP>` + 若干办公/家庭 IP + `172.16.0.0/12`）。本机调试连不上时先看这里是否加了你的出口 IP |
 | 外网地址 | 数据库连接 | 实例是内网类型，**已开外网地址**（应用用的是 `pgm-…bo…` 公网 endpoint）。轻量服务器与 RDS 不同 VPC，必须走外网 |
 | 备份 / 恢复 | 备份恢复 | 自动全备保留 7 天 + 日志备份（可**按时间点恢复** PITR）。恢复演练：恢复到新实例 → 改 `.env` 指向新实例 → `--force-recreate api` → 验收 → 确认后再切回 |
 | 监控与告警 | 监控与报警 | 建议配：连接数、CPU、磁盘使用率阈值告警 |
@@ -85,7 +89,7 @@
 | 操作 | 路径 | 说明 |
 |---|---|---|
 | 新建/禁用 AccessKey | RAM → 用户 → 认证管理 | 每个用户最多 2 把；轮换时「先建新 → 切生产 → 验证 → 删旧」 |
-| 授权 | RAM → 权限管理 | `car-oss-worker` 挂自定义单桶策略（最小权限）；不要再给主账号 AK |
+| 授权 | RAM → 权限管理 | `<OSS RAM 用户>` 挂自定义单桶策略（最小权限）；不要再给主账号 AK |
 | 只读巡检 | `cloud_ali` | 本仓库 `.tools/aliyun/aliyun.exe` + `.tools/home/.aliyun/config.json` 用的就是它；**只读，改不了资源** |
 | 换 OSS 凭据 | 建新 AK → 写本地 `.env` | 然后走 `.tools/env_merge_dburl.py` 同步服务器 + 重建容器（见 credential-rotation.md） |
 
@@ -93,7 +97,7 @@
 
 | 操作 | 路径 | 说明 |
 |---|---|---|
-| 解析记录 | 云解析 DNS → 域名 → 解析设置 | 备案通过后添加 A 记录指向 `121.41.4.12`（`@` 与 `www`） |
+| 解析记录 | 云解析 DNS → 域名 → 解析设置 | 备案通过后添加 A 记录指向 `<生产机公网 IP>`（`@` 与 `www`） |
 | 实名认证 | 域名控制台 | `.cn` 必须实名；未实名/未过 serverHold 无法备案与解析 |
 | **ICP 备案** | 阿里云备案控制台 | 前置：域名实名、账号实名、**轻量实例剩余时长 ≥3 个月**；期间网站不要对公网开放域名访问 |
 | 证书（免费 DV） | 数字证书管理服务 | 备案通过后申请 → 配 nginx 443 + HSTS → 收窄 `CORS_ORIGINS` 为 https |
@@ -113,7 +117,7 @@
 
 ```bash
 # 进入服务器（管理入口已收紧到隧道，见 deployment.md §6）
-ssh -i .deploy/ecs_key root@121.41.4.12
+ssh -i .deploy/ecs_key root@<生产机公网 IP>
 
 # 站点与依赖状态
 curl -s localhost:8000/api/v1/ready          # {"status":"ready","checks":{"database":"ok","redis":"ok"}}

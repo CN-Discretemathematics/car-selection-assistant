@@ -116,7 +116,7 @@
 
 **先更正**：本文上一版写的是「本机无 LLM key，无法实测抽取质量」。**这是错的**——
 `backend/.env` 里有可用的 `DEEPSEEK_API_KEY`（模型 `deepseek-flash`），实测调用成功。
-与 `refactoring-roadmap.md` 里那条「本机无向量库/无 LLM key 跑不了评测」的更正同类：
+与此前「本机无向量库/无 LLM key 跑不了评测」的更正同类：
 **没核实就写「跑不了」，等于给后续判断埋一颗假地基。**
 
 （排查经过：先用 `max_tokens=8` 探测，拿到 HTTP 200 但 `content` 为空，差点又

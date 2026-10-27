@@ -1,5 +1,9 @@
 # 凭据轮换运行手册（Credential Rotation Runbook）
 
+> **脱敏说明**：本仓库是公开仓库，本文中的数据库用户名、RAM 用户名与 OSS 桶名
+> 一律以 `<…>` 占位。实际值见云控制台与运维私库（本地 `backend/.env` /
+> `.deploy/server.env`，均已 gitignore）。轮换流程本身与真实值无关。
+
 ## 1. 为什么需要轮换
 
 2026-09-13 的安全评审发现：仓库根目录此前**没有 `.dockerignore`**，`backend/.env` 落在 Docker
@@ -15,7 +19,7 @@
 | DeepSeek API Key | `DEEPSEEK_API_KEY` | ✅ 已轮换并同步生产 |
 | 嵌入模型 Key | `EMBEDDING_API_KEY` | ✅ 已轮换并同步生产 |
 | 重排模型 Key | `RERANK_API_KEY` | ✅ 已轮换并同步生产（与嵌入同值） |
-| OSS RAM AK/SK | `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | ✅ 已应急轮换（2026-09-13）：生产改用最小权限用户 `car-oss-worker` 的新 AK，两个泄露的 AK 均已删除，六项验收 + OSS 写入实测通过（见 §5-8、§6） |
+| OSS RAM AK/SK | `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` | ✅ 已应急轮换（2026-09-13）：生产改用最小权限用户 `<OSS RAM 用户>` 的新 AK，两个泄露的 AK 均已删除，六项验收 + OSS 写入实测通过（见 §5-8、§6） |
 | Zilliz / Milvus Token | `MILVUS_TOKEN` | ⬜ 未轮换（现网有效，`car_docs` 集合可 describe） |
 | SMTP 授权码 | `SMTP_PASSWORD` | ⬜ 未轮换（现网有效，登录实测通过） |
 
@@ -146,14 +150,14 @@ curl -s -X POST localhost:8000/api/v1/auth/email-code -H 'Content-Type: applicat
 
 ### 关键发现：应用账号可以改自己的口令
 
-`hpadmin` 不是超级用户（`rolsuper=False`），但 PostgreSQL 允许**任何角色改自己的口令**；
+`<数据库用户>` 不是超级用户（`rolsuper=False`），但 PostgreSQL 允许**任何角色改自己的口令**；
 阿里云 RDS 对普通账号的这项权限**未加限制**。实测（**空改**，用同一个口令做 `ALTER USER`，
 零风险探针）：
 
 ```
 ALTER: OK
 NEW_PASSWORD_CONN OK
-OLD_PASSWORD_CONN FAIL  FATAL: password authentication failed for user "hpadmin"
+OLD_PASSWORD_CONN FAIL  FATAL: password authentication failed for user "<数据库用户>"
 ```
 
 ⇒ **RDS 口令轮换可以完全自助，不需要进控制台**（控制台入口留给 AK/密钥托管那类无法自助的凭据）。
@@ -194,13 +198,13 @@ OLD_PASSWORD_CONN FAIL  FATAL: password authentication failed for user "hpadmin"
 
 | RAM 用户 | 创建时间 | 权限 | 现状 |
 |---|---|---|---|
-| `car-oss-worker` | 2026-08-29 | 自定义策略 `carselection-oss-bucket`（单桶最小权限） | **生产在用**：2026-09-13 新建 AK（旧 AK 已删除） |
+| `<OSS RAM 用户>` | 2026-08-29 | 自定义策略 `<OSS 桶名>`（单桶最小权限） | **生产在用**：2026-09-13 新建 AK（旧 AK 已删除） |
 | `power-application-user` | 2026-09-12 | `PowerUserAccess`（过宽） | 已无 AccessKey（泄露的 AK 已删除）；权限仍过宽，确认无其他依赖后建议删除或降权 |
 | `cloud_ali` | 2026-09-04 | `ReadOnlyAccess` + 各服务 `*ReadOnlyAccess` | 运维/巡检 CLI（因此 AK 的建/删必须人工在控制台做） |
 
 - **轮换 OSS AK 的正确路径**：RAM 控制台 → 用户 → 认证管理 → 创建 AccessKey（每个用户最多 2 个）
   → 新值写入本地 `.env` → 同步生产并验证 → 再禁用/删除旧 AK。
-- **权限收敛建议**：OSS 用途留在最小权限用户（当前已是 `car-oss-worker` + 单桶策略）；
+- **权限收敛建议**：OSS 用途留在最小权限用户（当前已是 `<OSS RAM 用户>` + 单桶策略）；
   不要用 `PowerUserAccess` 的账号。
 - 控制台入口：<https://ram.console.aliyun.com/users> → 目标用户 → **认证管理** → AccessKey 的
   禁用 / 删除（OSS 控制台本身**没有** AK 管理入口，这是常见误区）。
@@ -209,7 +213,7 @@ OLD_PASSWORD_CONN FAIL  FATAL: password authentication failed for user "hpadmin"
 
 - **周期**：常规 90 天一轮；人员变动、疑似泄漏、凭据误提交时立即轮换。
 - **权限收敛（待办）**：`power-application-user` 降权或删除（见 §6）；RDS 拆「应用账号 / 运维账号」
-  （2026-10-22 二次轮换后仍是 `hpadmin` 一个账号**既跑应用又做运维**，只是口令可自助改了）；
+  （2026-10-22 二次轮换后仍是 `<数据库用户>` 一个账号**既跑应用又做运维**，只是口令可自助改了）；
   `.env` 逐步迁移到 KMS / 密钥托管（当前决策为暂缓）。
 - **管理凭据与入口已加固（2026-09-14）**：
   * 凭据改为**多标签** `ADMIN_API_TOKENS="label:token,..."`——可单独吊销，审计里能区分
@@ -221,7 +225,7 @@ OLD_PASSWORD_CONN FAIL  FATAL: password authentication failed for user "hpadmin"
   * **仍未解决**：凭据 ≠ 身份。凭据被转交或复制后，无法证明操作者是谁本人；要做到「人」级别
     需要短期会话（token 换 30 分钟会话）或账号体系，列为后续项。
 - **已完成**：生产 `CORS_ORIGINS` 已由旧 ECS 来源改为正式域名集合
-  （`https://hp-car-selection-assistant.cn`、`https://www.…`、`http://…`、`http://121.41.4.12`），
+  （`https://hp-car-selection-assistant.cn`、`https://www.…`、`http://…`、`http://<生产机公网 IP>`），
   预检验证通过：正式域名回 `access-control-allow-origin`，旧来源被拒。
 - **已完成（2026-09）**：域名解析与 nginx `server_name` + 443 已上线（`deploy/nginx-https.conf` 为线上实态）；
   `CORS_ORIGINS` 收窄为 https 域名集合（见上一条「已完成」）。
