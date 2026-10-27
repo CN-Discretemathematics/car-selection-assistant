@@ -1,6 +1,6 @@
 """评分 v2：七维、固定锚点、全部同价位比较（纯函数）。
 
-设计：docs/2026-10-27-scoring-v2-design.md；ADR：docs/adr/0008-scoring-v2-seven-dimensions.md。
+设计：docs/scoring-v2-design.md。
 
 本模块**不 import tools/engine**，只依赖标准库与 app.agent.weights，避免循环依赖。
 锚点来自 backend/app/agent/scoring_anchors_v2.json（由 tools/gen_scoring_anchors.py 生成），

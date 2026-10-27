@@ -1,6 +1,6 @@
 # 评分 v2 设计：七维固定锚点确定性打分
 
-- 状态：设计稿，待评审（评审通过前不改产品代码）
+- 状态：accepted（2026-10-27 用户拍板；已落地为 `backend/app/agent/scoring_v2.py`）
 - 日期：2026-10-27
 - 依据：用户 2026-10-27 对第一轮 6 问（Q0–Q6）与第二轮 6 问（Q1–Q6）的确认
 - 关联报告：.tmp/review/scoring-data.md、.tmp/review/scoring-methods.md、.tmp/review/scoring-change-surface.md
@@ -30,14 +30,14 @@
 
 | 问题 | 现状 | 证据 |
 | --- | --- | --- |
-| 批内归一化 | 舒适/智能按本批候选最大值归一，再重算总分；同一款车换候选池分数就变 | tools.py:831-856；docs/2026-10-24-variant-level-scoring.md:62-63 |
+| 批内归一化 | 舒适/智能按本批候选最大值归一，再重算总分；同一款车换候选池分数就变 | tools.py:831-856 |
 | 缺数据语义不一致 | 空间/动力缺失记 0.5，舒适/智能缺失记 0.0 参与加权 | tools.py:729-752、754-774 |
 | 锚点硬编码 | 车长 4300–5200mm、功率 80–300kW 写死，无版本无出处 | tools.py:734、751 |
 | 预算名不副实 | 硬过滤后预算分恒 1.0；只在只给上限/无预算时有变化 | tools.py:705-714 |
 | 能耗不读能耗 | energy 只看 energy_type（1.0/0.7/0.4），不读油耗/电耗 | tools.py:737-744 |
 | 安全无独立维度 | 安全/操控配置被并入 comfort 的标配项计数 | tools.py:315、754-774；weights.py:122-152 |
 | 养护是代理 | maintenance = 品牌在库车系数 + 是否有销量记录，同品牌全系同分 | tools.py:776-781 |
-| 同车系同质化 | 2026-10-24 生产逸动 3 款型同分 0.8816；修后仍只有 comfort/intel 区分 | docs/2026-10-24-variant-level-scoring.md |
+| 同车系同质化 | 2026-10-24 生产逸动 3 款型同分 0.8816；修后仍只有 comfort/intel 区分 | 生产快照实测 |
 
 ### 1.3 数据事实（本地生产快照 backend/.tmp/eval-local.db，2026-10-03）
 
@@ -420,7 +420,7 @@ backend/app/agent/scoring_v2.py（纯函数，不 import tools/engine）：
 - 覆盖：平均 coverage ≥0.75；low_evidence 候选占比 ≤15%。
 - 维度区分度：全库每维 utility 的 p10–p90 跨度 ≥0.20（否则说明锚点饱和）。
 - 人工金标（若人力允许）：30 画像 × 每位抽 10 对人工盲评（300 对），pairwise accuracy ≥0.60，且 v2 ≥ v1；Cohen kappa 报告。
-- 延迟：离线 p95 不高于 v1 的 1.2 倍，且整体 recommend 链路 p95 <4.5s（当前 p50 3.09s、max 4.13s，见 refactoring-roadmap.md:424-439）。
+- 延迟：离线 p95 不高于 v1 的 1.2 倍，且整体 recommend 链路 p95 <4.5s（当前 p50 3.09s、max 4.13s）。
 - 评测纪律：冻结候选池（全量 5000，不用 top5 比较）、冻结锚点/快照/画像、同池 paired 比较、按覆盖率/价格/能源分层报告；禁止跨批均值比较。
 
 ### 10.3 工具
@@ -432,7 +432,7 @@ backend/app/agent/scoring_v2.py（纯函数，不 import tools/engine）：
 ## 11. 迁移、灰度与回滚
 
 - 无数据库迁移：不新增列/表；锚点是代码内 JSON；spec_facts 已存在。若后续性能需要物化特征表，另立设计。
-- Phase 0 设计评审 + ADR-0008（本文通过后）。
+- Phase 0 设计评审（本文通过后）。
 - Phase 1 实现 v2 + 开关 off；CI 全绿；v1 逻辑保留。
 - Phase 2 生成锚点（生产快照）→ 离线评测 → 人工评审 20 个典型场景。
 - Phase 3 影子：AGENT_SCORING_MODE=shadow；线上仍 v1；记录差异与耗时；检查无异常。
@@ -441,21 +441,22 @@ backend/app/agent/scoring_v2.py（纯函数，不 import tools/engine）：
 - 监控：日志字段 scoring_version、candidate_hash、top5_diff、score_delta、coverage_mean、low_evidence_rate、latency；锚点版本变更单独告警。
 - 灰度若需按用户比例：本仓无 per-user flag 基建；先用 env 全量切换 + 影子兜底；要比例灰度另立小改动，不在本版范围。
 
-## 12. 文档红线豁免与 ADR
+## 12. 文档红线豁免
 
 本次显式豁免以下既有约束，必须留下书面记录，不能静默改：
 
-1. docs/2026-10-20-architecture-and-product-plan.md:229-237 §六 第 3 条“不改 recommendation_tool 硬约束下推与 8 维打分”：
-   - 硬约束下推仍不改；8 维打分被本设计取代，需在该条追加“2026-10-27 用户决策，豁免 8 维部分，见 docs/2026-10-27-scoring-v2-design.md 与 ADR-0008”。
-2. docs/2026-10-21-deferred-items-execution-plan.md:91 的同类红线描述同步追加豁免。
-3. docs/adr/0003-data-scope-parity-with-autohome.md:15 的“8 维确定性打分”改为“评分 v2 的确定性打分（七维，见 ADR-0008）”。
-4. 新增 docs/adr/0008-scoring-v2-seven-dimensions.md：
-   - 决策：七维、固定锚点、缺数据中性、安全配置独立维度、预算/能源作硬约束。
+1. 原「不改 recommendation_tool 硬约束下推与 8 维打分」红线：
+   - 硬约束下推仍不改；8 维打分被本设计取代——2026-10-27 用户决策，豁免 8 维部分（见本文）。
+2. 原「待立项项落地方案」里的同类红线描述同步适用上述豁免。
+3. 原「数据规模与汽车之家对齐」决策里的“8 维确定性打分”改为
+   “评分 v2 的确定性打分（七维，见本文 §2）”。
+4. 决策记录（七维、固定锚点、缺数据中性、安全配置独立维度、预算/能源作硬约束）：
    - 背景：批内归一化、缺数据不一致、预算恒 1.0、能耗不读能耗、安全/养护无维度。
    - 后果：weights_used 契约变更；安全仅配置代理、不承诺碰撞；旧 8 维测试与文案需更新。
-   - 替代方案：保留旧 8 键（否，语义错误）、学习型权重（推迟，缺标签）、LLM rerank（不做，违反 ADR-0002）。
-5. docs/2026-10-24-variant-level-scoring.md 顶部加“已被 scoring-v2 取代”的链接，保留历史记录。
-6. README 中“8 维打分”相关描述改为七维并链接设计文档；docs/optimization-progress.md 新增一节记录本次变更（不再改历史章节）。
+   - 替代方案：保留旧 8 键（否，语义错误）、学习型权重（推迟，缺标签）、
+     LLM rerank（不做，违反「不做 agentic RAG」的既定决策）。
+5. 原「款型级评分」文档顶部已加“已被 scoring-v2 取代”的标记（该文档已移出仓库）。
+6. README 中“8 维打分”相关描述改为七维并链接设计文档。
 7. weights.py:122-152 注释、test_soft_prefs.py:97、test_route_emphasis_beats_advice.py:127-129、test_agent.py 的 safety 用例同步修改，并在测试名/注释中写明“安全配置水平，非碰撞安全”。
 
 ## 13. 风险与未验证项
@@ -478,7 +479,7 @@ backend/app/agent/scoring_v2.py（纯函数，不 import tools/engine）：
 
 | 阶段 | 交付 | 估时（人日） |
 | --- | --- | --- |
-| 0 | 本设计评审 + ADR-0008 | 0.5 |
+| 0 | 本设计评审 + 决策记录 | 0.5 |
 | 1 | 锚点生成脚本 + 初始锚点 JSON + 校验 | 1 |
 | 2 | scoring_v2.py 纯函数 + 单测 | 2 |
 | 3 | tools/engine/soft_prefs/turn 接线 + flag + shadow 日志 | 2 |
@@ -494,7 +495,7 @@ backend/app/agent/scoring_v2.py（纯函数，不 import tools/engine）：
 ## 15. 验收清单
 
 - [x] 设计评审通过，Q3 已确认为“全部七维同价位”（2026-10-27 01:19）
-- [ ] ADR-0008 合入，红线豁免写入计划文档
+- [x] 决策已拍板（七维、固定锚点），红线豁免已记录
 - [ ] 锚点脚本可在生产快照上 dry-run，输出每带 n 与 p10/p50/p90
 - [ ] v2 单测覆盖 §9.3 全部不变量
 - [ ] v1 守卫测试零改动作仍绿

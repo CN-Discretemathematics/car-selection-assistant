@@ -8,8 +8,8 @@
 但对「结构正在腐化」这件事毫无发言权——`engine.py` 涨到 1968 行、某函数复杂度
 飙到 261，测试全绿也照样通过。
 
-本脚本把 `docs/engineering-standards.md` §4.2 定义的 8 维指标变成**可复算的
-报告**，供 CI 归档为 artifact。看板存在 = 坏味道没有被忽略。
+本脚本把 8 维代码质量指标变成**可复算的**
+报告，供 CI 归档为 artifact。看板存在 = 坏味道没有被忽略。
 
 设计约束
 --------
@@ -44,7 +44,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# ── 阈值（docs/engineering-standards.md §4.2）────────────────────────────────
+# ── 阈值（质量指标看板）────────────────────────────────────────────
 THRESHOLDS = {
     "cc-cognitive": 15,   # 新增函数上限；存量超标走递减冻结
     "cc-mccabe": 10,
@@ -285,7 +285,7 @@ def report() -> dict:
 def print_report(m: dict) -> None:
     W = 62
     print("=" * W)
-    print("代码质量指标看板（8 维）—— docs/engineering-standards.md §4.2")
+    print("代码质量指标看板（8 维）—— 口径见本脚本 THRESHOLDS")
     print("看板存在 = 坏味道没被忽略。只报不拦是默认策略（存量超标是既成事实）。")
     print("=" * W)
 

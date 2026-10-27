@@ -100,8 +100,7 @@ def test_explain_path_must_not_invent_numbers(client: TestClient, db_session: Se
     修之前：解释路径（`engine.py::_explain`）**没有任何数字守卫**
     ⇒ 编造的数字直接进用户屏幕（工具循环有守卫，解释路径没有）。
 
-    判据按 [ADR-0005](docs/adr/0005-explain-path-numbers-only.md)：
-    **只守数字，不守名字**；允许集 = 候选款型 + 检索证据 + 画像（与工具循环同口径）。
+    判据：**只守数字，不守名字**；允许集 = 候选款型 + 检索证据 + 画像（与工具循环同口径）。
     """
     _seed_cars(db_session)
     fake = _FakeLLM([

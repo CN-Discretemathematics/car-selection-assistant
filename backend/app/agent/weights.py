@@ -144,7 +144,7 @@ WEIGHT_DIM_KEYWORDS: tuple[tuple[str, str], ...] = (
 )
 # ⚠️ 以下说明只适用于 **v1 八维**（AGENT_SCORING_MODE=off）。
 # v2 已新增真正读安全配置事实的 safety 维，词表见下方 WEIGHT_DIM_KEYWORDS_V2；
-# 旧红线的豁免记录见 docs/adr/0008-scoring-v2-seven-dimensions.md。
+# 旧红线的豁免记录见 docs/scoring-v2-design.md。
 #
 # v1 里「安全 / 碰撞 / 气囊」**刻意不映射到任何维度**（契约由测试钉住，见
 # tests/test_agent.py::test_safety_emphasis_is_deliberately_unmapped）：
@@ -157,7 +157,7 @@ WEIGHT_DIM_KEYWORDS: tuple[tuple[str, str], ...] = (
 
 # ── 评分 v2（七维、固定锚点、全部同价位比较）────────────────────────────────
 #
-# 2026-10-27 用户决策：见 docs/2026-10-27-scoring-v2-design.md 与 ADR-0008。
+# 2026-10-27 用户决策：见 docs/scoring-v2-design.md。
 # v1 八维常量保留在文件上半部分，供 AGENT_SCORING_MODE=off 的旧内核使用；
 # v2 用下面的七维常量。两套常量同时存在是**刻意的**：开关 off 必须逐位回到
 # 旧行为，不能靠改默认权重“顺便”切换。

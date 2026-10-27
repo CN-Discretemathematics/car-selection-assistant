@@ -76,7 +76,7 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["app", "tools"]
 
-# ── 复杂度（docs/engineering-standards.md §4.2 的指标 1/2/6）────────────────
+# ── 复杂度（质量指标看板的指标 1/2/6）─────────────────────────────
 # ⚠️ max-complexity = 20 是**报告线不是拦截线**。
 # 存量有 43 个函数 > 20、7 个 ≥ 51（最大 148），一次性 fail 会把 CI 直接打红。
 #

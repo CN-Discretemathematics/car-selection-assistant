@@ -362,7 +362,7 @@ def check_dangling_refs(docs: list[tuple[Path, list[str]]]) -> None:
                 token = token.split("::", 1)[0]  # 「path.py::func」只核对文件部分
                 # 「path.py:123」/「path.py:12-20」/「path.py:1,5,9」同样只核对文件部分。
                 # 2026-10-02：本门禁原先只认 `::` 不认 `:`，导致文档无法写精确行号——只能写裸路径，
-                # 评审结论失去可点击/可核对性（docs/engineering-standards.md 首次批量引用行号时暴露）。
+                # 评审结论失去可点击/可核对性（首次批量引用行号时暴露）。
                 # 行号本身不在本门禁职责内（它核对「路径是否存在」），行号准确性由作者负责。
                 token = LINE_SUFFIX_RE.sub("", token)
                 if not token or any(s in token for s in TOKEN_SKIP_SUBSTR):

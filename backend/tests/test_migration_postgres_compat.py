@@ -15,9 +15,8 @@
 生产因此停在 13 天前。
 
 **而本地与 CI 永远测不出来**：本机与 CI 的测试库都是 SQLite，
-SQLite 接受 `BOOLEAN DEFAULT 0`。`docs/2026-10-20-durable-preference-memory.md`
-早就写过这句话——「生产走 alembic upgrade head，本地开发走 create_all，
-两条建表路径只要有一处不一致，缺陷就**只在生产暴露**」。这次就是那句话应验。
+SQLite 接受 `BOOLEAN DEFAULT 0`。「生产走 alembic upgrade head，本地开发走 create_all，
+两条建表路径只要有一处不一致，缺陷就**只在生产暴露**」——这次就是那句话应验。
 
 ## 本测试做什么
 

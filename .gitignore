@@ -77,6 +77,11 @@ backend/.embed_cache.json*
 /.tmp/
 *.tgz
 
+# ── 本地 worktree 检出（并行开发隔离用，见 AGENTS.md「并行会话纪律」）──
+# 此前未忽略：skills/doc_sync_check.py 会 rglob 扫到 .worktrees/ 下的三份
+# 仓库副本，把它们的悬空引用算成本仓的 FAIL ⇒ 本地门禁恒红、CI 却绿。
+/.worktrees/
+
 # ── 覆盖率产物（2026-10-03）──
 # backend job 起用了 --cov，产物落在 backend/ 下。此前 .coverage 既不在
 # 索引也不在 ignore，`git add -A` 会把二进制覆盖率库提交进仓库。
@@ -95,7 +100,6 @@ backend/.embed_cache.json*
 #     结果是 node_modules 被清空且不重建（tsc/eslint 全部「command not found」，
 #     而 pnpm 自己仍报 "Already up to date"）。
 # 三处版本现状：CI 固定 pnpm 9；生产 Dockerfile 用 corepack 且**未钉版本**；
-# 本机 pnpm 11.9.0。收敛它是独立决策（会改生产安装路径），本轮不动，
-# 已记入 docs/refactoring-roadmap.md。
+# 本机 pnpm 11.9.0。收敛它是独立决策（会改生产安装路径），本轮不动。
 web/pnpm-workspace.yaml
 web/pnpm-workspace.yaml.*
