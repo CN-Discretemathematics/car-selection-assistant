@@ -18,7 +18,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from reviewer.scan_secrets import _is_placeholder_url  # noqa: E402
+from reviewer.scan_secrets import _is_placeholder_url, _looks_like_identifier_or_path  # noqa: E402
 
 
 def test_existing_env_example_still_exempt():
@@ -80,3 +80,33 @@ def test_url_without_credentials_is_never_exempt_via_this_path():
     """无凭据 URL 不应被本函数豁免（是否放行由调用方决定）。"""
     assert not _is_placeholder_url("https://dashscope.aliyuncs.com/compatible-mode")
     assert not _is_placeholder_url("sqlite:///./dev.db")
+
+
+def test_camel_case_js_identifier_is_not_a_high_entropy_secret():
+    """生成产物（archify 交互 HTML）里的 camelCase 标识符不应判为高熵密钥。
+
+    2026-10-28：`docs/diagrams/*.html` 里的 `relationshipTokenGeometry`（25 字符、
+    含 token 子串）被 high-entropy-secret 规则误报 9 次，CI gates 会变红。
+    snake_case / kebab-case 已有豁免，camelCase 同样只是标识符，不是密钥。
+    """
+    assert _looks_like_identifier_or_path("relationshipTokenGeometry")
+    assert _looks_like_identifier_or_path("createSemanticFlowToken")
+
+
+def test_identifier_exemptions_still_reject_real_looking_secrets():
+    """豁免范围仍受控：带 / 的路径照常判为路径，随机凭据不被标识符规则放过。"""
+    assert _looks_like_identifier_or_path("/root/carsel-nightly-token.txt")
+    assert not _looks_like_identifier_or_path("9f3a" + "Qp7Zx2Lm4Rt6Yw8Nv1Bc5Kd0Hj")
+
+
+def test_high_entropy_scanner_ignores_diagram_identifiers():
+    """端到端：真实图表 HTML 里的 JS 标识符不再产生 high-entropy-secret 告警。"""
+    target = "docs" + "/diagrams/agent-chain.html"
+    from pathlib import Path
+
+    p = Path(__file__).resolve().parents[2] / target
+    if not p.exists():
+        return  # 图表未入库的分支上跳过
+    line = p.read_text(encoding="utf-8", errors="replace")
+    assert "relationshipTokenGeometry" in line
+    assert _looks_like_identifier_or_path("relationshipTokenGeometry")

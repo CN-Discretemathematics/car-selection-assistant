@@ -128,6 +128,8 @@ graph TD;
 
 ### 4.2 检索量化指标
 
+> 2026-10-28 复核：本节保留 2026-09 历史口径（作为设计依据与回归基准）；最新复测结果、指标含义与逐项来源见 [docs/evaluation.md](docs/evaluation.md)。
+
 **旧口径（451 题锚定判定 · 真云 dense）**——历史回归基准：
 
 | 策略 | Hit@5 | MRR | NDCG@10 | 耗时 |
@@ -145,33 +147,38 @@ graph TD;
 | 重建成功率 | 0/3（OOM×2 / RDS 超时） | 3/3 |
 
 **评测规范 v2 口径（信息需求对齐判定）**——参数/推荐/语义/对比桶的针对性指标。
-**下表为最新一次测评（v4 检索侧闭环 + compare 回退，2026-09-11）的真值**：
+**下表按两种判定队列口径分别列出（2026-09 历史真值）**：
 
-| v2 指标 | sparse | pipeline |
+| v2 指标 | 451 题口径（valid 156，`eval-v6b`） | 531 题口径（valid 236，`eval-v4a2` / `eval-v6-final`） |
 | --- | --- | --- |
-| fact-coverage@5（参数题，115 题） | 0.7234 | **0.7660** |
-| valid-hit@5（recommend+semantic，257 题） | 0.4167 | **0.8136** |
-| valid-precision@5 | 0.1731 | **0.6992** |
-| valid-MRR | 0.2674 | **0.7607** |
-| pair-coverage@5（compare，79 题） | 0.439 | **0.5854**（款型名解析修复 + 双侧召回保障 + 撞名修复后诚实口径） |
+| fact-coverage@5（参数题） | 0.7660 | 0.7660 |
+| valid-hit@5 | 0.7885 | 0.8136 |
+| valid-precision@5 | 0.6064 | 0.6992 |
+| valid-MRR | 0.7027 | 0.7607 |
+| pair-coverage@5（compare） | 0.4390 | 0.5854（`eval-v6-final`） |
+
+> ⚠️ 两个口径的判定队列不同（156 vs 236），**同一指标名的两个值不能直接相减**；
+> 2026-10-28 复测取 451 题口径：valid-hit 0.9872 / valid-precision 0.9718 / valid-MRR 0.9872 / pair 0.5610 / fact 0.7660（见 [docs/evaluation.md](docs/evaluation.md)）。
 
 > 旧口径三处失真：① semantic/recommend 单锚点判定（一题多解说成不相关）→ 约束满足度判定；
 > ② Recall@5 分母 = 相关车系全部切片（均值 15 条，结构上限 0.4773）→ fact-coverage 补充；
 > ③ compare 单侧在场即算命中 → pair-coverage 补充。旧口径并排保留（回归可比），
 > `recall_ceiling` 随报告输出。
 
-**历史口径（归档，勿引用为现状）**——同一指标名在口径演进中出现过多个值，逐条留档：
+**历史口径（归档，勿引用为现状）**——同一指标名在口径演进中出现过多个值，逐条留档（2026-10-28 已按服务器归档报告核对）：
 
 | 指标（pipeline） | 历史值 | 时点 / 口径 | 出处 |
 | --- | --- | --- | --- |
-| valid-hit@5 | 0.7885 | 2026-09-10 v2 口径**首跑** | `eval-v6b.md` |
-| valid-precision@5 | 0.6064 | 同上 | `eval-v6b.md` |
-| valid-MRR | 0.7027 | 同上 | `eval-v6b.md` |
-| valid-hit@5 | 0.8432 | 531 题「诚实口径复测」 | ⚠️ **`backend/eval/` 内无原始报告**，仅见于历史 README |
-| valid-precision@5 | 0.8008 | 同上 | ⚠️ 同上 |
+| valid-hit@5 | 0.7885 | 2026-09-10 v2 口径首跑 | `eval-v6b.json`（451 题，valid 156） |
+| valid-precision@5 | 0.6064 | 同上 | 同上 |
+| valid-MRR | 0.7027 | 同上 | 同上 |
+| pair-coverage@5 | 0.4390 | 同上 | 同上 |
+| valid-hit@5 | 0.8432 | 2026-09-11 诚实口径复测（531 题，valid 236） | `eval-v6-final.json`（09-11T12:47Z） |
+| valid-precision@5 | 0.8008 | 同上 | 同上 |
+| pair-coverage@5 | 0.5854 | 同上 | 同上 |
 
-> **冲突处理原则**：取**最新一次有原始文件支撑**的测评（即上表 v4 闭环一组）为真值；
-> 无原始文件支撑的 `0.8432` / `0.8008` 只作历史归档，不得作为现状引用。
+> **冲突处理原则**：同一口径（题集 + 判定队列）内取**最新一次有原始文件支撑**的报告为真值；
+> 跨口径（451 vs 531）只作趋势参考，不得直接相减。**2026-10-28 起指标以 [docs/evaluation.md](docs/evaluation.md) 为准。**
 > 完整逐次记录（E01–E30）与 13 条口径警告见 `backend/eval/EVAL_LOG.md`（本地，不入仓库）。
 
 ### 4.3 答案层（LLM-as-judge + 确定性 faithful_db）
@@ -200,20 +207,24 @@ graph TD;
 
 | 报告 | 口径 | 要点 |
 | --- | --- | --- |
-| `eval/ab-v9-final.json` | 451 题 · inmemory 纯稀疏 | v9b analyze 修正收敛 |
-| `eval/comprehensive-baseline.json` | 451 题 · 全策略消融收敛 | 生产配置确认为局部最优 |
-| `eval/eval-pipeline-final.json` | 451 题 · 真云 dense | 生产基线 0.6763/0.6656/0.6138 |
+| `eval/eval-pipeline-final.json` | 451 题 · 真云 dense | 生产基线 0.6763/0.6656/0.6138（gen 2026-09-09T02:08Z，elapsed 418.9s） |
+| `eval/eval-v6b.json` | 451 题 · v2 首跑 | valid-hit 0.7885 / precision 0.6064 / MRR 0.7027 / pair 0.4390 |
+| `eval/eval-v4a.json` | 531 题 · 约束下推首跑 | valid-hit 0.8136 / precision 0.6992 / MRR 0.7607 |
+| `eval/eval-v4a2.json` | 531 题 · 约束下推 + compare 回退 | 0.8136 / 0.6992 / 0.7607（gen 2026-09-11T08:06Z，elapsed 395.7s） |
+| `eval/eval-v6-final.json` | 531 题 · v2 诚实口径 | 0.8432 / 0.8008 / pair 0.5854（gen 2026-09-11T12:47Z） |
 | `eval/eval-v3a.json` | 531 题 · v2 口径（.json 实测题数；报告曾标 600） | semantic vhit 1.0（口径修正） |
-| `eval/eval-v3b.json` | 口语化改写体（题数三值并存：报告 167 / 生成侧 163 / .json 144） | 词面泄漏量化：fact-coverage −10pt |
+| `eval/eval-v3b.json` | 口语化改写体（历史报告 n=144） | 词面泄漏量化：fact-coverage −10pt |
 | `eval/eval-v3c.json` | 80 多约束专项 | 旧口径 0.075 vs v2 valid-hit 0.65 |
-| `eval/eval-judge.json` | 100 题 · 答案层 judge | faithful_db 0.7765、双评一致 0.913 |
+| `eval/eval-judge-v6.json` | 100 题 · qwen3.8-flash judge | faithful_db 0.7765、双评一致 0.913（gen 2026-09-11T07:28Z） |
+| `eval/eval-judge.json` | 100 题 · qwen-plus judge（另一次） | 与 `eval-judge-v6.json` 是两份不同报告，勿混用 |
 
-> ⚠️ 两处口径提醒：① 上表 `eval-v4a2.json`（531 题 · 约束下推+compare 回退，即
-> §4.2 真值那一组的原始文件）**在本地 `backend/eval/` 中已缺失**，`0.6992` 现仅见于
-> §4.1/§4.2 与 `backend/app/rag/pipeline.py` 的注释；② 曾写作 `eval-judge-v6.json`
-> 的文件实际名为 `eval-judge.json`。**权威索引与全部口径冲突见 `backend/eval/EVAL_LOG.md`。**
+> ⚠️ 口径提醒（2026-10-28 已核对）：① `eval-v4a2.json` 与 `eval-judge-v6.json` 原件在服务器
+> `backend/eval/` 归档中存在（本地目录缺失），本文数字已按恢复件核对；RAG.md 旧版「eval-v4a2
+> 缺失」「eval-judge-v6.json 实际名为 eval-judge.json」两句均不成立。② 2026-10-23 那版
+> README 的「复测」列没有任何归档报告（仅 commit 02413e6 改 README），其 NDCG@10 实际是
+> @5 NDCG。**权威索引与全部口径冲突见 [docs/evaluation.md](docs/evaluation.md) 与 `backend/eval/EVAL_LOG.md`。**
 
-（以上均在 `backend/eval/` 本地存档，不入仓库。）
+（以上均在 `backend/eval/` 本地/服务器存档，不入仓库。）
 
 ## 5. 流程管理可视化
 
